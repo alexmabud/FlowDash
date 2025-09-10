@@ -3,10 +3,25 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# --- Caches de ferramentas ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.cache/
+
+# --- Build/empacotamento ---
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
 # --- Ambientes/segredos ---
 .venv/
 venv/
 .env
+.env.*
 
 # --- OS/IDE ---
 .DS_Store
@@ -26,6 +41,6 @@ data/**
 !data/flowdash_template.db
 !data/.gitkeep
 
-# (Extra) Caso exista regra global para *.db, garante o template:
+# (Extra) Se houver regra global para *.db, garante o template:
 *.db
 !data/flowdash_template.db
