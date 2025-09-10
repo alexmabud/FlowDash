@@ -3,5 +3,29 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# --- Pastas "data" (na raiz e em qualquer subpasta) ---
-data/
+# --- Ambientes/segredos ---
+.venv/
+venv/
+.env
+
+# --- OS/IDE ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Streamlit ---
+.streamlit/
+
+# --- Logs ---
+*.log
+
+# --- Dados: ignore tudo em data/ exceto o template ---
+data/**
+!data/
+!data/flowdash_template.db
+!data/.gitkeep
+
+# (Extra) Caso exista regra global para *.db, garante o template:
+*.db
+!data/flowdash_template.db
