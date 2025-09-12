@@ -133,7 +133,7 @@ def render_saida(
             listar_boletos_em_aberto_fn=listar_boletos_em_aberto_fn,   # pode não existir em versão antiga
             listar_empfin_em_aberto_fn=listar_empfin_em_aberto_fn,     # pode não existir em versão antiga
         )
-    except TypeError as te:
+    except TypeError:
         # Fallback para assinatura antiga (sem os dois kwargs finais)
         payload = render_form_saida(
             data_lanc=_data_lanc,
@@ -156,6 +156,22 @@ def render_saida(
         st.warning("⚠️ Confirme os dados antes de salvar.")
         return
 
+    # ===== Compat: preencher aliases de valor esperados pelo actions =====
+    try:
+        if payload.get("is_pagamentos"):
+            v = float(payload.get("valor_saida") or 0.0)
+            tipo = (payload.get("tipo_pagamento_sel") or "").lower()
+            # Fatura: alguns actions antigos esperam 'valor_a_pagar_fatura' (e/ou 'valor_pagamento')
+            if "fatura" in tipo:
+                payload.setdefault("valor_a_pagar_fatura", v)
+                payload.setdefault("valor_pagamento", v)
+            # Boletos / Empréstimos: comum esperarem 'valor_pagamento'
+            elif ("boleto" in tipo) or ("emprést" in tipo) or ("emprest" in tipo) or ("financi" in tipo):
+                payload.setdefault("valor_pagamento", v)
+    except Exception:
+        pass
+    # ====================================================================
+
     # Execução
     try:
         res = registrar_saida(
@@ -165,8 +181,14 @@ def render_saida(
             payload=payload,
         )
 
-        # Feedbacks idênticos aos do original
-        st.session_state["msg_ok"] = res["msg"]
+        # Normaliza mensagem (idempotência -> sucesso simples)
+        raw_msg = (res or {}).get("msg") or (res or {}).get("mensagem") or ""
+        msg = (raw_msg or "").strip()
+        if "idempot" in msg.lower():
+            msg = "Pagamento registrado com sucesso."
+
+        # Feedbacks (com mensagem normalizada)
+        st.session_state["msg_ok"] = msg
 
         # Info de classificação (somente para Pagamentos fora de Boletos)
         if payload.get("is_pagamentos") and payload.get("tipo_pagamento_sel") != "Boletos":
@@ -176,7 +198,7 @@ def render_saida(
             )
 
         st.session_state.form_saida = False
-        st.success(res["msg"])
+        st.success(msg or "Pagamento registrado com sucesso.")
         st.rerun()
 
     except ValueError as ve:

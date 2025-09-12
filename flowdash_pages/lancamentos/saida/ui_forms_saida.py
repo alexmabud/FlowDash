@@ -84,13 +84,17 @@ def render_form_saida(
 
         # ---------- FATURA CARTÃO DE CRÉDITO ----------
         if tipo_pagamento_sel == "Fatura Cartão de Crédito":
-            faturas = listar_destinos_fatura_em_aberto_fn() or []
+            # Filtra para garantir que só apareçam faturas com saldo > 0
+            f_raw = listar_destinos_fatura_em_aberto_fn() or []
+            faturas = [f for f in f_raw if float(f.get("saldo") or 0.0) > 0.00001]
+
             if not faturas:
                 st.warning("Não há faturas de cartão em aberto.")
             else:
+                # Usa o label pronto vindo do repositório (já inclui o saldo faltante)
                 opcoes = [f["label"] for f in faturas]
                 escolha = st.selectbox(
-                    "Fatura (cartão • mês • saldo)",
+                    "Fatura em aberto",
                     opcoes, key="destino_fatura_comp", on_change=invalidate_cb
                 )
                 if escolha:
@@ -98,19 +102,43 @@ def render_form_saida(
                     destino_pagamento_sel = f_sel.get("cartao", "")
                     competencia_fatura_sel = f_sel.get("competencia", "")
                     obrigacao_id_fatura = int(f_sel.get("obrigacao_id"))
+
+                    # Saldo faltante (não usa valor total)
+                    saldo_restante = float(f_sel.get("saldo") or 0.0)
+
                     st.caption(
                         f"Selecionado: {destino_pagamento_sel} — {competencia_fatura_sel} • obrigação #{obrigacao_id_fatura}"
                     )
 
+                    # Mostra o saldo restante (somente leitura) para referência
                     st.number_input(
-                        "Valor do pagamento (pode ser parcial)",
-                        value=float(valor_saida),
+                        "Saldo restante da fatura (R$)",
+                        value=saldo_restante,
                         step=0.01,
                         format="%.2f",
                         disabled=True,
-                        key="valor_pagamento_fatura_ro",
-                        help="Este valor vem de 'Valor da Saída'. Para alterar, edite o campo acima."
+                        key="saldo_restante_fatura_ro",
+                        help="Para fatura, o 'Valor da Saída' considera o campo abaixo."
                     )
+
+                    # === Valor limitado pelo saldo; NÃO altera session_state ===
+                    valor_atual = float(valor_saida or 0.0)
+                    valor_sugerido = min(valor_atual if valor_atual > 0 else saldo_restante, saldo_restante)
+
+                    valor_a_pagar_fatura = st.number_input(
+                        "Valor a pagar (principal)",
+                        min_value=0.0,
+                        max_value=saldo_restante,
+                        step=0.01,
+                        format="%.2f",
+                        value=valor_sugerido,
+                        key="valor_a_pagar_fatura",
+                        help="Limitado pelo saldo em aberto desta fatura."
+                    )
+
+                    # Usaremos este valor em todos os cálculos subsequentes e no retorno
+                    valor_saida = float(valor_a_pagar_fatura)
+
                     colf1, colf2, colf3 = st.columns(3)
                     with colf1:
                         multa_fatura = st.number_input("Multa (+)", min_value=0.0, step=1.0, format="%.2f", value=0.0, key="multa_fatura")
@@ -263,9 +291,15 @@ def render_form_saida(
     # ===================== DESCRIÇÃO (para CONTAS A PAGAR) =====================
     meta_tag = ""
     if is_pagamentos:
-        tipo_txt = tipo_pagamento_sel or "-"
-        dest_txt = (destino_pagamento_sel or "-").strip()
-        meta_tag = f"[PAGAMENTOS: tipo={tipo_txt}; destino={dest_txt}]"
+        tipo_txt = (tipo_pagamento_sel or "").strip()
+        dest_txt = (destino_pagamento_sel or "").strip()
+        # Novo padrão solicitado: "PAGAMENTO <tipo> <destino>"
+        if tipo_txt and dest_txt:
+            meta_tag = f"PAGAMENTO {tipo_txt} {dest_txt}"
+        elif tipo_txt:
+            meta_tag = f"PAGAMENTO {tipo_txt}"
+        else:
+            meta_tag = "PAGAMENTO"
 
     descricao_final = " ".join([(descricao_digitada or "").strip(), meta_tag]).strip() if not esconder_descricao else meta_tag
 
@@ -309,6 +343,7 @@ def render_form_saida(
         credor_val = (credor_boleto or "").strip()
 
     return {
+        # Importante: valor_saida já foi sobrescrito localmente no caso de Fatura
         "valor_saida": float(valor_saida or 0.0),
         "forma_pagamento": forma_pagamento,
         "cat_nome": (cat_nome or "").strip(),

@@ -4,11 +4,6 @@ Fatura de cartão (pagamento).
 Pagamento de fatura de cartão de crédito (`FATURA_CARTAO`), com suporte a
 multa/juros/desconto, atualização de saldos (caixa/banco) e registros
 contábeis (`saida`, `movimentacoes_bancarias`, CAP).
-
-Responsabilidades:
-- Debitar do caixa ou banco a saída correspondente (com ajustes).
-- Aplicar pagamento parcial ou total via `aplicar_pagamento_parcela` (NÃO forçar quitação).
-- Manter status/consistência da obrigação (PARCIAL até atingir QUITADO).
 """
 
 from __future__ import annotations
@@ -41,6 +36,34 @@ logger = logging.getLogger(__name__)
 __all__ = ["_FaturaLedgerMixin"]
 
 
+def _cap_exprs(cur):
+    """
+    Descobre quais colunas existem em contas_a_pagar_mov e devolve
+    expressões SQL seguras para multa e desconto, evitando 'no such column'.
+    """
+    cols = {r[1] for r in cur.execute("PRAGMA table_info(contas_a_pagar_mov)").fetchall()}
+
+    # multa: preferir multa_paga, senão multa_pago; senão 0.0
+    if "multa_paga" in cols:
+        multa_expr = "COALESCE(multa_paga,0.0)"
+    elif "multa_pago" in cols:
+        multa_expr = "COALESCE(multa_pago,0.0)"
+    else:
+        multa_expr = "0.0"
+
+    # desconto: preferir desconto, senão desconto_aplicado; senão 0.0
+    if "desconto" in cols:
+        desc_expr = "COALESCE(desconto,0.0)"
+    elif "desconto_aplicado" in cols:
+        desc_expr = "COALESCE(desconto_aplicado,0.0)"
+    else:
+        desc_expr = "0.0"
+
+    # principal (coluna 'valor' pode não existir)
+    valor_exists = "valor" in cols
+    return multa_expr, desc_expr, valor_exists
+
+
 class _FaturaLedgerMixin:
     """Mixin de regras para pagamento de fatura de cartão."""
 
@@ -60,7 +83,7 @@ class _FaturaLedgerMixin:
         multa: float = 0.0,
         juros: float = 0.0,
         desconto: float = 0.0,
-        retornar_info: bool = False,  # <-- NOVO: retorna (restante, status) se True
+        retornar_info: bool = False,  # <-- retorna (restante, status) se True
     ) -> Tuple[int, int, int]:
         # Sanitização/normalização
         v_pg    = max(0.0, float(valor))
@@ -78,34 +101,53 @@ class _FaturaLedgerMixin:
 
         with get_conn(self.db_path) as conn:
             cur = conn.cursor()
+            multa_expr, desc_expr, valor_exists = _cap_exprs(cur)
 
             # 1) Localiza a parcela/LANCAMENTO base
-            row = cur.execute(
-                """
-                SELECT id,
-                       COALESCE(valor_evento,0.0)         AS valor_parcela,
-                       COALESCE(valor_pago_acumulado,0.0) AS valor_pago_acumulado
+            sql_base = f"""
+                SELECT
+                    id,
+                    COALESCE(valor_evento,0.0)     AS valor_parcela,
+                    COALESCE(valor_pago_acumulado,0.0) AS vpa,
+                    COALESCE(juros_pago,0.0)       AS juros_pago,
+                    {multa_expr}                   AS multa_pago,
+                    {desc_expr}                    AS desconto_aplicado
+                    {", valor AS principal_col" if valor_exists else ", NULL AS principal_col"}
                   FROM contas_a_pagar_mov
                  WHERE obrigacao_id = ?
                    AND categoria_evento = 'LANCAMENTO'
-                   AND (tipo_obrigacao='FATURA_CARTAO' OR tipo_origem='FATURA_CARTAO')
+                   AND tipo_obrigacao = 'FATURA_CARTAO'
                  LIMIT 1
-                """,
-                (int(obrigacao_id),),
-            ).fetchone()
+            """
+            row = cur.execute(sql_base, (int(obrigacao_id),)).fetchone()
             if not row:
                 raise ValueError(f"Fatura (obrigacao_id={obrigacao_id}) não encontrada.")
 
-            parcela_id            = int(row[0])
-            valor_parcela         = float(row[1])
-            valor_pago_acumulado  = float(row[2])
+            parcela_id           = int(row["id"])
+            valor_parcela        = float(row["valor_parcela"])
+            vpa_atual            = float(row["vpa"])
+            juros_pago_atual     = float(row["juros_pago"])
+            multa_pago_atual     = float(row["multa_pago"])
+            desconto_aplic_atual = float(row["desconto_aplicado"])
+            principal_col        = row["principal_col"]
 
-            # 2) Totais — CLAMP pelo RESTANTE da própria parcela (não pelo saldo do repo)
-            restante_antes     = max(0.0, valor_parcela - valor_pago_acumulado)
-            principal_a_pagar  = min(v_pg, restante_antes)  # aplica no acumulado até o restante
+            # 2) PRINCIPAL já pago até aqui:
+            if principal_col is not None:
+                principal_pago_ate_agora = max(0.0, float(principal_col))
+            else:
+                principal_pago_ate_agora = max(
+                    0.0,
+                    vpa_atual - juros_pago_atual - multa_pago_atual + desconto_aplic_atual,
+                )
+
+            # 3) Restante do principal desta parcela
+            restante_antes = max(0.0, valor_parcela - principal_pago_ate_agora)
+
+            # Valor base aplicado ao principal
+            principal_a_pagar = min(v_pg, restante_antes)
 
             # LÍQUIDO que sai do caixa/banco (nunca negativo)
-            total_saida  = round(principal_a_pagar + v_juros + v_multa - v_desc, 2)
+            total_saida = round(principal_a_pagar + v_juros + v_multa - v_desc, 2)
             if total_saida < 0:
                 total_saida = 0.0
 
@@ -113,17 +155,24 @@ class _FaturaLedgerMixin:
             id_saida  = -1
             id_mov    = -1
 
-            # 3) Observação para log (use o valor efetivamente desembolsado)
-            obs = _fmt_obs_saida(
-                forma=(forma_pagamento if total_saida > eps else "AJUSTE"),
-                valor=float(total_saida if total_saida > eps else 0.0),
-                categoria=cat,
-                subcategoria=sub,
-                descricao=desc,
-                banco=(org if (total_saida > eps and forma_pagamento == "DÉBITO") else None),
-            )
+            # 4) Observação para log (somente formato de texto)
+            forma_txt = (forma_pagamento if total_saida > eps else "AJUSTE")
+            valor_txt = float(total_saida if total_saida > eps else 0.0)
+            if (desc or "").strip().upper().startswith("PAGAMENTO"):
+                # Formato solicitado: "Lançamento SAÍDA <FORMA> R$<valor> • <descricao>"
+                obs = f"Lançamento SAÍDA {forma_txt} R${valor_txt:.2f} • {desc.strip()}"
+            else:
+                # Formato padrão legado
+                obs = _fmt_obs_saida(
+                    forma=forma_txt,
+                    valor=valor_txt,
+                    categoria=cat,
+                    subcategoria=sub,
+                    descricao=desc,
+                    banco=(org if (total_saida > eps and forma_pagamento == "DÉBITO") else None),
+                )
 
-            # 4) Efeito financeiro — só quando houver saída (> 0)
+            # 5) Efeito financeiro — só quando houver saída (> 0)
             if total_saida > eps:
                 if forma_pagamento == "DINHEIRO":
                     self._garantir_linha_saldos_caixas(conn, data)
@@ -211,11 +260,11 @@ class _FaturaLedgerMixin:
                         (float(total_saida), id_mov),
                     )
 
-            # 5) APLICAÇÃO NA CAP — PARCIAL/TOTAL (não forçar quitação)
+            # 6) APLICAÇÃO NA CAP — PARCIAL/TOTAL
             res = self.cap_repo.aplicar_pagamento_parcela(
                 conn,
                 parcela_id=int(parcela_id),
-                valor_base=float(principal_a_pagar),
+                valor_pagamento=float(principal_a_pagar),
                 juros=float(v_juros),
                 multa=float(v_multa),
                 desconto=float(v_desc),
@@ -227,32 +276,44 @@ class _FaturaLedgerMixin:
             )
             evento_id = int((res.get("id_evento_cap") or -1)) if isinstance(res, dict) else -1
 
-            # 6) Coletar restante/status para a UI (sem quebrar se o repo não retornar)
-            if isinstance(res, dict):
-                restante = float(res.get("restante")) if res.get("restante") is not None else None
-                status   = str(res.get("status"))   if res.get("status")   is not None else None
+            # 7) Coletar restante/status para a UI (robusto)
+            if isinstance(res, dict) and res.get("restante") is not None and res.get("status") is not None:
+                restante = float(res.get("restante"))
+                status   = str(res.get("status"))
             else:
-                restante = None
-                status   = None
-
-            if restante is None or status is None:
-                # Fallback: consulta a mesma parcela p/ calcular
-                row2 = cur.execute(
-                    "SELECT COALESCE(valor_evento,0), COALESCE(valor_pago_acumulado,0) FROM contas_a_pagar_mov WHERE id=?",
-                    (parcela_id,),
-                ).fetchone()
+                sql_back = f"""
+                    SELECT COALESCE(valor_evento,0.0)     AS valor_parcela,
+                           COALESCE(valor_pago_acumulado,0.0) AS vpa,
+                           COALESCE(juros_pago,0.0)       AS juros_pago,
+                           {multa_expr}                   AS multa_pago,
+                           {desc_expr}                    AS desconto_aplicado
+                           {", valor AS principal_col" if valor_exists else ", NULL AS principal_col"}
+                      FROM contas_a_pagar_mov
+                     WHERE id = ?
+                     LIMIT 1
+                """
+                row2 = cur.execute(sql_back, (parcela_id,)).fetchone()
                 if row2:
-                    valor_evento_atual, pago_acum_atual = float(row2[0]), float(row2[1])
-                    restante_calc = max(0.0, valor_evento_atual - pago_acum_atual)
+                    v_evt = float(row2["valor_parcela"])
+                    vpa2  = float(row2["vpa"])
+                    j2    = float(row2["juros_pago"])
+                    m2    = float(row2["multa_pago"])
+                    d2    = float(row2["desconto_aplicado"])
+                    pcol  = row2["principal_col"]
+                    if pcol is not None:
+                        principal_pago = max(0.0, float(pcol))
+                    else:
+                        principal_pago = max(0.0, vpa2 - j2 - m2 + d2)
+
+                    restante_calc = max(0.0, v_evt - principal_pago)
                     restante = round(restante_calc, 2)
-                    if pago_acum_atual >= valor_evento_atual - eps:
+                    if restante <= eps:
                         status = "QUITADO"
-                    elif pago_acum_atual > 0:
+                    elif principal_pago > 0:
                         status = "Parcial"
                     else:
                         status = "Em aberto"
                 else:
-                    # não encontrou a linha (não deveria acontecer)
                     restante = 0.0
                     status = "Em aberto"
 

@@ -9,8 +9,8 @@ acumulados na tabela `contas_a_pagar_mov`.
 
 Regras de acumulação (PARCIAL e QUITAÇÃO TOTAL)
 -----------------------------------------------
-- `valor_pago_acumulado` **acumula**: principal_aplicado + juros + multa.
-  (⚠️ Não subtrai `desconto`.)
+- `valor_pago_acumulado` **acumula o DESEMBOLSO REAL**:
+    principal_aplicado + juros + multa − desconto
 - `juros_pago`, `multa_paga`/`multa_pago` e `desconto_aplicado`/`desconto`
   também são acumulados nas suas colunas.
 - O **status** e o **restante** são calculados pela base estendida:
@@ -92,10 +92,16 @@ class PaymentsMixin(object):
         valor_pago: float = 0.0,
     ) -> float:
         """
-        Garante que o pagamento não exceda o saldo em aberto (vw_cap_saldos).
+        Garante que o pagamento **não exceda o saldo do principal**:
+
+            saldo_principal = valor_evento - COALESCE(valor, 0)
+
+        Onde:
+            - `valor_evento` é o valor de face da fatura/parcela (competência)
+            - `valor` é o **principal já coberto** (coluna atualizada no Passo 3)
 
         Retorna:
-            float: saldo atual em aberto.
+            float: saldo atual em aberto (principal).
 
         Lança:
             ValueError: se pagamento exceder (tolerância 0,005) ou valor_pago <= 0.
@@ -106,14 +112,25 @@ class PaymentsMixin(object):
 
         with self._conn_ctx(conn) as c:
             row = c.execute(
-                "SELECT COALESCE(saldo_aberto,0) FROM vw_cap_saldos WHERE obrigacao_id=?;",
+                """
+                SELECT
+                    COALESCE(MAX(CASE WHEN categoria_evento='LANCAMENTO' THEN valor_evento END), 0) AS valor_evento,
+                    COALESCE(MAX(CASE WHEN categoria_evento='LANCAMENTO' THEN valor END), 0)       AS principal_coberto
+                FROM contas_a_pagar_mov
+                WHERE obrigacao_id = ?
+                """,
                 (int(obrigacao_id),),
             ).fetchone()
-            saldo = float(row[0]) if row else 0.0
+
+            valor_comp   = float(row[0] if row and row[0] is not None else 0.0)
+            principal_ok = float(row[1] if row and row[1] is not None else 0.0)
+            saldo = max(0.0, valor_comp - principal_ok)
 
         eps = 0.005
         if valor_pago > saldo + eps:
-            raise ValueError(f"Pagamento (R$ {valor_pago:.2f}) maior que o saldo (R$ {saldo:.2f}).")
+            raise ValueError(
+                f"Pagamento (R$ {valor_pago:.2f}) maior que o saldo do principal (R$ {saldo:.2f})."
+            )
         return saldo
 
     # ---------------------------------------------------------------------
@@ -135,7 +152,7 @@ class PaymentsMixin(object):
         """
         Insere um evento **PAGAMENTO** (valor_evento negativo) para um boleto.
         """
-        # 1) valida saldo
+        # 1) valida saldo (regra do principal)
         self._validar_pagamento_nao_excede_saldo(conn, int(obrigacao_id), float(valor_pago))
 
         # 2) validações básicas do evento
@@ -170,7 +187,7 @@ class PaymentsMixin(object):
             )
 
     # ---------------------------------------------------------------------
-    # Quitação TOTAL (acumula principal + juros + multa)
+    # Quitação TOTAL (acumula principal + juros + multa) com VPA = desembolso real
     # ---------------------------------------------------------------------
     def aplicar_pagamento_parcela_quitacao_total(
         self,
@@ -190,10 +207,11 @@ class PaymentsMixin(object):
         """
         Quitação total:
           - principal_aplicado = restante do principal
-          - valor_pago_acumulado += (principal_aplicado + juros + multa)
+          - valor_pago_acumulado += (principal_aplicado + juros + multa - desconto)
           - acumula juros/multa/desconto nas colunas próprias
           - status = 'QUITADO' e preenche data_pagamento
           - registra evento CAP (negativo) com o desembolso: principal+juros+multa-desconto
+          - atualiza coluna `valor` (se existir) com o principal coberto acumulado
         """
         with self._conn_ctx(conn) as c:
             cur = c.cursor()
@@ -228,13 +246,19 @@ class PaymentsMixin(object):
 
             data_pag_exists = "data_pagamento" in cols
             usuario_exists  = "usuario" in cols
+            valor_exists    = "valor" in cols
 
             juros    = float(juros or 0.0)
             multa    = float(multa or 0.0)
             desconto = float(desconto or 0.0)
 
-            # principal já pago até aqui = vpa_atual - juros_prev - multa_prev
-            principal_pago_ate_agora = max(0.0, vpa_atual - juros_prev - multa_prev)
+            # === principal já pago: usar coluna `valor` quando existir ===
+            if "valor" in row.keys() and row["valor"] is not None:
+                principal_pago_ate_agora = max(0.0, float(row["valor"]))
+            else:
+                # fallback legacy pelo VPA
+                principal_pago_ate_agora = max(0.0, vpa_atual - juros_prev - multa_prev + desc_prev)
+
             restante_principal = max(0.0, valor_evento - principal_pago_ate_agora)
             principal_aplicado = restante_principal  # quitação: zera o principal
 
@@ -243,13 +267,19 @@ class PaymentsMixin(object):
             if saida_total < 0:
                 saida_total = 0.0
 
-            # novos acumulados
-            novo_vpa   = _q2(Decimal(str(vpa_atual)) + Decimal(str(principal_aplicado)) + Decimal(str(juros)) + Decimal(str(multa)))
+            # novos acumulados (VPA = desembolso real)
+            novo_vpa   = _q2(
+                Decimal(str(vpa_atual))
+                + Decimal(str(principal_aplicado))
+                + Decimal(str(juros))
+                + Decimal(str(multa))
+                - Decimal(str(desconto))
+            )
             novo_juros = _q2(Decimal(str(juros_prev)) + Decimal(str(juros)))
             novo_multa = _q2(Decimal(str(multa_prev)) + Decimal(str(multa)))
             novo_desc  = _q2(Decimal(str(desc_prev)) + Decimal(str(desconto)))
 
-            # status/saldo pela base estendida
+            # status/saldo pela base estendida (continua válido com novo VPA)
             saldo_ext = _q2(
                 Decimal(str(valor_evento)) + Decimal(str(novo_juros)) + Decimal(str(novo_multa))
                 - Decimal(str(novo_desc)) - Decimal(str(novo_vpa))
@@ -257,6 +287,14 @@ class PaymentsMixin(object):
             eps = Decimal("0.005")
             status_final = "QUITADO" if saldo_ext <= eps else "Parcial"
             data_para_gravar = (data_evento or _date.today().isoformat()) if status_final == "QUITADO" else None
+
+            # >>> `valor` = apenas principal coberto (não soma desconto)
+            principal_coberto_novo = float(
+                max(0.0, min(
+                    valor_evento,
+                    principal_pago_ate_agora + float(principal_aplicado)
+                ))
+            )
 
             # UPDATE
             set_parts = [
@@ -270,6 +308,10 @@ class PaymentsMixin(object):
             if vpa_exists:
                 set_parts.insert(0, "valor_pago_acumulado = ?")
                 params.insert(0, float(novo_vpa))
+
+            if valor_exists:
+                set_parts.insert(0, "valor = ?")
+                params.insert(0, float(principal_coberto_novo))
 
             if data_pag_exists and data_para_gravar:
                 set_parts.append("data_pagamento = ?")
@@ -323,17 +365,19 @@ class PaymentsMixin(object):
             }
 
     # ---------------------------------------------------------------------
-    # Pagamento PARCIAL/TOTAL (acumula principal + juros + multa)
+    # Pagamento PARCIAL/TOTAL (VPA = desembolso real e `valor` = principal coberto)
     # ---------------------------------------------------------------------
     def aplicar_pagamento_parcela(self, conn: Any = None, payload: Optional[dict] = None, *args, **kwargs) -> dict:
         """
         Aplica pagamento PARCIAL/TOTAL:
           - principal_aplicado = clamp(pedido, restante_principal)
-          - valor_pago_acumulado += (principal_aplicado + juros + multa)
+          - valor_pago_acumulado += (principal_aplicado + juros + multa − desconto)
           - acumula juros/multa/desconto
           - status pela base estendida (ver docstring)
           - data_pagamento preenchida apenas quando QUITADO
-        Aceita tanto 'valor_base' (preferido) quanto 'valor_pago' (legado).
+          - atualiza coluna `valor` (se existir) com o principal coberto acumulado
+
+        Aceita chaves (prioridade): **valor_pagamento**, **valor_saida**, valor_base, valor_pago.
         """
 
         def _f(x, default=0.0) -> float:
@@ -345,7 +389,10 @@ class PaymentsMixin(object):
         # -------- normalização de entrada (payload/args/kwargs) --------
         if isinstance(payload, dict):
             parcela_id    = int(payload.get("parcela_id") or payload.get("evento_id") or payload.get("id"))
-            principal_inc = _f(payload.get("valor_base", payload.get("valor_pago", payload.get("valor_pagamento", 0.0))))
+            principal_inc = _f(payload.get("valor_pagamento",
+                                payload.get("valor_saida",
+                                payload.get("valor_base",
+                                payload.get("valor_pago", 0.0)))))
             juros_inc     = _f(payload.get("juros"))
             multa_inc     = _f(payload.get("multa"))
             desconto_inc  = _f(payload.get("desconto"))
@@ -359,7 +406,10 @@ class PaymentsMixin(object):
             data_pgto     = args[5] if len(args) > 5 else (kwargs.get("data_pagamento") or kwargs.get("data_evento"))
         else:
             parcela_id    = int(kwargs.get("parcela_id") or kwargs.get("evento_id") or kwargs.get("id"))
-            principal_inc = _f(kwargs.get("valor_base", kwargs.get("valor_pago", kwargs.get("valor_pagamento", 0.0))))
+            principal_inc = _f(kwargs.get("valor_pagamento",
+                                kwargs.get("valor_saida",
+                                kwargs.get("valor_base",
+                                kwargs.get("valor_pago", 0.0)))))
             juros_inc     = _f(kwargs.get("juros", kwargs.get("juros_incremento", 0.0)))
             multa_inc     = _f(kwargs.get("multa", kwargs.get("multa_incremento", 0.0)))
             desconto_inc  = _f(kwargs.get("desconto", kwargs.get("desconto_incremento", 0.0)))
@@ -399,13 +449,27 @@ class PaymentsMixin(object):
             else:
                 desc_prev = 0.0; desc_col = "desconto_aplicado"
 
+            valor_exists = "valor" in cols
+
+            # === principal já pago: usar coluna `valor` quando existir ===
+            if "valor" in row.keys() and row["valor"] is not None:
+                principal_pago_ate_agora = max(0.0, float(row["valor"]))
+            else:
+                # fallback legacy pelo VPA
+                principal_pago_ate_agora = max(0.0, vpa_atual - juros_prev - multa_prev + desc_prev)
+
             # ----- clamp pelo RESTANTE do principal -----
-            principal_pago_ate_agora = max(0.0, vpa_atual - juros_prev - multa_prev)
             restante_principal = max(0.0, valor_evento - principal_pago_ate_agora)
             principal_aplicado = min(principal_inc, restante_principal)
 
-            # ----- novos acumulados -----
-            novo_vpa   = _q2(Decimal(str(vpa_atual)) + Decimal(str(principal_aplicado)) + Decimal(str(juros_inc)) + Decimal(str(multa_inc)))
+            # ----- novos acumulados (VPA = desembolso real) -----
+            novo_vpa   = _q2(
+                Decimal(str(vpa_atual))
+                + Decimal(str(principal_aplicado))
+                + Decimal(str(juros_inc))
+                + Decimal(str(multa_inc))
+                - Decimal(str(desconto_inc))
+            )
             novo_juros = _q2(Decimal(str(juros_prev)) + Decimal(str(juros_inc)))
             novo_multa = _q2(Decimal(str(multa_prev)) + Decimal(str(multa_inc)))
             novo_desc  = _q2(Decimal(str(desc_prev)) + Decimal(str(desconto_inc)))
@@ -426,6 +490,14 @@ class PaymentsMixin(object):
                 status_final = "Em aberto"
                 data_para_gravar = None
 
+            # >>> `valor` = apenas principal coberto (não soma desconto)
+            principal_coberto_novo = float(
+                max(0.0, min(
+                    valor_evento,
+                    principal_pago_ate_agora + float(principal_aplicado)
+                ))
+            )
+
             # ----- UPDATE dinâmico -----
             set_parts = [
                 "juros_pago = ?",
@@ -438,6 +510,10 @@ class PaymentsMixin(object):
             if "valor_pago_acumulado" in cols:
                 set_parts.insert(0, "valor_pago_acumulado = ?")
                 params.insert(0, float(novo_vpa))
+
+            if valor_exists:
+                set_parts.insert(0, "valor = ?")
+                params.insert(0, float(principal_coberto_novo))
 
             if "data_pagamento" in cols and data_para_gravar:
                 set_parts.append("data_pagamento = ?")

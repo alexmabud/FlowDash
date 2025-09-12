@@ -1,3 +1,4 @@
+# repository/cartoes_repository.py
 """
 Módulo Cartões (Repositório)
 ============================
@@ -26,7 +27,6 @@ Dependências
 ------------
 - sqlite3
 - typing (Optional, Tuple, List)
-
 """
 
 import sqlite3
@@ -69,16 +69,6 @@ class CartoesRepository:
     def obter_por_nome(self, nome: str) -> Optional[Tuple[int, int]]:
         """
         Retorna `(vencimento_dia, dias_fechamento)` do cartão, ou `None` se não existir.
-
-        Notas:
-            - `vencimento` guarda o **dia** do vencimento (1..31).
-            - `fechamento` guarda **quantos dias antes** do vencimento a fatura fecha (0..28).
-
-        Parâmetros:
-            nome (str): Nome do cartão (case/trim-insensitive).
-
-        Retorno:
-            Optional[Tuple[int, int]]: `(vencimento_dia, dias_fechamento)` ou None.
         """
         if not nome or not nome.strip():
             return None
@@ -90,7 +80,7 @@ class CartoesRepository:
                  WHERE LOWER(TRIM(nome)) = LOWER(TRIM(?))
                  LIMIT 1
                 """,
-                (nome,)
+                (nome,),
             ).fetchone()
             if not row:
                 return None
@@ -101,10 +91,7 @@ class CartoesRepository:
             return (vencimento_dia, dias_fechamento)
 
     def listar_nomes(self) -> List[str]:
-        """
-        Lista nomes de cartões cadastrados, ordenados alfabeticamente
-        (case/trim-insensitive).
-        """
+        """Lista nomes de cartões cadastrados, ordenados alfabeticamente."""
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT nome FROM cartoes_credito ORDER BY LOWER(TRIM(nome)) ASC"
@@ -117,27 +104,35 @@ class CartoesRepository:
 # ----------------------------
 def listar_destinos_fatura_em_aberto(db_path: str):
     """
-    Consulta faturas de cartão **em aberto** (uma por cartão+competência),
-    retornando rótulos prontos para selects de UI.
+    Lista faturas de cartão **em aberto** (uma por cartão+competência) para a UI.
 
-    Regra:
-        - Base: `contas_a_pagar_mov`
-        - Lançamento de fatura: `tipo_obrigacao='FATURA_CARTAO'` e `categoria_evento='LANCAMENTO'`
-        - Pagamentos deduzidos: eventos onde `categoria_evento` começa com `'PAGAMENTO'`
-          (valores negativos somados para obter total pago).
-        - `saldo = total_lancado - total_pago` (apenas `saldo > 0` entra no resultado).
+    Regra (simples e direta ao ponto):
+        saldo = valor_evento - COALESCE(valor, 0)
 
-    Parâmetros:
-        db_path (str): Caminho do arquivo SQLite.
+    Onde:
+        - `valor_evento` = valor de face da fatura (competência)
+        - `valor`        = principal já coberto acumulado (coluna atualizada no Passo 3)
 
-    Retorno:
-        list[dict]: Cada item contém:
-            - label (str): Ex.: `"Fatura Bradesco 2025-08 — R$ 400,00"`
-            - cartao (str)
-            - competencia (str)  # YYYY-MM
-            - obrigacao_id (int)
-            - saldo (float)
+    Retorna list[dict] com:
+        - label (str)            -> "Fatura {cartao} • Venc. {dd/mm} • Em aberto R$ {saldo}"
+        - cartao (str)
+        - competencia (str, YYYY-MM)
+        - vencimento (str, YYYY-MM-DD)
+        - valor_evento (float)
+        - obrigacao_id (int)
+        - saldo (float)          -> quanto falta pagar (principal)
     """
+    from datetime import datetime
+
+    def _fmt_brl(v: float) -> str:
+        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+    def _fmt_dm(v: str) -> str:
+        try:
+            return datetime.strptime(v, "%Y-%m-%d").strftime("%d/%m")
+        except Exception:
+            return v or "—"
+
     conn = sqlite3.connect(db_path, timeout=30)
     try:
         conn.execute("PRAGMA journal_mode=WAL;")
@@ -145,52 +140,57 @@ def listar_destinos_fatura_em_aberto(db_path: str):
         conn.execute("PRAGMA foreign_keys=ON;")
         conn.row_factory = sqlite3.Row
 
-        rows = conn.execute("""
+        rows = conn.execute(
+            """
             WITH lanc AS (
                 SELECT
                     obrigacao_id,
-                    credor        AS cartao,
+                    TRIM(credor)                AS cartao,
                     competencia,
-                    COALESCE(valor_evento,0) AS total_lancado
+                    DATE(vencimento)            AS vencimento,
+                    COALESCE(valor_evento, 0)   AS valor_evento,
+                    COALESCE(valor, 0)          AS principal_coberto
                 FROM contas_a_pagar_mov
-                WHERE tipo_obrigacao='FATURA_CARTAO'
-                  AND categoria_evento='LANCAMENTO'
+                WHERE tipo_obrigacao = 'FATURA_CARTAO'
+                  AND categoria_evento = 'LANCAMENTO'
                   AND COALESCE(credor,'') <> ''
                   AND COALESCE(competencia,'') <> ''
-            ),
-            pagos AS (
-                SELECT
-                    obrigacao_id,
-                    COALESCE(SUM(-valor_evento),0) AS total_pago  -- pagamento é negativo
-                FROM contas_a_pagar_mov
-                WHERE UPPER(COALESCE(categoria_evento,'')) LIKE 'PAGAMENTO%'
-                GROUP BY obrigacao_id
             )
             SELECT
                 l.obrigacao_id,
                 l.cartao,
                 l.competencia,
-                ROUND(l.total_lancado - COALESCE(p.total_pago,0), 2) AS saldo
+                l.vencimento,
+                l.valor_evento,
+                ROUND(l.valor_evento - l.principal_coberto, 2) AS saldo
             FROM lanc l
-            LEFT JOIN pagos p USING (obrigacao_id)
-            WHERE (l.total_lancado - COALESCE(p.total_pago,0)) > 0
-            ORDER BY LOWER(TRIM(l.cartao)) ASC, l.competencia ASC
-        """).fetchall()
+            /* somente cartões cadastrados, comparando por nome (case/trim-insensitive) */
+            JOIN cartoes_credito c
+              ON LOWER(TRIM(c.nome)) = LOWER(TRIM(l.cartao))
+            WHERE (l.valor_evento - l.principal_coberto) > 0.00001
+            ORDER BY DATE(l.vencimento) ASC, LOWER(TRIM(l.cartao)) ASC;
+            """
+        ).fetchall()
     finally:
         conn.close()
 
     itens = []
     for r in rows:
-        cartao = r["cartao"] or ""
-        comp   = r["competencia"] or ""
-        saldo  = float(r["saldo"] or 0.0)
-        label  = f"Fatura {cartao} {comp} — R$ {saldo:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+        cartao       = r["cartao"] or ""
+        comp         = r["competencia"] or ""
+        vcto         = r["vencimento"] or ""
+        valor_evt    = float(r["valor_evento"] or 0.0)
+        saldo_aberto = float(r["saldo"] or 0.0)
+
+        label = f"Fatura {cartao} • Venc. {_fmt_dm(vcto)} • Em aberto {_fmt_brl(saldo_aberto)}"
         itens.append({
             "label": label,
             "cartao": cartao,
             "competencia": comp,
+            "vencimento": vcto,
+            "valor_evento": valor_evt,
             "obrigacao_id": int(r["obrigacao_id"]),
-            "saldo": saldo,
+            "saldo": saldo_aberto,
         })
     return itens
 

@@ -405,6 +405,104 @@ def upsert_saldos_bancos(caminho_banco: str, data_str: str, banco_nome: str, val
         conn.commit()
 
 
+# ============================================================================
+# Helpers de feedback para pagamentos (UX + sanity)
+# ============================================================================
+def _fmt_brl(v: float) -> str:
+    try:
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return f"R$ {v}"
+
+def _msg_pagamento(ret: dict) -> tuple[str, str]:
+    """
+    Normaliza mensagens de pagamento (parcial/quitado/idempotência).
+    Retorna (nivel, texto) em que nivel ∈ {"success","info","warning","error"}.
+    Aceita retornos dos serviços (status/restante) ou dos actions (ok/mensagem).
+    """
+    ok = bool(ret.get("ok", True))
+    msg = str(ret.get("mensagem") or "")
+    status = (ret.get("status") or "").upper()
+    restante = ret.get("restante")
+    idem = "idempot" in msg.lower()
+
+    # Idempotência: texto amigável
+    if idem and ok:
+        return "success", "Pagamento registrado com sucesso."
+    if idem and not ok:
+        return "warning", "Pagamento já efetuado anteriormente. Nenhuma ação necessária."
+
+    # Status detalhado
+    if status == "QUITADO":
+        return "success", "Parcela quitada com sucesso."
+    if status == "PARCIAL":
+        try:
+            falta = _fmt_brl(float(restante or 0))
+        except Exception:
+            falta = str(restante or 0)
+        return "info", f"Pagamento parcial registrado. Falta {falta}."
+
+    # Fallback conforme ok/erro
+    if ok:
+        return "success", (msg or "Pagamento registrado.")
+    return "error", (msg or "Falha ao registrar pagamento.")
+
+def _sanity_cap_check(ret: dict, db_path: str = "data/flowdash_data.db") -> None:
+    """
+    Checagem leve de consistência após pagamento:
+    - saldo_em_aberto não deve ficar negativo
+    Só roda se a view existir. Mostra aviso em modo DEBUG.
+    """
+    try:
+        parcela_id = ret.get("parcela_id")
+        obrigacao_id = ret.get("obrigacao_id")
+        with sqlite3.connect(db_path, timeout=10) as con:
+            con.row_factory = sqlite3.Row
+            # Tenta descobrir obrigacao_id via parcela se necessário
+            if not obrigacao_id and parcela_id:
+                r = con.execute("SELECT obrigacao_id FROM contas_a_pagar_mov WHERE id = ? LIMIT 1", (int(parcela_id),)).fetchone()
+                if r and r["obrigacao_id"] is not None:
+                    obrigacao_id = int(r["obrigacao_id"])
+
+            # Se não tem obrigacao_id, não checa
+            if not obrigacao_id:
+                return
+
+            # Verifica se a view existe
+            v = con.execute("SELECT 1 FROM sqlite_master WHERE type='view' AND name='vw_cap_saldos'").fetchone()
+            if not v:
+                return
+
+            row = con.execute(
+                "SELECT valor_competencia, saldo_em_aberto FROM vw_cap_saldos WHERE obrigacao_id = ? LIMIT 1",
+                (int(obrigacao_id),),
+            ).fetchone()
+            if not row:
+                return
+
+            saldo = float(row["saldo_em_aberto"] or 0.0)
+            if saldo < -0.01 and st.session_state.get("DEBUG", False):
+                st.warning(f"[SANITY] Saldo negativo detectado após pagamento: {_fmt_brl(saldo)}")
+
+    except Exception:
+        # silencioso em produção; em DEBUG mostra
+        if st.session_state.get("DEBUG", False):
+            st.exception("Falha na checagem de consistência do CAP.")
+
+def show_feedback_pagamento(ret: dict, *, db_path: str = "data/flowdash_data.db", do_sanity: bool = True):
+    """
+    Exibe feedback padronizado (success/info/warning/error) e,
+    opcionalmente, roda uma checagem de consistência leve (em DEBUG).
+    Uso típico após aplicar pagamento:
+        ret = service.aplicar_pagamento_parcela(...)
+        show_feedback_pagamento(ret)
+    """
+    nivel, texto = _msg_pagamento(ret)
+    getattr(st, nivel)(texto)
+    if do_sanity and st.session_state.get("DEBUG", False):
+        _sanity_cap_check(ret, db_path=db_path)
+
+
 # ===========================
 # API pública (estável)
 # ===========================
@@ -415,4 +513,6 @@ __all__ = [
     "canonicalizar_banco", "upsert_saldos_bancos",
     "bloco_resumo_dia",
     "formatar_valor",
+    # novos helpers públicos
+    "show_feedback_pagamento",
 ]
