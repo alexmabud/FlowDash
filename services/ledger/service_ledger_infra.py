@@ -293,14 +293,28 @@ def _fmt_obs_saida(
     except Exception:
         vtxt = "R$0.00"
 
-    # trilha de categoria/sub/descrição (sem parênteses)
-    cat = (categoria or "").strip() or "-"
-    sub = (subcategoria or "").strip() or "-"
+    # trilha de categoria/sub/descrição
+    cat_raw = (categoria or "").strip()
+    sub_raw = (subcategoria or "").strip()
     desc = (descricao or "").strip()
+    cat_norm = _sem_acentos(cat_raw).upper() if cat_raw else ""
 
-    trilha = f" • {cat}, {sub}"
-    if desc:
-        trilha += f", • {desc}"
+    # >>> Regra específica para BOLETOS: alinhar ao padrão do CRÉDITO
+    # "Lançamento SAÍDA <FORMA> R$<valor> • PAGAMENTO Boleto <descricao_form>"
+    if cat_norm == "BOLETOS":
+        if desc:
+            # Remove prefixos redundantes "PAGAMENTO Boleto(s) ...", mantendo só o resto
+            resto = re.sub(r"(?i)^\s*PAGAMENTO\s+BOLETOS?\s*[:\-]?\s*", "", desc, count=1)
+            trilha = f" • PAGAMENTO Boleto{(' ' + resto) if resto else ''}"
+        else:
+            trilha = " • PAGAMENTO Boleto"
+    else:
+        # Comportamento padrão
+        cat = cat_raw or "-"
+        sub = sub_raw or "-"
+        trilha = f" • {cat}, {sub}"
+        if desc:
+            trilha += f", • {desc}"
 
     # sufixo de parcelas — SOMENTE para CREDITO e quando >= 2
     if f == "CREDITO" and isinstance(parcelas, int) and parcelas >= 2:
