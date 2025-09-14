@@ -23,7 +23,6 @@ def render_form_saida(
     listar_subcategorias_fn,  # fn(cat_id)->DataFrame
     listar_destinos_fatura_em_aberto_fn: Callable[[], list],  # fn()->list[dict]
     carregar_opcoes_pagamentos_fn,  # legacy (mantido p/ compat)
-    # >>> NOVOS (opcionais): devem retornar list[dict] com pelo menos: {"label": str, "obrigacao_id": int, ...}
     listar_boletos_em_aberto_fn: Optional[Callable[[], list]] = None,
     listar_empfin_em_aberto_fn: Optional[Callable[[], list]] = None,
 ):
@@ -118,27 +117,11 @@ def render_form_saida(
                         format="%.2f",
                         disabled=True,
                         key="saldo_restante_fatura_ro",
-                        help="Para fatura, o 'Valor da Saída' considera o campo abaixo."
+                        help="Para fatura, utilize o campo 'Valor da Saída' acima como principal."
                     )
 
-                    # === Valor limitado pelo saldo; NÃO altera session_state ===
-                    valor_atual = float(valor_saida or 0.0)
-                    valor_sugerido = min(valor_atual if valor_atual > 0 else saldo_restante, saldo_restante)
-
-                    valor_a_pagar_fatura = st.number_input(
-                        "Valor a pagar (principal)",
-                        min_value=0.0,
-                        max_value=saldo_restante,
-                        step=0.01,
-                        format="%.2f",
-                        value=valor_sugerido,
-                        key="valor_a_pagar_fatura",
-                        help="Limitado pelo saldo em aberto desta fatura."
-                    )
-
-                    # Usaremos este valor em todos os cálculos subsequentes e no retorno
-                    valor_saida = float(valor_a_pagar_fatura)
-
+                    # (REMOVIDO) Campo 'Valor a pagar (principal)' — para fatura usamos 'Valor da Saída'
+                    # Mantemos os ajustes normalmente:
                     colf1, colf2, colf3 = st.columns(3)
                     with colf1:
                         multa_fatura = st.number_input("Multa (+)", min_value=0.0, step=1.0, format="%.2f", value=0.0, key="multa_fatura")
@@ -343,7 +326,7 @@ def render_form_saida(
         credor_val = (credor_boleto or "").strip()
 
     return {
-        # Importante: valor_saida já foi sobrescrito localmente no caso de Fatura
+        # Importante: para Fatura, usamos o "Valor da Saída" como principal
         "valor_saida": float(valor_saida or 0.0),
         "forma_pagamento": forma_pagamento,
         "cat_nome": (cat_nome or "").strip(),

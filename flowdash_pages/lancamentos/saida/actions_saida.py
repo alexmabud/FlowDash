@@ -40,7 +40,72 @@ FORMAS = ["DINHEIRO", "PIX", "DÉBITO", "CRÉDITO", "BOLETO"]
 ORIGENS_DINHEIRO = ["Caixa", "Caixa 2"]
 
 
-# ---------------- Utils
+# ---------------- Utils (novos helpers apenas para validação de teto)
+def _as_float(x) -> Optional[float]:
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    if s == "":
+        return None
+    s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
+def _first_key(d: dict, keys: list[str]):
+    for k in keys:
+        if isinstance(d, dict) and (k in d) and (d[k] is not None):
+            return d[k]
+    return None
+
+
+def _obter_saldo_fatura_dropdown(caminho_banco: str, obrigacao_id_fatura: int) -> Optional[float]:
+    """
+    Busca o item da fatura no dropdown e devolve o saldo/restante.
+    Tenta chaves mais comuns ('saldo'); se não houver, tenta reconstituir (valor_evento - pago).
+    """
+    try:
+        opcoes = _listar_faturas_cartao_abertas_dropdown(caminho_banco) or []
+        oid = int(obrigacao_id_fatura)
+        for o in opcoes:
+            oid_o = int(_first_key(o, ["obrigacao_id", "id", "cap_obrigacao_id", "obrigacao"]) or 0)
+            if oid_o == oid:
+                saldo = _as_float(_first_key(o, ["saldo", "restante", "saldo_restante", "valor_em_aberto", "valor_restante"]))
+                if saldo is not None:
+                    return float(saldo)
+                valor_evt = _as_float(_first_key(o, ["valor_evento", "valor_total", "valor", "total"])) or 0.0
+                pago = _as_float(_first_key(o, ["pago", "pago_acumulado", "valor_pago", "total_pago"])) or 0.0
+                return max(0.0, float(valor_evt) - float(pago))
+    except Exception:
+        pass
+    return None
+
+
+def _bloqueia_pagamento_maior(valor_pagamento: float, limite: float, contexto: str) -> None:
+    """
+    Se o valor do pagamento for maior que o limite informado, bloqueia com ValueError.
+    Mensagem amarela pedida na UI.
+    contexto: 'fatura' | 'boleto' | 'emprestimo'
+    """
+    v = _as_float(valor_pagamento) or 0.0
+    lim = _as_float(limite) or 0.0
+    eps = 0.005
+    if v > (lim + eps):
+        if contexto == "fatura":
+            raise ValueError("Valor do pagamento maior que o valor da fatura, ajuste o valor.")
+        elif contexto == "boleto":
+            raise ValueError("Valor do pagamento maior que o valor do boleto, ajuste o valor.")
+        elif contexto == "emprestimo":
+            raise ValueError("Valor do pagamento maior que o valor do empréstimo, ajuste o valor.")
+        # fallback genérico (não deve ocorrer)
+        raise ValueError("Valor do pagamento maior que o valor em aberto, ajuste o valor.")
+
+
+# ---------------- Utils já existentes
 def _distinct_lower_trim(series: pd.Series) -> list[str]:
     if series is None or series.empty:
         return []
@@ -130,11 +195,6 @@ def _resolver_coluna_preferida(conn, preferidas: list[str]) -> Optional[str]:
 def _resolver_colunas_evento_e_pago(conn) -> tuple[str, Optional[str]]:
     """
     Retorna (col_valor_evento, col_valor_pago_acumulado_ou_None)
-
-    Base: prioriza SEMPRE `valor_evento`.
-    Se não existir, cai para colunas conhecidas de valor.
-
-    Pago acumulado: tenta colunas comuns de acumulado.
     """
     preferidas_evento = [
         "valor_evento",  # preferida
@@ -427,6 +487,13 @@ def registrar_saida(caminho_banco: str, data_lanc: date, usuario_nome: str, payl
         if forma_pagamento in ["PIX", "DÉBITO"] and not banco_escolhido_in:
             raise ValueError("Selecione ou digite o banco da saída.")
 
+        # 🔒 BLOQUEIO: não permitir pagar acima do saldo/restante da fatura
+        saldo_dropdown = _obter_saldo_fatura_dropdown(caminho_banco, int(obrigacao_id_fatura))
+        if saldo_dropdown is None:
+            # fallback direto no banco
+            saldo_dropdown, _ = _obter_restante_e_status(caminho_banco, int(obrigacao_id_fatura))
+        _bloqueia_pagamento_maior(valor_saida, saldo_dropdown or 0.0, "fatura")
+
         origem = origem_dinheiro if forma_pagamento == "DINHEIRO" else _canonicalizar_banco_safe(caminho_banco, banco_escolhido_in)
 
         # tentar pagar via ledger (com retorno de restante/status)
@@ -486,6 +553,14 @@ def registrar_saida(caminho_banco: str, data_lanc: date, usuario_nome: str, payl
         if not parcela_boleto_escolhida:
             raise ValueError("Selecione a parcela do boleto para pagar (ou informe o identificador).")
 
+        # 🔒 BLOQUEIO: teto = em_aberto informado no item (ou reconstituído)
+        em_aberto = _as_float((parcela_boleto_escolhida or {}).get("em_aberto"))
+        if em_aberto is None:
+            va = _as_float((parcela_boleto_escolhida or {}).get("valor_evento") or 0.0) or 0.0
+            pa = _as_float((parcela_boleto_escolhida or {}).get("pago_acumulado") or 0.0) or 0.0
+            em_aberto = max(0.0, va - pa)
+        _bloqueia_pagamento_maior(valor_saida, em_aberto, "boleto")
+
         obrigacao_id = (
             payload.get("obrigacao_id")
             or payload.get("parcela_obrigacao_id")
@@ -539,6 +614,14 @@ def registrar_saida(caminho_banco: str, data_lanc: date, usuario_nome: str, payl
             raise ValueError("Selecione o banco/descrição do empréstimo.")
         if not parcela_emp_escolhida:
             raise ValueError("Selecione a parcela do empréstimo (ou informe o identificador).")
+
+        # 🔒 BLOQUEIO: teto = em_aberto informado no item (ou reconstituído)
+        em_aberto_emp = _as_float((parcela_emp_escolhida or {}).get("em_aberto"))
+        if em_aberto_emp is None:
+            va = _as_float((parcela_emp_escolhida or {}).get("valor_evento") or 0.0) or 0.0
+            pa = _as_float((parcela_emp_escolhida or {}).get("pago_acumulado") or 0.0) or 0.0
+            em_aberto_emp = max(0.0, va - pa)
+        _bloqueia_pagamento_maior(valor_saida, em_aberto_emp, "emprestimo")
 
         obrigacao_id = (
             payload.get("obrigacao_id")

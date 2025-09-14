@@ -248,6 +248,10 @@ def _fmt_obs_saida(
         - 'DEBITO'/'CREDITO' sempre sem acento.
         - Valor com duas casas decimais e sem espaço entre 'R$' e o número (ex.: R$123.45).
         - O sufixo " • Nx" aparece **apenas** para CREDITO e quando `parcelas >= 2`.
+        - **Pagamentos**: quando a categoria for **BOLETOS** ou **EMPRÉSTIMOS E FINANCIAMENTOS**,
+          a trilha vira " • PAGAMENTO <rótulo> <resto>", onde:
+          - Boleto  -> rótulo "Boleto"
+          - Empréstimo -> rótulo "Empréstimos e Financiamentos"
 
     Args:
         forma (str): Forma da saída (DINHEIRO/PIX/DEBITO/CREDITO/BOLETO).
@@ -299,17 +303,39 @@ def _fmt_obs_saida(
     desc = (descricao or "").strip()
     cat_norm = _sem_acentos(cat_raw).upper() if cat_raw else ""
 
-    # >>> Regra específica para BOLETOS: alinhar ao padrão do CRÉDITO
-    # "Lançamento SAÍDA <FORMA> R$<valor> • PAGAMENTO Boleto <descricao_form>"
+    # >>> Regra específica para BOLETOS (já existente)
     if cat_norm == "BOLETOS":
         if desc:
             # Remove prefixos redundantes "PAGAMENTO Boleto(s) ...", mantendo só o resto
             resto = re.sub(r"(?i)^\s*PAGAMENTO\s+BOLETOS?\s*[:\-]?\s*", "", desc, count=1)
-            trilha = f" • PAGAMENTO Boleto{(' ' + resto) if resto else ''}"
+            trilha = f" • PAGAMENTO Boleto{(' ' + resto.strip()) if resto.strip() else ''}"
         else:
             trilha = " • PAGAMENTO Boleto"
+
+    # >>> NOVO: Regra específica para EMPRESTIMOS/EMPRÉSTIMOS E FINANCIAMENTOS
+    elif cat_norm.startswith("EMPRESTIMOS"):
+        if desc:
+            # 1) remove "PAGAMENTO (DE) EMPRE(S)TIMOS (E FINANCIAMENTOS) :/-"
+            resto = re.sub(
+                r"(?i)^\s*PAGAMENTO\s+(?:DE\s+)?EMPR[ÉE]STIMOS?(?:\s+E\s+FINANCIAMENTOS?)?\s*[:\-]?\s*",
+                "",
+                desc,
+                count=1,
+            )
+            # 2) se descrição começar apenas com o rótulo, remove também
+            resto = re.sub(
+                r"(?i)^\s*EMPR[ÉE]STIMOS?(?:\s+E\s+FINANCIAMENTOS?)?\s*",
+                "",
+                resto,
+                count=1,
+            )
+            resto = resto.strip()
+            trilha = f" • PAGAMENTO Empréstimos e Financiamentos{(' ' + resto) if resto else ''}"
+        else:
+            trilha = " • PAGAMENTO Empréstimos e Financiamentos"
+
     else:
-        # Comportamento padrão
+        # Comportamento padrão (não-pagamento)
         cat = cat_raw or "-"
         sub = sub_raw or "-"
         trilha = f" • {cat}, {sub}"

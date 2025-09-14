@@ -1,58 +1,68 @@
-import sqlite3
+import sqlite3, os
 
-# Caminho do seu banco
-caminho_banco = r"C:\Users\User\OneDrive\Documentos\Python\Dev_Python\Abud Python Workspace - GitHub\Projeto FlowDash\data\flowdash_data.db"
+# <<< AJUSTE O CAMINHO DO DB AQUI SE PRECISAR >>>
+db_path = r"C:\Users\User\OneDrive\Documentos\Python\FlowDash\data\flowdash_data.db"
+tabela = "contas_a_pagar_mov"
+col = "ledger_id"
 
-# Colunas que foram criadas erradas e você quer remover
-colunas_erradas = ["PrevFat", "PrevRec"]
+print(f"Conectando em: {db_path}")
+with sqlite3.connect(db_path) as conn:
+    cur = conn.cursor()
+    cur.execute("PRAGMA foreign_keys=OFF;")
+    cur.execute("PRAGMA recursive_triggers=OFF;")
 
-with sqlite3.connect(caminho_banco) as conn:
-    cursor = conn.cursor()
+    # Confere se a tabela existe
+    r = cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+        (tabela,)
+    ).fetchone()
+    if not r:
+        raise SystemExit(f"Tabela não encontrada: {tabela}")
 
-    # 1. Pega todas as colunas da tabela mercadorias
-    cursor.execute("PRAGMA table_info(mercadorias);")
-    cols = [row[1] for row in cursor.fetchall()]
+    # Confere se a coluna existe
+    cols = [row[1] for row in cur.execute(f"PRAGMA table_info({tabela});")]
+    cols_lower = {c.lower() for c in cols}
+    if col not in cols_lower:
+        print(f"- OK: coluna '{col}' já não existe.")
+    else:
+        # Remover índices que referenciem a coluna
+        idx_rows = cur.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL;",
+            (tabela,)
+        ).fetchall()
+        for name, sql in idx_rows:
+            if col in (sql or "").lower():
+                cur.execute(f'DROP INDEX IF EXISTS "{name}";')
+                print(f"- Index removido: {name}")
 
-    # 2. Filtra colunas corretas (removendo as erradas)
-    colunas_mantidas = [c for c in cols if c not in colunas_erradas]
+        # Remover views que referenciem a coluna
+        views = cur.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='view' AND sql IS NOT NULL;"
+        ).fetchall()
+        for vname, vsql in views:
+            if col in (vsql or "").lower():
+                cur.execute(f'DROP VIEW IF EXISTS "{vname}";')
+                print(f"- View removida: {vname}")
 
-    # 3. Monta as colunas para recriação
-    colunas_str = ", ".join([f'"{c}"' for c in colunas_mantidas])
+        # Remover triggers que referenciem a coluna (caso existam)
+        trigs = cur.execute(
+            "SELECT name, sql FROM sqlite_master "
+            "WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL;",
+            (tabela,)
+        ).fetchall()
+        for tname, tsql in trigs:
+            if col in (tsql or "").lower():
+                cur.execute(f'DROP TRIGGER IF EXISTS "{tname}";')
+                print(f"- Trigger removida: {tname}")
 
-    # 4. Renomeia tabela atual
-    cursor.execute("ALTER TABLE mercadorias RENAME TO mercadorias_old;")
-
-    # 5. Cria nova tabela com as colunas corretas
-    # ⚠️ Ajuste os tipos conforme o schema real
-    schema = """
-    CREATE TABLE mercadorias (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        Data TEXT,
-        Colecao TEXT,
-        Fornecedor TEXT,
-        Valor_Mercadoria REAL,
-        Frete REAL,
-        Forma_Pagamento TEXT,
-        Parcelas INTEGER,
-        Previsao_Faturamento TEXT,
-        Previsao_Recebimento TEXT,
-        Faturamento TEXT,
-        Recebimento TEXT,
-        Valor_Recebido REAL,
-        Frete_Cobrado REAL,
-        Recebimento_Obs TEXT,
-        Numero_Pedido TEXT,
-        Numero_NF TEXT
-    );
-    """
-    cursor.execute(schema)
-
-    # 6. Copia os dados da tabela antiga para a nova
-    cursor.execute(f"INSERT INTO mercadorias ({colunas_str}) SELECT {colunas_str} FROM mercadorias_old;")
-
-    # 7. Remove a tabela antiga
-    cursor.execute("DROP TABLE mercadorias_old;")
+        # Drop da coluna
+        try:
+            cur.execute(f'ALTER TABLE {tabela} DROP COLUMN "{col}";')
+            print(f"- OK: coluna removida: {col}")
+        except sqlite3.OperationalError as e:
+            raise SystemExit(f"FALHA no DROP COLUMN {col}: {e}")
 
     conn.commit()
 
-print("✅ Colunas removidas com sucesso.")
+print("Concluído.")
