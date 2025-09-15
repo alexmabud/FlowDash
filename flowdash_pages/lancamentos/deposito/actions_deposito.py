@@ -85,7 +85,9 @@ def _bases_para_data(df: pd.DataFrame, data_str: str) -> Tuple[Optional[int], fl
         return None, 0.0, 0.0, 0.0, 0.0
 
     df = df.copy()
-    df["data"] = pd.to_datetime(df["data"], errors="coerce", dayfirst=True)
+    _iso = pd.to_datetime(df["data"], format="%Y-%m-%d", errors="coerce")
+    _br  = pd.to_datetime(df["data"], dayfirst=True, errors="coerce")
+    df["data"] = _iso.fillna(_br)
     alvo = pd.to_datetime(data_str)
 
     same_day = df[df["data"].dt.date == alvo.date()]
