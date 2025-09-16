@@ -7,8 +7,8 @@ transferências e mercadorias).
 
 Decisões/Convenções
 -------------------
-- `saldos_caixas`: os cartões de saldos exibem **apenas o último snapshot** com
-  `DATE(data) <= data selecionada` (não somamos múltiplas linhas).
+- `saldos_caixas`: os cartões de saldos exibem **o somatório acumulado**
+  (SUM) de `caixa_total` e `caixa2_total` com `DATE(data) <= data selecionada`.
 - Deduplicação de linhas do dia em `movimentacoes_bancarias` usa a chave
   `COALESCE(trans_uid, CAST(id AS TEXT))`.
 - Pareamento de transferência banco→banco:
@@ -42,7 +42,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
     Agrega:
       - total_vendas: soma de `entrada.Valor` (DATE(Data) = DATE(data_lanc))
       - total_saidas: soma de `saida.valor` (DATE(data) = DATE(data_lanc))
-      - caixa_total/caixa2_total: **último snapshot** <= data (tabela `saldos_caixas`)
+      - caixa_total/caixa2_total: **somatório acumulado** <= data (tabela `saldos_caixas`)
       - saldos_bancos: soma acumulada por banco <= data (tabela `saldos_bancos`)
       - listas do dia: depósitos, transferências, mercadorias (compras/recebimentos)
 
@@ -97,17 +97,15 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
             ).fetchone()[0] or 0.0
         )
 
-        # ===== Caixas: último snapshot <= data (sem somar linhas) =====
+        # ===== Caixas: SOMATÓRIO acumulado <= data =====
         try:
             row = cur.execute(
                 """
                 SELECT 
-                    COALESCE(caixa_total, 0.0)  AS cx_total,
-                    COALESCE(caixa2_total, 0.0) AS cx2_total
+                    COALESCE(SUM(COALESCE(caixa_total, 0.0)), 0.0)  AS cx_total,
+                    COALESCE(SUM(COALESCE(caixa2_total, 0.0)), 0.0) AS cx2_total
                 FROM saldos_caixas
                 WHERE DATE(data) <= DATE(?)
-                ORDER BY DATE(data) DESC, id DESC
-                LIMIT 1
                 """,
                 (data_str,),
             ).fetchone()

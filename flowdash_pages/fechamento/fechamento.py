@@ -14,9 +14,9 @@ try:
 except Exception:
     def _fmt(v):
         try:
-            return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            return f"R$ {float(v or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
         except Exception:
-            return str(v)
+            return "R$ 0,00"
 
 # --------- dependência opcional (dia útil) ---------
 try:
@@ -33,15 +33,7 @@ def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame
 
 
 def _carregar_tabela(caminho_banco: str, nome: str) -> pd.DataFrame:
-    """Carrega uma tabela do SQLite como DataFrame. Retorna vazio se não existir.
-
-    Args:
-        caminho_banco: Caminho do arquivo .db.
-        nome: Nome da tabela.
-
-    Returns:
-        DataFrame com os dados ou vazio.
-    """
+    """Carrega uma tabela do SQLite como DataFrame. Retorna vazio se não existir."""
     with sqlite3.connect(caminho_banco) as conn:
         try:
             return _read_sql(conn, f"SELECT * FROM {nome}")
@@ -55,31 +47,19 @@ _TRANSLATE = str.maketrans(
     "aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC",
 )
 
-
 def _norm(s: str) -> str:
-    """Normaliza uma string para comparação 'tolerante' (minúsculo, sem acentos e sem não-alfa)."""
+    """Normaliza string (minúsculo, sem acento/esp.) para comparação tolerante."""
     return re.sub(r"[^a-z0-9]", "", str(s).translate(_TRANSLATE).lower())
 
-
 def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    """Encontra a primeira coluna do DF que corresponde a uma lista de candidatos (tolerante).
-
-    Args:
-        df: DataFrame de origem.
-        candidates: Possíveis nomes para a coluna.
-
-    Returns:
-        Nome original da coluna ou None.
-    """
+    """Encontra a primeira coluna do DF que corresponde aos candidatos (tolerante)."""
     if df is None or df.empty:
         return None
     norm_map = {_norm(c): c for c in df.columns}
-    # match exato normalizado
     for c in candidates:
         hit = norm_map.get(_norm(c))
         if hit:
             return hit
-    # fallback: contains
     wn_list = [_norm(x) for x in candidates]
     for k, orig in norm_map.items():
         if any(wn in k for wn in wn_list):
@@ -87,17 +67,19 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-# ================== Consultas auxiliares (legado) ==================
+# ========= Parse de datas (determinístico) =========
+def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
+    """Converte coluna de data tentando ISO (YYYY-MM-DD) e depois BR (dayfirst=True)."""
+    iso = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce")
+    if iso.notna().all():
+        return iso
+    br = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
+    return iso.fillna(br)
+
+
+# ================== Consultas auxiliares (legado para salvar) ==================
 def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, float, float, float]:
-    """Retorna o último registro (<= data) de saldos_bancos mapeado em 4 colunas (legado).
-
-    Args:
-        caminho_banco: Caminho do banco.
-        data_ref: Data 'YYYY-MM-DD'.
-
-    Returns:
-        Tupla (b1, b2, b3, b4).
-    """
+    """Retorna o último registro (<= data) de saldos_bancos mapeado em 4 colunas (legado)."""
     try:
         with sqlite3.connect(caminho_banco) as conn:
             df = _read_sql(
@@ -141,53 +123,28 @@ def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, fl
     return (_get(b1), _get(b2), _get(b3), _get(b4))
 
 
-def _get_movimentos_caixa(caminho_banco: str, data_ref: str) -> pd.DataFrame:
-    """Obtém movimentações bancárias do dia para 'Caixa' e 'Caixa 2' (legado)."""
-    like_pat = f"{data_ref}%"
-    try:
-        with sqlite3.connect(caminho_banco) as conn:
-            df = _read_sql(
-                conn,
-                """
-                SELECT id, data, banco, tipo, origem, valor
-                FROM movimentacoes_bancarias
-                WHERE data LIKE ?
-                  AND banco IN ('Caixa','Caixa 2')
-                ORDER BY id
-                """,
-                (like_pat,),
-            )
-    except Exception:
-        return pd.DataFrame()
-
-    if not df.empty:
-        df["tipo"] = df["tipo"].astype(str).str.lower().str.strip()
-        df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0.0)
-    return df
-
-
-# ================== Cálculos (entradas do dia) ==================
+# ================== Cálculos (entradas do dia para cartões/dinheiro/pix) ==================
 def _dinheiro_e_pix_do_dia(caminho_banco: str, data_sel: date) -> tuple[float, float]:
-    """Soma, no dia selecionado, o valor_liquido das entradas em DINHEIRO e PIX.
-
-    Args:
-        caminho_banco: Caminho do .db.
-        data_sel: Data do fechamento.
-
-    Returns:
-        (total_dinheiro, total_pix)
-    """
+    """Soma, no dia selecionado, o **valor líquido** das entradas em DINHEIRO e PIX (fallback p/ bruto)."""
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0, 0.0
 
     c_data = _find_col(df, ["data", "data_venda", "dt"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "valor_liquido_venda", "valor_liq_recebido"])
+    # prioridade para líquido; se não existir, usa valor/valor_total
+    c_val = _find_col(
+        df,
+        [
+            "valor_liquido", "valorLiquido", "valor_liq",
+            "valor_liquido_venda", "valor_liq_recebido", "valor_liquido_recebido",
+            "valor", "valor_total",
+        ],
+    )
     if not (c_data and c_forma and c_val):
         return 0.0, 0.0
 
-    df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+    df[c_data] = _parse_date_col(df, c_data)
     df_day = df[df[c_data].dt.date == data_sel].copy()
     if df_day.empty:
         return 0.0, 0.0
@@ -198,22 +155,13 @@ def _dinheiro_e_pix_do_dia(caminho_banco: str, data_sel: date) -> tuple[float, f
 
 
 def _dia_util_anterior(base: date) -> date:
-    """Calcula o dia útil anterior a 'base'. Usa workalendar quando disponível.
-
-    Args:
-        base: Data base.
-
-    Returns:
-        Data do dia útil anterior.
-    """
+    """Calcula o dia útil anterior a 'base'. Usa workalendar quando disponível."""
     if _HAS_WORKACALENDAR:
         cal = BrazilDistritoFederal()
         d = base - timedelta(days=1)
         while not cal.is_working_day(d):
             d -= timedelta(days=1)
         return d
-
-    # Fallback simples (sem feriados): Sáb/Dom voltam para Sexta
     wd = base.weekday()  # 0=Mon .. 6=Sun
     if wd == 0:
         return base - timedelta(days=3)
@@ -223,27 +171,27 @@ def _dia_util_anterior(base: date) -> date:
 
 
 def _cartao_liquido_d1_por_valor_liquido(caminho_banco: str, data_base: date) -> float:
-    """Soma, para o dia útil anterior, valor_liquido das vendas em DÉBITO/CRÉDITO (depósito D-1).
-
-    Args:
-        caminho_banco: Caminho do .db.
-        data_base: Data de referência (hoje).
-
-    Returns:
-        Total líquido estimado que cai no dia base (D-1).
-    """
+    """Soma, para o dia útil anterior, o **valor líquido** das vendas em DÉBITO/CRÉDITO (depósito D-1)."""
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0
 
     c_data = _find_col(df, ["data", "data_venda", "dt"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "valor_liquido_venda", "valor_liq_recebido"])
+    # prioridade para líquido; fallback para valor/valor_total
+    c_val = _find_col(
+        df,
+        [
+            "valor_liquido", "valorLiquido", "valor_liq",
+            "valor_liquido_venda", "valor_liq_recebido", "valor_liquido_recebido",
+            "valor", "valor_total",
+        ],
+    )
     if not (c_data and c_forma and c_val):
         return 0.0
 
     dia_anterior = _dia_util_anterior(data_base)
-    df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+    df[c_data] = _parse_date_col(df, c_data)
     df_prev = df[df[c_data].dt.date == dia_anterior].copy()
     if df_prev.empty:
         return 0.0
@@ -266,7 +214,7 @@ def _somar_caixas_totais(caminho_banco: str, data_sel: date) -> tuple[float, flo
     c_cx2 = _find_col(df, ["caixa2_total", "caixa_2_total", "total_caixa2", "caixa2", "caixa_2", "caixa2_total_dia"])
 
     if c_data:
-        df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+        df[c_data] = _parse_date_col(df, c_data)
         df = df[df[c_data].dt.date <= data_sel].copy()
 
     soma_caixa = float(pd.to_numeric(df[c_caixa], errors="coerce").sum()) if c_caixa else 0.0
@@ -275,22 +223,14 @@ def _somar_caixas_totais(caminho_banco: str, data_sel: date) -> tuple[float, flo
 
 
 def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]:
-    """Soma (<= data_sel) por coluna/banco em saldos_bancos.
-
-    Args:
-        caminho_banco: Caminho do .db.
-        data_sel: Data limite.
-
-    Returns:
-        Dict {Nome do Banco (bonito): soma}.
-    """
+    """Soma (<= data_sel) por coluna/banco em saldos_bancos."""
     df = _carregar_tabela(caminho_banco, "saldos_bancos")
     if df.empty:
         return {}
 
     c_data = _find_col(df, ["data", "dt"])
     if c_data:
-        df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+        df[c_data] = _parse_date_col(df, c_data)
         df = df[df[c_data].dt.date <= data_sel].copy()
 
     ignore = {"id", "created_at", "updated_at"}
@@ -305,7 +245,6 @@ def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]
         if ("banco" in lc) or (lc in {"inter", "bradesco", "infinitepay", "outros bancos", "outros_bancos", "outros"}):
             cols_bancos.append(c)
 
-    # Fallback: pegue colunas numéricas se não encontrou nada pelo nome
     if not cols_bancos:
         for c in df.columns:
             if c.lower() in ignore:
@@ -319,27 +258,38 @@ def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]
     return dict(sorted(pretty.items(), key=lambda x: x[0]))
 
 
-# ============== Valores do dia (entradas e correções) ==============
-def _entradas_caixas_do_dia(caminho_banco: str, data_sel: date) -> float:
-    """Soma, no dia, caixa_total + caixa2_total em saldos_caixas."""
-    df = _carregar_tabela(caminho_banco, "saldos_caixas")
+# ============== Resumo de hoje com base nas tabelas entrada/saida ==============
+def _entradas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
+    """Soma, no dia, os valores da tabela `entrada` (coluna 'valor'; fallback p/ líquido)."""
+    df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0
-
-    c_data = _find_col(df, ["data", "dt"])
-    c_c1 = _find_col(df, ["caixa_total", "total_caixa", "caixa", "caixa_total_dia"])
-    c_c2 = _find_col(df, ["caixa2_total", "caixa_2_total", "total_caixa2", "caixa2", "caixa_2", "caixa2_total_dia"])
-    if not (c_data and (c_c1 or c_c2)):
+    c_data = _find_col(df, ["data", "data_venda", "dt"])
+    # aqui mantém prioridade para 'valor' como solicitado
+    c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido", "valor_liq"])
+    if not (c_data and c_val):
         return 0.0
-
-    df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+    df[c_data] = _parse_date_col(df, c_data)
     dia = df[df[c_data].dt.date == data_sel].copy()
     if dia.empty:
         return 0.0
+    return float(pd.to_numeric(dia[c_val], errors="coerce").fillna(0.0).sum())
 
-    v1 = pd.to_numeric(dia[c_c1], errors="coerce").sum() if c_c1 in dia.columns else 0.0
-    v2 = pd.to_numeric(dia[c_c2], errors="coerce").sum() if c_c2 in dia.columns else 0.0
-    return float(v1 + v2)
+
+def _saidas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
+    """Soma, no dia, os valores da tabela `saida` (coluna 'valor')."""
+    df = _carregar_tabela(caminho_banco, "saida")
+    if df.empty:
+        return 0.0
+    c_data = _find_col(df, ["data", "dt", "data_saida"])
+    c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido"])
+    if not (c_data and c_val):
+        return 0.0
+    df[c_data] = _parse_date_col(df, c_data)
+    dia = df[df[c_data].dt.date == data_sel].copy()
+    if dia.empty:
+        return 0.0
+    return float(pd.to_numeric(dia[c_val], errors="coerce").fillna(0.0).sum())
 
 
 def _correcoes_caixa_do_dia(caminho_banco: str, data_sel: date) -> float:
@@ -347,17 +297,14 @@ def _correcoes_caixa_do_dia(caminho_banco: str, data_sel: date) -> float:
     df = _carregar_tabela(caminho_banco, "correcao_caixa")
     if df.empty:
         return 0.0
-
     c_data = _find_col(df, ["data", "dt", "data_correcao"])
     c_valor = _find_col(df, ["valor", "valor_correcao", "valor_liquido", "valorLiquido"])
     if not (c_data and c_valor):
         return 0.0
-
-    df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+    df[c_data] = _parse_date_col(df, c_data)
     dia = df[df[c_data].dt.date == data_sel].copy()
     if dia.empty:
         return 0.0
-
     return float(pd.to_numeric(dia[c_valor], errors="coerce").sum())
 
 
@@ -366,17 +313,14 @@ def _correcoes_acumuladas_ate(caminho_banco: str, data_sel: date) -> float:
     df = _carregar_tabela(caminho_banco, "correcao_caixa")
     if df.empty:
         return 0.0
-
     c_data = _find_col(df, ["data", "dt", "data_correcao"])
     c_valor = _find_col(df, ["valor", "valor_correcao", "valor_liquido", "valorLiquido"])
     if not (c_data and c_valor):
         return 0.0
-
-    df[c_data] = pd.to_datetime(df[c_data], errors="coerce")
+    df[c_data] = _parse_date_col(df, c_data)
     ate = df[df[c_data].dt.date <= data_sel].copy()
     if ate.empty:
         return 0.0
-
     return float(pd.to_numeric(ate[c_valor], errors="coerce").sum())
 
 
@@ -384,7 +328,6 @@ def _correcoes_acumuladas_ate(caminho_banco: str, data_sel: date) -> float:
 try:
     from flowdash_pages.lancamentos.pagina.ui_cards_pagina import render_card_row  # noqa: F401
 except Exception:
-    # Fallback minimalista para evitar crash se o import falhar.
     def render_card_row(title: str, items: list[tuple[str, object, bool]]) -> None:
         st.subheader(title)
         cols = st.columns(len(items))
@@ -394,15 +337,37 @@ except Exception:
                     st.markdown(f"**{label}**")
                     st.dataframe(value, use_container_width=True, hide_index=True)
                 else:
-                    num = 0.0
                     try:
                         num = float(value or 0.0)
                     except Exception:
-                        pass
+                        num = 0.0
                     if number_always:
                         st.metric(label, _fmt(num))
                     else:
                         st.write(label, _fmt(num))
+
+
+# ========= Formatter seguro para a tabela de “Fechamentos Anteriores” =========
+def _style_moeda_seguro(df: pd.DataFrame, cols_moeda: list[str]) -> pd.io.formats.style.Styler | pd.DataFrame:
+    """
+    Aplica _fmt (moeda pt-BR tolerante a None) nas colunas monetárias.
+    Evita erros de format string quando há None/NaN.
+    """
+    if df is None or df.empty:
+        return df
+    # Garante que as colunas existem no DF
+    cols = [c for c in cols_moeda if c in df.columns]
+    try:
+        # Usa callable por coluna (não usa strings de formatação)
+        mapping = {c: _fmt for c in cols}
+        return df.style.format(mapping, na_rep=_fmt(0))
+    except Exception:
+        # Fallback: substitui None/"" por 0 e tenta novamente
+        dfx = df.copy()
+        for c in cols:
+            dfx[c] = dfx[c].apply(lambda v: 0 if v in (None, "", "None") else v)
+        mapping = {c: _fmt for c in cols}
+        return dfx.style.format(mapping, na_rep=_fmt(0))
 
 
 # ========================= Página (layout) =========================
@@ -423,10 +388,9 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     bancos_totais = _somar_bancos_totais(caminho_banco, data_sel)
     total_bancos = float(sum(bancos_totais.values())) if bancos_totais else 0.0
 
-    # Resumo do dia
-    entradas_caixas_dia = _entradas_caixas_do_dia(caminho_banco, data_sel)
-    df_mov = _get_movimentos_caixa(caminho_banco, data_ref)
-    saidas_total = float(df_mov.loc[df_mov["tipo"] == "saida", "valor"].sum()) if not df_mov.empty else 0.0
+    # Resumo do dia (AGORA baseado em entrada/saida)
+    entradas_total_dia = _entradas_total_do_dia(caminho_banco, data_sel)
+    saidas_total_dia = _saidas_total_do_dia(caminho_banco, data_sel)
     corr_dia = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
 
@@ -463,8 +427,8 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     render_card_row(
         "📊 Resumo das Movimentações de Hoje",
         [
-            ("Entradas (Caixa/Caixa 2)", entradas_caixas_dia, True),
-            ("Saídas (Caixa/Caixa 2)", saidas_total, True),
+            ("Entradas (Caixa/Caixa 2)", entradas_total_dia, True),
+            ("Saídas (Caixa/Caixa 2)", saidas_total_dia, True),
             ("Correções de Caixa", df_corr, False),
         ],
     )
@@ -520,11 +484,11 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                         float(b1), float(b2), float(b3), float(b4),  # legado
                         float(soma_caixa_total),
                         float(soma_caixa2_total),
-                        float(entradas_caixas_dia),
-                        float(saidas_total),
+                        float(entradas_total_dia),
+                        float(saidas_total_dia),
                         float(corr_dia),
-                        float(saldo_total),  # esperado = Caixa + Bancos + Correções (acum.)
-                        float(saldo_total),  # informado = esperado
+                        float(saldo_total),  # esperado
+                        float(saldo_total),  # informado
                         0.0,
                     ),
                 )
@@ -564,23 +528,14 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
         df_fech = pd.DataFrame()
 
     if not df_fech.empty:
+        # Colunas monetárias para aplicar o formatter seguro
+        cols_moeda = [
+            "Inter", "Bradesco", "InfinitePay", "Outros Bancos",
+            "Caixa", "Caixa 2", "Entradas", "Saídas", "Correções",
+            "Saldo Esperado", "Valor Informado", "Diferença",
+        ]
         st.dataframe(
-            df_fech.style.format(
-                {
-                    "Inter": "R$ {:,.2f}",
-                    "Bradesco": "R$ {:,.2f}",
-                    "InfinitePay": "R$ {:,.2f}",
-                    "Outros Bancos": "R$ {:,.2f}",
-                    "Caixa": "R$ {:,.2f}",
-                    "Caixa 2": "R$ {:,.2f}",
-                    "Entradas": "R$ {:,.2f}",
-                    "Saídas": "R$ {:,.2f}",
-                    "Correções": "R$ {:,.2f}",
-                    "Saldo Esperado": "R$ {:,.2f}",
-                    "Valor Informado": "R$ {:,.2f}",
-                    "Diferença": "R$ {:,.2f}",
-                }
-            ),
+            _style_moeda_seguro(df_fech, cols_moeda),
             use_container_width=True,
             hide_index=True,
         )
