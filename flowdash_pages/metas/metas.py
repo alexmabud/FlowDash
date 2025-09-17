@@ -1,4 +1,33 @@
 # flowdash_pages/metas/metas.py
+"""
+FlowDash — Módulo de Metas (Página)
+
+Resumo
+------
+Renderiza a página de Metas (Dia/Semana/Mês) com velocímetros (gauge) em zonas
+(Vermelho/Bronze/Prata/Ouro) e cartões-resumo de metas vs. valores acumulados.
+A página sempre inicia na data atual.
+
+Responsabilidades
+-----------------
+- Carregar dados de entradas e de metas (de session_state, módulo auxiliar ou DB).
+- Calcular acumulados por dia, semana e mês.
+- Calcular percentuais de atingimento de metas por período (loja e vendedores).
+- Exibir gauges coloridos e cartões de “Meta / Falta” por período.
+
+Dependências
+------------
+- Streamlit, Pandas, Plotly (graph_objects).
+- SQLite (leitura simples quando DataFrames não estão no session_state).
+- Utilitário `formatar_moeda` em `utils.utils` (com fallback interno).
+
+Notas de segurança
+------------------
+- Consultas SQL somente de leitura e com identificação segura de colunas.
+- Nenhuma entrada do usuário é interpolada diretamente em SQL.
+- Chaves do `session_state` usam sufixo diário para evitar reuso indevido.
+"""
+
 from __future__ import annotations
 
 from datetime import date, timedelta
@@ -25,24 +54,73 @@ __all__ = ["page_metas", "render_metas_auto", "render", "render_metas"]
 # ============================= Helpers =============================
 _PT_WEEK = {0: "segunda", 1: "terca", 2: "quarta", 3: "quinta", 4: "sexta", 5: "sabado", 6: "domingo"}
 
-def _coluna_dia(d: date) -> str: return _PT_WEEK[d.weekday()]
-def _inicio_semana(d: date) -> date: return d - timedelta(days=d.weekday())
+def _coluna_dia(d: date) -> str:
+    """Retorna o nome da coluna do dia da semana (em minúsculas) a partir de uma data."""
+    return _PT_WEEK[d.weekday()]
+
+def _inicio_semana(d: date) -> date:
+    """Calcula o primeiro dia (segunda-feira) da semana da data informada."""
+    return d - timedelta(days=d.weekday())
+
 def _calcular_percentual(valor: float, meta: float) -> float:
+    """Calcula (valor/meta)*100 com 1 casa decimal. Retorna 0.0 se meta inválida/zero."""
     if not meta or meta <= 0: return 0.0
     return round((float(valor) / float(meta)) * 100.0, 1)
 
 def _hex_to_rgb(h: str) -> Tuple[int, int, int]:
-    h = h.strip().lstrip("#");  h = "".join(c*2 for c in h) if len(h)==3 else h
+    """Converte cor hexadecimal (#RGB/#RRGGBB) para tupla (R,G,B)."""
+    h = h.strip().lstrip("#")
+    h = "".join(c*2 for c in h) if len(h)==3 else h
     return int(h[0:2],16), int(h[2:4],16), int(h[4:6],16)
+
 def _tint_rgba(hex_color: str, alpha: float = 0.25) -> str:
-    r,g,b = _hex_to_rgb(hex_color); a = max(0.0, min(1.0, float(alpha))); return f"rgba({r},{g},{b},{a})"
+    """Retorna string rgba() a partir de um hex e alpha (0..1)."""
+    r,g,b = _hex_to_rgb(hex_color)
+    a = max(0.0, min(1.0, float(alpha)))
+    return f"rgba({r},{g},{b},{a})"
+
 def _slug_key(s: str) -> str:
-    s = str(s or "").strip().lower();  s = re.sub(r"[^a-z0-9]+", "_", s);  return s or "anon"
+    """Normaliza string para uso como chave (slug) segura em IDs/keys de UI."""
+    s = str(s or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s or "anon"
 
 # ======================= Gauge (zonas + label R$) =======================
-def _gauge_percentual_zonas(titulo: str, percentual: float, bronze_pct: float, prata_pct: float,
-                            axis_max: float = 120.0, bar_color_rgba: str = "rgba(0,200,83,0.75)",
-                            valor_label: Optional[str] = None) -> go.Figure:
+def _gauge_percentual_zonas(
+    titulo: str,
+    percentual: float,
+    bronze_pct: float,
+    prata_pct: float,
+    axis_max: float = 120.0,
+    bar_color_rgba: str = "rgba(0,200,83,0.75)",
+    valor_label: Optional[str] = None
+) -> go.Figure:
+    """
+    Cria um gauge (Plotly Indicator) com zonas de cor:
+    - 0..Bronze = Vermelho, Bronze..Prata = Bronze, Prata..100 = Prata, 100..max = Ouro.
+
+    Parâmetros
+    ----------
+    titulo : str
+        Título exibido no gauge.
+    percentual : float
+        Valor atual (0..axis_max).
+    bronze_pct : float
+        Percentual de corte para a zona Bronze.
+    prata_pct : float
+        Percentual de corte para a zona Prata.
+    axis_max : float, opcional (default=120.0)
+        Máximo do eixo do gauge.
+    bar_color_rgba : str, opcional
+        Cor da barra (valor atual).
+    valor_label : str, opcional
+        Texto adicional (ex.: valor acumulado) abaixo do número.
+
+    Retorna
+    -------
+    plotly.graph_objects.Figure
+        Figura pronta para `st.plotly_chart`.
+    """
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata  = max(bronze, min(100.0, float(prata_pct)))
     max_axis = max(100.0, float(axis_max))
@@ -80,6 +158,15 @@ def _gauge_percentual_zonas(titulo: str, percentual: float, bronze_pct: float, p
 
 # ======================= Cards de metas (HTML) =======================
 def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, acumulado: float) -> str:
+    """
+    Gera o HTML de um card com metas de um período (Dia/Semana/Mês).
+    Mostra Meta por nível (Ouro/Prata/Bronze) e o quanto falta para atingir.
+
+    Retorna
+    -------
+    str
+        HTML (seguro para `unsafe_allow_html=True`).
+    """
     def _linha(nivel, meta):
         falta = max(float(meta) - float(acumulado), 0.0)
         falta_txt = f"<span style='color:#00C853'>✅ {_fmt(0)}</span>" if falta <= 0 else _fmt(falta)
@@ -113,6 +200,12 @@ def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, ac
 
 # ======================= Normalização & Auto-load =======================
 def _norm_df_entrada(df_entrada: pd.DataFrame) -> pd.DataFrame:
+    """
+    Padroniza o DataFrame de entradas:
+    - Converte Data -> datetime
+    - Coage Valor -> float (preenche NaN com 0.0)
+    - Garante colunas Usuario/UsuarioUpper
+    """
     if not isinstance(df_entrada, pd.DataFrame):
         return pd.DataFrame(columns=["Usuario", "UsuarioUpper", "Data", "Valor"])
     df = df_entrada.copy()
@@ -127,17 +220,25 @@ def _norm_df_entrada(df_entrada: pd.DataFrame) -> pd.DataFrame:
     return df
 
 def _descobrir_perfil_usuario() -> Tuple[str, str]:
+    """
+    Descobre perfil e nome do usuário logado a partir do session_state.
+    Retorna (perfil, usuario).
+    """
     perfil = (st.session_state.get("perfil_logado") or st.session_state.get("perfil") or st.session_state.get("role") or "Administrador")
     usuario = (st.session_state.get("usuario_logado") or st.session_state.get("usuario") or st.session_state.get("nome_usuario") or "")
     if isinstance(usuario, dict): usuario = usuario.get("nome", "")
     return str(perfil), str(usuario)
 
-# ---- DB fallbacks (idêntico aos já enviados; mantido aqui para robustez) ----
+# ---- DB fallbacks ----
 _USER_COLS = ["Usuario","usuario","vendedor","responsavel","user","nome_usuario"]
 _DATE_COLS = ["Data","data","data_venda","data_lanc","data_emissao","created_at","data_evento","data_pagamento"]
 _VALU_COLS = ["Valor","valor","valor_total","valor_liquido","valor_bruto","Valor_Mercadoria","valor_evento","valor_pago","valor_a_pagar"]
 
 def _discover_db_path() -> Optional[str]:
+    """
+    Tenta descobrir o caminho do banco a partir de session_state e caminhos padrão.
+    Retorna o caminho encontrado ou None.
+    """
     cand = st.session_state.get("caminho_banco")
     if isinstance(cand,str) and os.path.exists(cand): return cand
     for p in (os.path.join("data","flowdash_data.db"), os.path.join("data","entrada.db"),
@@ -147,10 +248,15 @@ def _discover_db_path() -> Optional[str]:
     return None
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    """Verifica se uma tabela existe no SQLite (case-insensitive)."""
     cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND LOWER(name)=LOWER(?) LIMIT 1;", (name,))
     return cur.fetchone() is not None
 
 def _pick_cols(conn: sqlite3.Connection, table: str) -> Optional[Tuple[Optional[str], str, str]]:
+    """
+    Identifica colunas de usuário, data e valor em uma tabela arbitrária.
+    Retorna (user_col|None, date_col, value_col) ou None se não encontradas.
+    """
     cols = [r[1] for r in conn.execute(f"PRAGMA table_info('{table}')")]
     lower = {c.lower(): c for c in cols}
     def _first(cands: List[str]) -> Optional[str]:
@@ -162,8 +268,14 @@ def _pick_cols(conn: sqlite3.Connection, table: str) -> Optional[Tuple[Optional[
     return (u, d, v)
 
 def _load_df_entrada_from_db(db_path: str) -> pd.DataFrame:
-    try: conn = sqlite3.connect(db_path)
-    except Exception: return pd.DataFrame(columns=["Usuario","Data","Valor"])
+    """
+    Carrega entradas do banco SQLite tentando tabelas conhecidas.
+    Retorna DataFrame com colunas (Usuario, Data, Valor).
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+    except Exception:
+        return pd.DataFrame(columns=["Usuario","Data","Valor"])
     try:
         for tb in ["entradas","entrada","lancamentos_entrada","vendas","venda"]:
             if _table_exists(conn,tb):
@@ -179,10 +291,18 @@ def _load_df_entrada_from_db(db_path: str) -> pd.DataFrame:
                 df["Usuario"] = df["Usuario"].astype(str).fillna("LOJA")
                 return df
         return pd.DataFrame(columns=["Usuario","Data","Valor"])
-    finally: conn.close()
+    finally:
+        conn.close()
 
 def _load_df_metas_from_db(db_path: str) -> pd.DataFrame:
-    try: conn = sqlite3.connect(db_path)
+    """
+    Carrega metas do banco SQLite (tabela `metas`).
+    Normaliza percentuais e calcula metas absolutas de:
+    - Mensal, Semanal, e por dia da semana.
+    - Níveis: Ouro, Prata e Bronze.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
     except Exception:
         return pd.DataFrame(columns=["vendedor","mensal","semanal","segunda","terca","quarta","quinta","sexta","sabado","domingo","meta_ouro","meta_prata","meta_bronze"])
     try:
@@ -192,7 +312,7 @@ def _load_df_metas_from_db(db_path: str) -> pd.DataFrame:
         if raw.empty:
             return pd.DataFrame(columns=["vendedor","mensal","semanal","segunda","terca","quarta","quinta","sexta","sabado","domingo","meta_ouro","meta_prata","meta_bronze"])
         df = raw.copy()
-        def _num(col, default=0.0): 
+        def _num(col, default=0.0):
             return pd.to_numeric(df[col], errors="coerce").fillna(default) if col in df.columns else pd.Series([default]*len(df))
         mensal   = _num("meta_mensal",0.0)
         perc_sem = _num("perc_semanal",25.0)
@@ -219,9 +339,16 @@ def _load_df_metas_from_db(db_path: str) -> pd.DataFrame:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
         out["vendedor"] = out["vendedor"].astype(str).fillna("LOJA")
         return out
-    finally: conn.close()
+    finally:
+        conn.close()
 
 def _auto_carregar_dfs() -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
+    """
+    Tenta obter df_entrada e df_metas na seguinte ordem:
+    1) st.session_state
+    2) flowdash_pages.dataframes.dataframes (carregar_df_entrada/carregar_df_metas)
+    3) Banco SQLite (caminho detectado)
+    """
     df_e, df_m = st.session_state.get("df_entrada"), st.session_state.get("df_metas")
     if isinstance(df_e,pd.DataFrame) and isinstance(df_m,pd.DataFrame): return df_e, df_m
     try:
@@ -231,7 +358,8 @@ def _auto_carregar_dfs() -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]
             if isinstance(df_e,pd.DataFrame) and isinstance(df_m,pd.DataFrame):
                 st.session_state["df_entrada"], st.session_state["df_metas"] = df_e, df_m
                 return df_e, df_m
-    except Exception: pass
+    except Exception:
+        pass
     db = _discover_db_path()
     if db:
         df_e, df_m = _load_df_entrada_from_db(db), _load_df_metas_from_db(db)
@@ -241,6 +369,10 @@ def _auto_carregar_dfs() -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]
 
 # ------ metas por vendedor/loja ------
 def _extrair_metas_completo(df_metas: pd.DataFrame, vendedor_upper: str, coluna_dia: str) -> Tuple[float, float, float, float, float, float]:
+    """
+    Extrai (meta_dia, meta_sem, meta_mes, ouro, prata, bronze) para um vendedor/loja.
+    Busca por `vendedor` (case-insensitive). Retorna 0.0 se não encontrado.
+    """
     metas_v = pd.DataFrame()
     if isinstance(df_metas,pd.DataFrame) and not df_metas.empty:
         col_v = df_metas.get("vendedor")
@@ -257,6 +389,12 @@ def _extrair_metas_completo(df_metas: pd.DataFrame, vendedor_upper: str, coluna_
 
 # =============================== Página ===============================
 def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFrame], perfil_logado: str, usuario_logado: str):
+    """
+    Renderiza a página de Metas:
+    - Seletor de data (default = hoje; chave diária para evitar persistência indesejada).
+    - Bloco LOJA (3 gauges + cards Dia/Semana/Mês).
+    - Bloco VENDEDORES (filtra por perfil Vendedor se aplicável).
+    """
     if not isinstance(df_entrada,pd.DataFrame) or not isinstance(df_metas,pd.DataFrame):
         df_e2, df_m2 = _auto_carregar_dfs(); perfil2, usuario2 = _descobrir_perfil_usuario()
         if isinstance(df_e2,pd.DataFrame) and isinstance(df_m2,pd.DataFrame): return page_metas(df_e2, df_m2, perfil2, usuario2)
@@ -268,10 +406,12 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
     available_dates = df_e["Data"].dt.date.dropna()
     if available_dates.empty: st.info("Sem dados de vendas para exibir."); return
 
-    # Seletor de data
+    # Seletor de data — sempre iniciar em HOJE
     min_d, max_d = available_dates.min(), max(available_dates.max(), date.today())
-    default_ref = date.today() if (available_dates == date.today()).any() else available_dates.max()
-    ref_day = st.date_input("📅 Data de referência", value=default_ref, min_value=min_d, max_value=max_d, format="YYYY/MM/DD", key="metas_ref_date")
+    default_ref = date.today()  # força hoje como padrão
+    daily_key = f"metas_ref_date_{date.today():%Y%m%d}"  # evita reuso do valor de ontem no session_state
+    ref_day = st.date_input("📅 Data de referência", value=default_ref, min_value=min_d, max_value=max_d,
+                            format="YYYY/MM/DD", key=daily_key)
     st.markdown(f"**📆 Metas do dia — {ref_day:%Y-%m-%d}**")
 
     inicio_sem, inicio_mes = _inicio_semana(ref_day), ref_day.replace(day=1)
@@ -279,17 +419,19 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
 
     # ------------- helpers de período -------------
     def _ratios(meta_ouro: float, meta_prata: float, meta_bronze: float) -> Tuple[float,float]:
+        """Converte metas Ouro/Prata/Bronze em percentuais relativos à Ouro."""
         if meta_ouro and meta_ouro > 0:
             return (100.0 * (meta_prata/meta_ouro), 100.0 * (meta_bronze/meta_ouro))
-        # fallback
         return (87.5, 75.0)
 
     def _cards_periodo(ouro_m: float, prata_m: float, bronze_m: float,
                        meta_dia: float, meta_sem: float,
                        val_d: float, val_s: float, val_m: float):
-        # ratios vindos do mês (preserva seu desenho da prata/bronze)
+        """
+        Monta e exibe os três cards (Dia/Semana/Mês) com metas por nível e “Falta”.
+        Usa proporções de Prata/Bronze derivadas da meta Ouro mensal.
+        """
         prata_pct, bronze_pct = _ratios(ouro_m, prata_m, bronze_m)
-        # metas escalares para dia/semana
         prata_d, bronze_d = meta_dia * (prata_pct/100.0), meta_dia * (bronze_pct/100.0)
         prata_s, bronze_s = meta_sem * (prata_pct/100.0), meta_sem * (bronze_pct/100.0)
 
@@ -368,10 +510,16 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
 
 # ============================ Entrypoints ============================
 def render_metas_auto():
+    """Entry-point automático para a página de Metas (faz autoload dos DataFrames)."""
     df_e, df_m = _auto_carregar_dfs(); perfil, usuario = _descobrir_perfil_usuario()
     if not isinstance(df_e,pd.DataFrame) or not isinstance(df_m,pd.DataFrame):
         st.error("Não encontrei os DataFrames de entrada/metas automaticamente."); return
     page_metas(df_e, df_m, perfil, usuario)
 
-def render(*_args, **_kwargs): render_metas_auto()
-def render_metas(*_args, **_kwargs): render_metas_auto()
+def render(*_args, **_kwargs):
+    """Compat: alias de `render_metas_auto()`."""
+    render_metas_auto()
+
+def render_metas(*_args, **_kwargs):
+    """Compat: alias de `render_metas_auto()`."""
+    render_metas_auto()
