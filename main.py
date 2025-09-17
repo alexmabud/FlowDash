@@ -1,3 +1,4 @@
+# main.py
 """
 FlowDash — Main App
 ===================
@@ -28,6 +29,9 @@ st.set_page_config(page_title="FlowDash", layout="wide")
 # Caminho do banco de dados
 caminho_banco = os.path.join("data", "flowdash_data.db")
 os.makedirs("data", exist_ok=True)
+
+# 👉 torna o caminho visível para todos os módulos (Metas/DataFrames)
+st.session_state.setdefault("caminho_banco", caminho_banco)
 
 # Infra mínima de BD (idempotente)
 try:
