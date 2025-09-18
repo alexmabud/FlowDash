@@ -8,7 +8,6 @@ Ponto de entrada do aplicativo Streamlit do FlowDash.
 from __future__ import annotations
 import importlib
 import inspect
-import os
 import pathlib
 import shutil
 import sqlite3
@@ -48,9 +47,7 @@ def _list_tables_sqlite(path: pathlib.Path) -> list[str]:
     """Lista tabelas existentes num arquivo SQLite."""
     try:
         with sqlite3.connect(str(path)) as conn:
-            cur = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY 1;"
-            )
+            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY 1;")
             return [r[0] for r in cur.fetchall()]
     except Exception:
         return []
@@ -89,22 +86,19 @@ def _has_required_tables(path: pathlib.Path) -> bool:
 @st.cache_resource(show_spinner=True)
 def ensure_db_available() -> str:
     """
-    1) Usa data/flowdash_data.db se existir e for válido (SQLite + tabela 'usuarios').
-    2) Senão, baixa do OneDrive (st.secrets['onedrive']['shared_download_url']) e valida.
-    3) Se falhar, copia o template (data/flowdash_template.db).
+    Política:
+      1) Se houver URL do OneDrive em secrets, SEMPRE tentar baixar e substituir o arquivo local
+         (só promove se o download for válido: SQLite + tabela 'usuarios').
+      2) Se não houver URL (ou download inválido), usar o DB local se for válido.
+      3) Caso contrário, cair no template.
     """
     db_local = pathlib.Path(_db_local_path())
     tpl = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
+    url = st.secrets.get("onedrive", {}).get("shared_download_url", "").strip()
 
-    # 1) Já existe local e é válido?
-    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
-        st.session_state["db_source"] = "local"
-        return str(db_local)
-
-    # 2) Tentar OneDrive (link de compartilhamento somente leitura)
-    try:
-        url = st.secrets.get("onedrive", {}).get("shared_download_url", "")
-        if url:
+    # 1) Prioriza OneDrive quando houver URL
+    if url:
+        try:
             tmp = db_local.with_suffix(".tmp")
             with requests.get(url, stream=True, timeout=60, allow_redirects=True) as r:
                 r.raise_for_status()
@@ -114,11 +108,11 @@ def ensure_db_available() -> str:
                             f.write(chunk)
             # valida e promove
             if tmp.exists() and tmp.stat().st_size > 0 and _is_sqlite(tmp) and _has_required_tables(tmp):
+                db_local.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(tmp, db_local)
                 st.session_state["db_source"] = "onedrive"
                 return str(db_local)
             else:
-                # 🔎 Diagnóstico: mostrar por que não validou
                 info = _debug_file_info(tmp)
                 tables = _list_tables_sqlite(tmp)
                 try:
@@ -127,14 +121,19 @@ def ensure_db_available() -> str:
                     pass
                 st.warning(
                     "Arquivo do OneDrive não é SQLite válido ou está sem a tabela 'usuarios'.\n"
-                    f"Debug: {info}\n"
-                    f"Tabelas detectadas: {tables}"
+                    f"Debug: {info}\nTabelas detectadas: {tables}"
                 )
-    except Exception as e:
-        st.warning(f"Falha ao baixar banco do OneDrive: {e}")
+        except Exception as e:
+            st.warning(f"Falha ao baixar banco do OneDrive: {e}")
 
-    # 3) Fallback: template (para forks/testes)
+    # 2) Sem OneDrive (ou download falhou): usa local se válido
+    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
+        st.session_state["db_source"] = "local"
+        return str(db_local)
+
+    # 3) Fallback: template ou vazio
     try:
+        db_local.parent.mkdir(parents=True, exist_ok=True)
         if tpl.exists():
             shutil.copy2(tpl, db_local)
             st.session_state["db_source"] = "template"
@@ -202,7 +201,6 @@ def ensure_required_tables(db_path: str) -> None:
 # Caminho do banco de dados (garantido)
 caminho_banco = ensure_db_available()
 ensure_required_tables(caminho_banco)  # <- garante 'usuarios' se faltar
-os.makedirs("data", exist_ok=True)
 
 # Mostra de onde veio o banco (útil no deploy)
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
@@ -270,12 +268,12 @@ def _call_page(module_path: str):
             kind = p.kind
             has_default = (p.default is not inspect._empty)
 
-        # 1) passa caminho_banco como posicional se existir
+            # 1) passa caminho_banco como posicional se existir
             if name == "caminho_banco":
                 args.append(caminho_banco)
                 continue
 
-        # 2) valores conhecidos/estado
+            # 2) valores conhecidos/estado
             if name in known:
                 val = known[name]
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
@@ -291,7 +289,7 @@ def _call_page(module_path: str):
                     kwargs[name] = val
                 continue
 
-        # 3) obrigatórios sem default → None
+            # 3) obrigatórios sem default → None
             if not has_default:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(None)
