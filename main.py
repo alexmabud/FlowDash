@@ -7,9 +7,13 @@ Ponto de entrada do aplicativo Streamlit do FlowDash.
 """
 
 from __future__ import annotations
-import os
 import importlib
 import inspect
+import os
+import pathlib
+import shutil
+import sqlite3
+import requests  # baixar DB do OneDrive
 import streamlit as st
 
 from auth.auth import (
@@ -26,8 +30,86 @@ from utils.utils import garantir_trigger_totais_saldos_caixas
 # ======================================================================================
 st.set_page_config(page_title="FlowDash", layout="wide")
 
-# Caminho do banco de dados
-caminho_banco = os.path.join("data", "flowdash_data.db")
+
+# ======================================================================================
+# Infra de BD para Cloud: baixa do OneDrive (via st.secrets) ou cai no template
+# ======================================================================================
+def _db_local_path() -> str:
+    root = pathlib.Path(__file__).resolve().parent
+    p = root / "data" / "flowdash_data.db"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+def _is_sqlite(path: pathlib.Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16).startswith(b"SQLite format 3")
+    except Exception:
+        return False
+
+def _has_required_tables(path: pathlib.Path) -> bool:
+    """Verifica se existe a tabela 'usuarios' — usada no login."""
+    try:
+        with sqlite3.connect(str(path)) as conn:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='usuarios';"
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+@st.cache_resource(show_spinner=True)
+def ensure_db_available() -> str:
+    """
+    1) Usa data/flowdash_data.db se existir e for válido (SQLite + tabela 'usuarios').
+    2) Senão, baixa do OneDrive (st.secrets['onedrive']['shared_download_url']) e valida.
+    3) Se falhar, copia o template (data/flowdash_template.db).
+    """
+    db_local = pathlib.Path(_db_local_path())
+    tpl = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
+
+    # 1) Já existe local e é válido?
+    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
+        return str(db_local)
+
+    # 2) Tentar OneDrive (link de compartilhamento somente leitura)
+    try:
+        url = st.secrets.get("onedrive", {}).get("shared_download_url", "")
+        if url:
+            tmp = db_local.with_suffix(".tmp")
+            with requests.get(url, stream=True, timeout=60, allow_redirects=True) as r:
+                r.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            # valida e promove
+            if tmp.exists() and tmp.stat().st_size > 0 and _is_sqlite(tmp) and _has_required_tables(tmp):
+                shutil.move(tmp, db_local)
+                return str(db_local)
+            else:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                st.warning("Arquivo do OneDrive não é SQLite válido ou está sem a tabela 'usuarios'.")
+    except Exception as e:
+        st.warning(f"Falha ao baixar banco do OneDrive: {e}")
+
+    # 3) Fallback: template (para forks/testes)
+    try:
+        if tpl.exists():
+            shutil.copy2(tpl, db_local)
+        else:
+            db_local.touch()
+    except Exception as e:
+        st.error(f"Falha no fallback para o template: {e}")
+
+    return str(db_local)
+
+
+# Caminho do banco de dados (garantido)
+caminho_banco = ensure_db_available()
 os.makedirs("data", exist_ok=True)
 
 # 👉 torna o caminho visível para todos os módulos (Metas/DataFrames)
@@ -64,8 +146,7 @@ def _call_page(module_path: str):
     Suporta parâmetros:
       - sempre fornece 'caminho_banco' se a função aceitar;
       - para outros parâmetros OBRIGATÓRIOS, usa valores do session_state se existirem;
-        caso contrário preenche com None. Se o parâmetro for posicional/aceitar posicional,
-        passamos como **posicional** para evitar erro do tipo “missing required positional argument”.
+        caso contrário preenche com None (posicionais quando possível).
     """
     try:
         mod = importlib.import_module(module_path)
@@ -89,26 +170,17 @@ def _call_page(module_path: str):
             "caminho_banco": caminho_banco,
         }
 
-        # Construção obedecendo a ordem dos parâmetros
-        # Regra:
-        # - Se for 'caminho_banco', colocamos **posicional** (para não depender de keywords).
-        # - Se for obrigatório sem default e não houver valor no estado/conhecidos -> passamos None.
-        #   * Se o parâmetro for POSITIONAL_ONLY ou POSITIONAL_OR_KEYWORD -> vai em args (posicional).
-        #   * Se for KEYWORD_ONLY -> vai em kwargs.
         for p in sig.parameters.values():
             name = p.name
             kind = p.kind
             has_default = (p.default is not inspect._empty)
 
-            # 1) caminho_banco sempre fornecido
             if name == "caminho_banco":
                 args.append(caminho_banco)
                 continue
 
-            # 2) valor conhecido/estado?
             if name in known:
                 val = known[name]
-                # preferir posicional quando o parâmetro aceita posicional
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(val)
                 else:
@@ -122,19 +194,17 @@ def _call_page(module_path: str):
                     kwargs[name] = val
                 continue
 
-            # 3) obrigatório sem default -> preencher com None
             if not has_default:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(None)
-                else:  # KEYWORD_ONLY
+                else:
                     kwargs[name] = None
-            # se tiver default e não veio de lugar nenhum, não passamos nada
 
         return fn(*args, **kwargs)
 
-    seg = module_path.rsplit(".", 1)[-1]                 # ex.: 'page_venda'
+    seg = module_path.rsplit(".", 1)[-1]
     parent = module_path.rsplit(".", 2)[-2] if "." in module_path else ""
-    tail = seg.split("_", 1)[1] if "_" in seg else seg   # ex.: 'venda'
+    tail = seg.split("_", 1)[1] if "_" in seg else seg
 
     base = ["render", "page", "main", "pagina", "show", "pagina_fechamento_caixa"]
     derived = [
@@ -144,7 +214,7 @@ def _call_page(module_path: str):
         f"render_{parent}",
         f"page_{tail}",
         f"show_{tail}",
-        seg,  # função com o mesmo nome do módulo (ex.: page_venda)
+        seg,
     ]
 
     tried = set()
@@ -161,7 +231,6 @@ def _call_page(module_path: str):
                 st.error(f"Erro ao executar {module_path}.{fn_name}: {e}")
                 return
 
-    # fallbacks: primeira função começando com 'pagina_' ou 'render_'
     for prefix in ("pagina_", "render_"):
         for name, obj in vars(mod).items():
             if callable(obj) and name.startswith(prefix):
@@ -189,12 +258,11 @@ if not st.session_state.usuario_logado:
             usuario = validar_login(email, senha, caminho_banco)
             if usuario:
                 st.session_state.usuario_logado = usuario
-                # Redirecionamento inicial por perfil
                 st.session_state.pagina_atual = (
                     "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente")
                     else "🧾 Lançamentos"
                 )
-                limpar_todas_as_paginas()  # limpa chaves antigas, preserva usuario_logado/pagina_atual
+                limpar_todas_as_paginas()
                 st.rerun()
             else:
                 st.error("❌ Email ou senha inválidos, ou usuário inativo.")
@@ -211,10 +279,8 @@ if usuario is None:
 
 perfil = usuario["perfil"]
 
-# Cabeçalho do usuário logado
 st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
 
-# Logout
 if st.sidebar.button("🚪 Sair", use_container_width=True):
     limpar_todas_as_paginas()
     st.session_state.usuario_logado = None
@@ -222,7 +288,6 @@ if st.sidebar.button("🚪 Sair", use_container_width=True):
 
 st.sidebar.markdown("---")
 
-# Atalho para nova venda (leva para Lançamentos e sinaliza formulário)
 if st.sidebar.button("➕ Nova Venda", key="nova_venda", use_container_width=True):
     st.session_state.pagina_atual = "🧾 Lançamentos"
     st.session_state.ir_para_formulario = True
@@ -231,7 +296,6 @@ if st.sidebar.button("➕ Nova Venda", key="nova_venda", use_container_width=Tru
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 🧭 Menu de Navegação")
 
-# Botões principais (alteram página e rerun)
 if st.sidebar.button("📊 Dashboard", use_container_width=True):
     st.session_state.pagina_atual = "📊 Dashboard"
     st.rerun()
@@ -252,7 +316,6 @@ if st.sidebar.button("🎯 Metas", use_container_width=True):
     st.session_state.pagina_atual = "🎯 Metas"
     st.rerun()
 
-# Expander: DataFrames
 with st.sidebar.expander("📋 DataFrames", expanded=False):
     if st.button("📥 Entradas", use_container_width=True):
         st.session_state.pagina_atual = "📥 Entradas"
@@ -273,7 +336,6 @@ with st.sidebar.expander("📋 DataFrames", expanded=False):
         st.session_state.pagina_atual = "🏦 Empréstimos/Financiamentos"
         st.rerun()
 
-# Expander: Cadastros (apenas Administrador)
 if perfil == "Administrador":
     with st.sidebar.expander("🛠️ Cadastros", expanded=False):
         if st.button("👥 Usuários", use_container_width=True):
@@ -315,17 +377,15 @@ st.title(st.session_state.pagina_atual)
 
 
 # ======================================================================================
-# Roteamento (módulos compatíveis com sua árvore)
+# Roteamento
 # ======================================================================================
 ROTAS = {
-    # páginas principais
     "📊 Dashboard": "flowdash_pages.dashboard.dashboard",
     "📉 DRE": "flowdash_pages.dre.dre",
     "🧾 Lançamentos": "flowdash_pages.lancamentos.pagina.page_lancamentos",
     "💼 Fechamento de Caixa": "flowdash_pages.fechamento.fechamento",
     "🎯 Metas": "flowdash_pages.metas.metas",
 
-    # dataframes (um único módulo que decide internamente o que exibir)
     "📥 Entradas": "flowdash_pages.dataframes.dataframes",
     "📤 Saídas": "flowdash_pages.dataframes.dataframes",
     "📦 Mercadorias": "flowdash_pages.dataframes.dataframes",
@@ -333,7 +393,6 @@ ROTAS = {
     "📄 Contas a Pagar": "flowdash_pages.dataframes.dataframes",
     "🏦 Empréstimos/Financiamentos": "flowdash_pages.dataframes.dataframes",
 
-    # cadastros (nomes batendo com a pasta cadastros/)
     "👥 Usuários": "flowdash_pages.cadastros.pagina_usuarios",
     "🎯 Cadastro de Metas": "flowdash_pages.cadastros.pagina_metas",
     "⚙️ Taxas Maquinetas": "flowdash_pages.cadastros.pagina_maquinetas",
@@ -346,7 +405,6 @@ ROTAS = {
     "📂 Cadastro de Saídas": "flowdash_pages.cadastros.cadastro_categorias",
 }
 
-# (opcional) controle simples de acesso por página
 PERMISSOES = {
     "📊 Dashboard": {"Administrador", "Gerente"},
     "📉 DRE": {"Administrador", "Gerente"},
@@ -354,7 +412,6 @@ PERMISSOES = {
     "💼 Fechamento de Caixa": {"Administrador", "Gerente"},
     "🎯 Metas": {"Administrador", "Gerente"},
 
-    # dataframes e cadastros
     "📥 Entradas": {"Administrador", "Gerente"},
     "📤 Saídas": {"Administrador", "Gerente"},
     "📦 Mercadorias": {"Administrador", "Gerente"},

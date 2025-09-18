@@ -3,3 +3,4 @@ pandas>=2.2
 plotly
 workalendar
 matplotlib
+requests>=2.32
