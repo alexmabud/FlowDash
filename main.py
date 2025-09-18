@@ -2,7 +2,6 @@
 """
 FlowDash — Main App
 ===================
-
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 """
 
@@ -32,6 +31,32 @@ st.set_page_config(page_title="FlowDash", layout="wide")
 
 
 # ======================================================================================
+# Helpers de diagnóstico
+# ======================================================================================
+def _debug_file_info(path: pathlib.Path) -> str:
+    """Retorna tamanho e primeiros bytes do arquivo (para checar cabeçalho SQLite)."""
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            head = f.read(64)
+        return f"size={size} bytes, head={head!r}"
+    except Exception as e:
+        return f"(falha ao inspecionar: {e})"
+
+
+def _list_tables_sqlite(path: pathlib.Path) -> list[str]:
+    """Lista tabelas existentes num arquivo SQLite."""
+    try:
+        with sqlite3.connect(str(path)) as conn:
+            cur = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY 1;"
+            )
+            return [r[0] for r in cur.fetchall()]
+    except Exception:
+        return []
+
+
+# ======================================================================================
 # Infra de BD para Cloud: baixa do OneDrive (via st.secrets) ou cai no template
 # ======================================================================================
 def _db_local_path() -> str:
@@ -40,12 +65,14 @@ def _db_local_path() -> str:
     p.parent.mkdir(parents=True, exist_ok=True)
     return str(p)
 
+
 def _is_sqlite(path: pathlib.Path) -> bool:
     try:
         with open(path, "rb") as f:
             return f.read(16).startswith(b"SQLite format 3")
     except Exception:
         return False
+
 
 def _has_required_tables(path: pathlib.Path) -> bool:
     """Verifica se existe a tabela 'usuarios' — usada no login."""
@@ -57,6 +84,7 @@ def _has_required_tables(path: pathlib.Path) -> bool:
             return cur.fetchone() is not None
     except Exception:
         return False
+
 
 @st.cache_resource(show_spinner=True)
 def ensure_db_available() -> str:
@@ -90,11 +118,18 @@ def ensure_db_available() -> str:
                 st.session_state["db_source"] = "onedrive"
                 return str(db_local)
             else:
+                # 🔎 Diagnóstico: mostrar por que não validou
+                info = _debug_file_info(tmp)
+                tables = _list_tables_sqlite(tmp)
                 try:
                     tmp.unlink(missing_ok=True)
                 except Exception:
                     pass
-                st.warning("Arquivo do OneDrive não é SQLite válido ou está sem a tabela 'usuarios'.")
+                st.warning(
+                    "Arquivo do OneDrive não é SQLite válido ou está sem a tabela 'usuarios'.\n"
+                    f"Debug: {info}\n"
+                    f"Tabelas detectadas: {tables}"
+                )
     except Exception as e:
         st.warning(f"Falha ao baixar banco do OneDrive: {e}")
 
@@ -125,6 +160,7 @@ def _table_exists(db_path: str, table: str) -> bool:
     except Exception:
         return False
 
+
 def _create_table_from_template(db_path: str, template_path: str, table: str) -> None:
     """Copia o DDL da tabela (e índices/triggers) do template para o DB ativo, se existir lá."""
     tpl = pathlib.Path(template_path)
@@ -154,6 +190,7 @@ def _create_table_from_template(db_path: str, template_path: str, table: str) ->
             if r["sql"]:
                 dconn.execute(r["sql"])
         dconn.commit()
+
 
 def ensure_required_tables(db_path: str) -> None:
     """Garante a existência das tabelas essenciais para o app iniciar (ex.: 'usuarios')."""
@@ -233,10 +270,12 @@ def _call_page(module_path: str):
             kind = p.kind
             has_default = (p.default is not inspect._empty)
 
+        # 1) passa caminho_banco como posicional se existir
             if name == "caminho_banco":
                 args.append(caminho_banco)
                 continue
 
+        # 2) valores conhecidos/estado
             if name in known:
                 val = known[name]
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
@@ -252,6 +291,7 @@ def _call_page(module_path: str):
                     kwargs[name] = val
                 continue
 
+        # 3) obrigatórios sem default → None
             if not has_default:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(None)
