@@ -70,6 +70,7 @@ def ensure_db_available() -> str:
 
     # 1) Já existe local e é válido?
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
+        st.session_state["db_source"] = "local"
         return str(db_local)
 
     # 2) Tentar OneDrive (link de compartilhamento somente leitura)
@@ -86,6 +87,7 @@ def ensure_db_available() -> str:
             # valida e promove
             if tmp.exists() and tmp.stat().st_size > 0 and _is_sqlite(tmp) and _has_required_tables(tmp):
                 shutil.move(tmp, db_local)
+                st.session_state["db_source"] = "onedrive"
                 return str(db_local)
             else:
                 try:
@@ -100,17 +102,73 @@ def ensure_db_available() -> str:
     try:
         if tpl.exists():
             shutil.copy2(tpl, db_local)
+            st.session_state["db_source"] = "template"
         else:
             db_local.touch()
+            st.session_state["db_source"] = "vazio"
     except Exception as e:
         st.error(f"Falha no fallback para o template: {e}")
+        st.session_state["db_source"] = "erro"
 
     return str(db_local)
 
 
+# --- garantir a tabela 'usuarios' a partir do template, se faltar ---
+def _table_exists(db_path: str, table: str) -> bool:
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                (table,)
+            )
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+def _create_table_from_template(db_path: str, template_path: str, table: str) -> None:
+    """Copia o DDL da tabela (e índices/triggers) do template para o DB ativo, se existir lá."""
+    tpl = pathlib.Path(template_path)
+    if not tpl.exists():
+        return
+    with sqlite3.connect(template_path) as tconn, sqlite3.connect(db_path) as dconn:
+        tconn.row_factory = sqlite3.Row
+        # tabela
+        row = tconn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?;",
+            (table,)
+        ).fetchone()
+        if row and row["sql"]:
+            dconn.execute(row["sql"])
+        # índices
+        for r in tconn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL;",
+            (table,)
+        ):
+            if r["sql"]:
+                dconn.execute(r["sql"])
+        # triggers
+        for r in tconn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL;",
+            (table,)
+        ):
+            if r["sql"]:
+                dconn.execute(r["sql"])
+        dconn.commit()
+
+def ensure_required_tables(db_path: str) -> None:
+    """Garante a existência das tabelas essenciais para o app iniciar (ex.: 'usuarios')."""
+    tpl = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
+    if not _table_exists(db_path, "usuarios"):
+        _create_table_from_template(db_path, str(tpl), "usuarios")
+
+
 # Caminho do banco de dados (garantido)
 caminho_banco = ensure_db_available()
+ensure_required_tables(caminho_banco)  # <- garante 'usuarios' se faltar
 os.makedirs("data", exist_ok=True)
+
+# Mostra de onde veio o banco (útil no deploy)
+st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
 
 # 👉 torna o caminho visível para todos os módulos (Metas/DataFrames)
 st.session_state.setdefault("caminho_banco", caminho_banco)
