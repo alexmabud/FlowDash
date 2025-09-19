@@ -4,16 +4,14 @@ FlowDash — Main App
 ===================
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 
-Este app baixa o banco via **API do Dropbox** usando TOKEN (sem link público).
-- Secrets esperados:
-    [dropbox]
-    access_token = "sl.ABC...SEU_TOKEN..."
-    file_path    = "/FlowDash/data/flowdash_data.db"
-    force_download = "0"
-- Sem uso de template no Dropbox. Fallback é LOCAL:
-    - se o download falhar, usa data/flowdash_data.db local (se existir e for válido)
-    - se não existir, cria um arquivo vazio e tenta provisionar tabela 'usuarios'
-      a partir do template LOCAL do repo (data/flowdash_template.db), apenas para boot.
+Política do banco (SEM TEMPLATE):
+  1) Baixar via TOKEN do Dropbox (API) usando secrets/env:
+       [dropbox]
+       access_token = "sl.ABC...SEU_TOKEN..."
+       file_path    = "/FlowDash/data/flowdash_data.db"
+       force_download = "0"
+  2) Se falhar, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
+  3) Se não houver DB válido, exibir erro e interromper a execução.
 """
 
 from __future__ import annotations
@@ -21,25 +19,22 @@ import importlib
 import inspect
 import os
 import pathlib
-import shutil
 import sqlite3
 import streamlit as st
 
 from auth.auth import (
     validar_login,
-    verificar_acesso,           # disponível dentro das páginas
-    exibir_usuario_logado,      # disponível dentro das páginas
+    verificar_acesso,      # disponível dentro das páginas
+    exibir_usuario_logado, # disponível dentro das páginas
     limpar_todas_as_paginas,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
-from shared.db_from_dropbox_api import ensure_local_db_api  # ← SOMENTE TOKEN/API
-
+from shared.db_from_dropbox_api import ensure_local_db_api  # usa a API do Dropbox (TOKEN)
 
 # ======================================================================================
 # Configuração inicial da página
 # ======================================================================================
 st.set_page_config(page_title="FlowDash", layout="wide")
-
 
 # ======================================================================================
 # Helpers de diagnóstico
@@ -50,30 +45,9 @@ def _debug_file_info(path: pathlib.Path) -> str:
         size = path.stat().st_size
         with open(path, "rb") as f:
             head = f.read(64)
-        return f"size=%s bytes, head=%r" % (size, head)
+        return f"size={size} bytes, head={head!r}"
     except Exception as e:
         return f"(falha ao inspecionar: {e})"
-
-
-def _list_tables_sqlite(path: pathlib.Path) -> list[str]:
-    """Lista tabelas existentes num arquivo SQLite (apenas para debug)."""
-    try:
-        with sqlite3.connect(str(path)) as conn:
-            cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY 1;")
-            return [r[0] for r in cur.fetchall()]
-    except Exception:
-        return []
-
-
-# ======================================================================================
-# Infra de BD: baixa via TOKEN (API Dropbox) ou cai no LOCAL
-# ======================================================================================
-def _db_local_path() -> str:
-    root = pathlib.Path(__file__).resolve().parent
-    p = root / "data" / "flowdash_data.db"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return str(p)
-
 
 def _is_sqlite(path: pathlib.Path) -> bool:
     try:
@@ -81,7 +55,6 @@ def _is_sqlite(path: pathlib.Path) -> bool:
             return f.read(16).startswith(b"SQLite format 3")
     except Exception:
         return False
-
 
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
@@ -91,59 +64,25 @@ def _has_table(path: pathlib.Path, table: str) -> bool:
     except Exception:
         return False
 
+def _db_local_path() -> pathlib.Path:
+    root = pathlib.Path(__file__).resolve().parent
+    p = root / "data" / "flowdash_data.db"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
-def _table_exists(db_path: str, table: str) -> bool:
-    return _has_table(pathlib.Path(db_path), table)
-
-
-def _create_table_from_local_template(db_path: str, table: str) -> None:
-    """
-    Copia DDL/índices/triggers da tabela a partir do template LOCAL do repo
-    (data/flowdash_template.db) — apenas para o app conseguir subir.
-    """
-    template_path = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
-    if not template_path.exists():
-        return
-    with sqlite3.connect(str(template_path)) as tconn, sqlite3.connect(str(db_path)) as dconn:
-        tconn.row_factory = sqlite3.Row
-        # tabela
-        row = tconn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?;", (table,)
-        ).fetchone()
-        if row and row["sql"]:
-            dconn.execute(row["sql"])
-        # índices
-        for r in tconn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL;", (table,)
-        ):
-            if r["sql"]:
-                dconn.execute(r["sql"])
-        # triggers
-        for r in tconn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND sql IS NOT NULL;", (table,)
-        ):
-            if r["sql"]:
-                dconn.execute(r["sql"])
-        dconn.commit()
-
-
-def ensure_required_tables(db_path: str) -> None:
-    """Garante a existência das tabelas essenciais para login etc."""
-    if not _table_exists(db_path, "usuarios"):
-        _create_table_from_local_template(db_path, "usuarios")
-
-
+# ======================================================================================
+# Infra de BD: SOMENTE TOKEN (Dropbox) → LOCAL; sem template
+# ======================================================================================
 @st.cache_resource(show_spinner=True)
 def ensure_db_available() -> str:
     """
-    Política:
-      1) Se houver TOKEN do Dropbox (st.secrets/env), baixar via API (file_path) e promover.
-      2) Se falhar ou não houver token, usar o DB LOCAL se for SQLite válido.
-      3) Senão, criar arquivo vazio LOCAL e provisionar a tabela 'usuarios' do template local (se existir).
+    1) Se houver TOKEN do Dropbox (st.secrets/env): baixa via API para data/flowdash_data.db.
+    2) Se download falhar ou não houver token: usa DB local se for válido.
+    3) Caso contrário: mostra erro e interrompe.
     """
-    db_local = pathlib.Path(_db_local_path())
+    db_local = _db_local_path()
 
-    # 1) TOKEN/API Dropbox
+    # 1) Tenta via TOKEN/API Dropbox
     access_token = (
         st.secrets.get("dropbox", {}).get("access_token", "").strip()
         or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
@@ -164,44 +103,38 @@ def ensure_db_available() -> str:
                 dropbox_path=dropbox_path,
                 dest_path=str(db_local),
                 force_download=force_download,
-                validate_table="usuarios",
+                validate_table="usuarios",  # garante login
             )
             candidate = pathlib.Path(candidate_path)
             if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
                 st.session_state["db_source"] = "dropbox_token"
+                os.environ["FLOWDASH_DB"] = str(candidate)   # exporta para módulos que leem ENV
                 return str(candidate)
             else:
                 info = _debug_file_info(candidate)
-                tables = _list_tables_sqlite(candidate)
-                st.warning(
-                    "Arquivo baixado via token não é SQLite válido ou está sem a tabela 'usuarios'.\n"
-                    f"Debug: {info}\nTabelas detectadas: {tables}"
-                )
+                st.warning("Banco baixado via token é inválido (ou sem 'usuarios').")
+                st.caption(f"Debug: {info}")
         except Exception as e:
-            st.warning(f"Falha ao baixar banco via token do Dropbox: {e}")
+            st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
     # 2) LOCAL válido?
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
         st.session_state["db_source"] = "local"
+        os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
 
-    # 3) Criar vazio e provisionar 'usuarios' do template LOCAL (se houver)
-    try:
-        db_local.parent.mkdir(parents=True, exist_ok=True)
-        if not db_local.exists():
-            db_local.touch()
-        ensure_required_tables(str(db_local))
-        st.session_state["db_source"] = "vazio"
-    except Exception as e:
-        st.error(f"Falha ao criar/provisionar DB local: {e}")
-        st.session_state["db_source"] = "erro"
+    # 3) Nada válido → erro explícito e stop
+    info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
+    st.error(
+        "❌ Não foi possível obter um banco de dados válido.\n\n"
+        "- Verifique o TOKEN do Dropbox e o caminho `file_path` nos *secrets* (ou nas variáveis de ambiente).\n"
+        "- Ou coloque manualmente um arquivo SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
+        f"- Debug local: {info}"
+    )
+    st.stop()
 
-    return str(db_local)
-
-
-# Caminho do banco e preparação mínima
+# Caminho do banco (garantido ou interrompe)
 caminho_banco = ensure_db_available()
-ensure_required_tables(caminho_banco)  # se baixou vazio, garante 'usuarios'
 
 # Mostra de onde veio o banco (útil no deploy)
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
@@ -215,7 +148,6 @@ try:
 except Exception as e:
     st.warning(f"Trigger de totais não criada: {e}")
 
-
 # ======================================================================================
 # Estado de sessão
 # ======================================================================================
@@ -223,7 +155,6 @@ if "usuario_logado" not in st.session_state:
     st.session_state.usuario_logado = None
 if "pagina_atual" not in st.session_state:
     st.session_state.pagina_atual = "📊 Dashboard"
-
 
 # ======================================================================================
 # Roteamento (import dinâmico + injeção de caminho_banco)
@@ -315,7 +246,6 @@ def _call_page(module_path: str):
 
     st.warning(f"O módulo '{module_path}' não possui função compatível (render/page/main/pagina*/show).")
 
-
 # ======================================================================================
 # LOGIN
 # ======================================================================================
@@ -338,7 +268,6 @@ if not st.session_state.usuario_logado:
             else:
                 st.error("❌ Email ou senha inválidos, ou usuário inativo.")
     st.stop()
-
 
 # ======================================================================================
 # Sidebar: usuário + navegação
@@ -380,7 +309,6 @@ if perfil == "Administrador":
         ]:
             if st.button(title, use_container_width=True):
                 st.session_state.pagina_atual = title; st.rerun()
-
 
 # ======================================================================================
 # Título + Roteamento
