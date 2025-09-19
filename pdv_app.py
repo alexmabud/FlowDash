@@ -2,6 +2,15 @@
 """
 FlowDash — PDV Kiosk (login normal + PIN somente na venda)
 
+Política do banco (SEM TEMPLATE):
+  1) Baixar via TOKEN do Dropbox (API) usando secrets/env:
+       [dropbox]
+       access_token = "sl.ABC...SEU_TOKEN..."
+       file_path    = "/FlowDash/data/flowdash_data.db"
+       force_download = "0"
+  2) Se falhar, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
+  3) Se não houver DB válido, exibir erro e interromper a execução.
+
 Uso local:
     streamlit run pdv_app.py
 """
@@ -34,50 +43,89 @@ if str(_CURR_DIR) not in sys.path:
 st.set_page_config(page_title="FlowDash PDV", layout="wide", initial_sidebar_state="collapsed")
 
 
-def _db_local_path() -> str:
-    """Caminho local para a cópia do banco usada pelo PDV."""
+def _db_local_path() -> pathlib.Path:
     p = _CURR_DIR / "data" / "flowdash_data.db"
     p.parent.mkdir(parents=True, exist_ok=True)
-    return str(p)
+    return p
+
+
+def _is_sqlite(path: pathlib.Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            return f.read(16).startswith(b"SQLite format 3")
+    except Exception:
+        return False
+
+
+def _has_table(path: pathlib.Path, table: str) -> bool:
+    try:
+        with sqlite3.connect(str(path)) as conn:
+            cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (table,))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
 
 
 @st.cache_resource(show_spinner=True)
 def get_db_path() -> str:
     """
-    Baixa o DB do Dropbox via token (secrets) e retorna o caminho local.
-    Se o download falhar, usa o arquivo local (se existir).
+    1) Baixa o DB do Dropbox via token para data/flowdash_data.db (secrets/env).
+    2) Se falhar, usa o local se for válido (SQLite + 'usuarios').
+    3) Caso contrário, mostra erro e interrompe.
     """
     dest = _db_local_path()
-    access_token = (st.secrets.get("dropbox", {}).get("access_token", "") or os.getenv("FLOWDASH_DBX_TOKEN", "")).strip()
+
+    access_token = (
+        st.secrets.get("dropbox", {}).get("access_token", "").strip()
+        or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
+    )
     dropbox_path = (
-        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/data/flowdash_data.db")
-        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db")
-    ).strip()
+        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/data/flowdash_data.db").strip()
+        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
+    )
     force_download = (
         (st.secrets.get("dropbox", {}).get("force_download", "0") == "1")
         or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
     )
 
+    # 1) Tenta baixar via TOKEN
     if access_token:
         try:
-            path = ensure_local_db_api(
+            candidate_path = ensure_local_db_api(
                 access_token=access_token,
                 dropbox_path=dropbox_path,
-                dest_path=dest,
+                dest_path=str(dest),
                 force_download=force_download,
-                validate_table="usuarios",  # garante login disponível
+                validate_table="usuarios",
             )
-            return path
+            candidate = pathlib.Path(candidate_path)
+            if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
+                st.session_state["db_source"] = "dropbox_token"
+                os.environ["FLOWDASH_DB"] = str(candidate)
+                return str(candidate)
         except Exception as e:
             st.warning(f"PDV: falha ao baixar DB do Dropbox (token): {e}")
 
-    # Fallback: mantém/local (se já existir)
-    return dest
+    # 2) Local válido?
+    if dest.exists() and dest.stat().st_size > 0 and _is_sqlite(dest) and _has_table(dest, "usuarios"):
+        st.session_state["db_source"] = "local"
+        os.environ["FLOWDASH_DB"] = str(dest)
+        return str(dest)
+
+    # 3) Nada válido → erro explícito
+    info = f"(existe={dest.exists()}, size={dest.stat().st_size if dest.exists() else 0})"
+    st.error(
+        "❌ Não foi possível obter um banco de dados válido para o PDV.\n\n"
+        "- Verifique o TOKEN do Dropbox e o caminho `file_path` nos *secrets* (ou variáveis de ambiente).\n"
+        "- Ou coloque manualmente um arquivo SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
+        f"- Debug local: {info}"
+    )
+    st.stop()
 
 
 DB_PATH = get_db_path()
 st.session_state.setdefault("caminho_banco", DB_PATH)
-st.caption(f"🗃️ (PDV) Banco em uso: `{DB_PATH}`")
+st.caption(f"🗃️ (PDV) Banco em uso: **{st.session_state.get('db_source', '?')}** → `{DB_PATH}`")
 
 # ---------------------------------------------------------------------------
 # Login
@@ -102,7 +150,6 @@ except Exception:
                 ).fetchone()
             return {"id": row[0], "nome": row[1], "email": row[2], "perfil": row[3]} if row else None
 
-
 # ---------------------------------------------------------------------------
 # UI base
 # ---------------------------------------------------------------------------
@@ -126,8 +173,6 @@ st.markdown(
 # ---------------------------------------------------------------------------
 # Helpers DB / sessão
 # ---------------------------------------------------------------------------
-
-
 def _conn() -> sqlite3.Connection:
     """Abre conexão SQLite usando DB_PATH; aborta com mensagem se não existir."""
     db = DB_PATH
@@ -202,12 +247,9 @@ def _entrada_date_bounds() -> Tuple[date, date]:
     except Exception:
         return (today, today)
 
-
 # ---------------------------------------------------------------------------
 # Metas / visualizações
 # ---------------------------------------------------------------------------
-
-
 def _fmt_moeda(v: float) -> str:
     """Formata número como moeda BR (R$)."""
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
@@ -296,19 +338,13 @@ def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, ac
     </div>
     """
 
-
 def _inicio_semana(dt: date) -> date:
-    """Retorna a segunda-feira da semana de dt."""
     return dt - timedelta(days=dt.weekday())
 
-
 def _col_dow(dt: date) -> str:
-    """Retorna o nome da coluna de metas por dia da semana."""
     return ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"][dt.weekday()]
 
-
 def _metas_loja_gauges(ref_day: date) -> None:
-    """Renderiza gauges e cards de metas para Dia/Semana/Mês na data de referência."""
     ym = f"{ref_day.year:04d}-{ref_day.month:02d}"
     inicio_sem = _inicio_semana(ref_day)
     inicio_mes = ref_day.replace(day=1)
@@ -417,12 +453,9 @@ def _metas_loja_gauges(ref_day: date) -> None:
     with t3:
         st.markdown(_card_periodo_html("Mês", ouro_m, prata_m, bronze_m, vendido_mes), unsafe_allow_html=True)
 
-
 # ---------------------------------------------------------------------------
 # Venda (reuso do seu módulo)
 # ---------------------------------------------------------------------------
-
-
 def _render_form_venda(vendedor: Dict[str, object]) -> None:
     """Renderiza o formulário de venda no contexto do PDV (vendedor mascarado)."""
     st.markdown("## 🧾 Nova Venda")
@@ -433,7 +466,7 @@ def _render_form_venda(vendedor: Dict[str, object]) -> None:
         st.error(f"❌ DB não existe no caminho esperado:\n`{DB_PATH}`")
         st.stop()
 
-    # Máscara de usuário: a partir daqui, o vendedor passa a ser o "usuario_logado" durante a venda
+    # Máscara de usuário: durante a venda, o "usuario_logado" vira o vendedor
     if "pdv_original_user" not in st.session_state and "usuario_logado" in st.session_state:
         st.session_state["pdv_original_user"] = st.session_state["usuario_logado"]
         st.session_state["pdv_header_user"] = st.session_state["pdv_original_user"]  # cabeçalho mostra o real
@@ -467,12 +500,9 @@ def _render_form_venda(vendedor: Dict[str, object]) -> None:
             st.error("❌ Erro ao abrir o formulário de venda.")
             st.caption(f"Detalhe técnico: {e}")
 
-
 # ---------------------------------------------------------------------------
 # Login / seleção de vendedor
 # ---------------------------------------------------------------------------
-
-
 def _login_box() -> bool:
     """Formulário de login do PDV; retorna True se autenticado."""
     st.markdown("### 🔐 Login do PDV")
@@ -489,7 +519,6 @@ def _login_box() -> bool:
         else:
             st.error("Credenciais inválidas ou usuário inativo.")
     return bool(st.session_state.get("usuario_logado"))
-
 
 def _selecionar_vendedor_e_validar_pin() -> Optional[Dict]:
     """Fluxo de seleção do vendedor + validação de PIN; retorna dict do vendedor ou None."""
@@ -545,12 +574,9 @@ def _selecionar_vendedor_e_validar_pin() -> Optional[Dict]:
     st.error("PIN incorreto.")
     return None
 
-
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-
-
 def main() -> None:
     """Entrada principal do PDV (dashboard + fluxo de venda)."""
     # Banner global de sucesso (fora de formulários)
