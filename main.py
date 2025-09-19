@@ -4,13 +4,13 @@ FlowDash — Main App
 ===================
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 
-Política do banco (SEM TEMPLATE):
-  1) Baixar via TOKEN do Dropbox (API) usando secrets/env:
+Política do banco (SEM TEMPLATE por padrão):
+  1) Tentar baixar via TOKEN do Dropbox (API) usando secrets/env:
        [dropbox]
-       access_token = "sl.ABC...SEU_TOKEN..."
-       file_path    = "/FlowDash/data/flowdash_data.db"
-       force_download = "0"
-  2) Se falhar, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
+       access_token   = "sl.ABC...SEU_TOKEN..."
+       file_path      = "/FlowDash/data/flowdash_data.db"
+       force_download = "0"           # "1" força re-download a cada start
+  2) Se falhar ou não houver token/caminho, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
   3) Se não houver DB válido, exibir erro e interromper a execução.
 """
 
@@ -45,7 +45,7 @@ def _debug_file_info(path: pathlib.Path) -> str:
         size = path.stat().st_size
         with open(path, "rb") as f:
             head = f.read(64)
-        return f"size={size} bytes, head={head!r}"
+        return f"size=%s bytes, head=%r" % (size, head)
     except Exception as e:
         return f"(falha ao inspecionar: {e})"
 
@@ -73,33 +73,42 @@ def _db_local_path() -> pathlib.Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
+def _safe_get_secrets(section: str) -> dict:
+    """Lê st.secrets[section] sem quebrar quando não existir (Cloud ou local)."""
+    try:
+        sec = st.secrets.get(section, {})
+        return dict(sec) if isinstance(sec, dict) else {}
+    except Exception:
+        return {}
+
 # ======================================================================================
-# Infra de BD: SOMENTE TOKEN (Dropbox) → LOCAL; sem template
+# Infra de BD: TOKEN (Dropbox) opcional → LOCAL; sem template obrigatório
 # ======================================================================================
 @st.cache_resource(show_spinner=True)
 def ensure_db_available() -> str:
     """
-    1) Se houver TOKEN do Dropbox (st.secrets/env): baixa via API para data/flowdash_data.db.
-    2) Se download falhar ou não houver token: usa DB local se for válido.
+    1) Se houver TOKEN do Dropbox (secrets/env) e file_path: baixa via API para data/flowdash_data.db.
+    2) Se download falhar ou não houver token/caminho: usa DB local se for válido.
     3) Caso contrário: mostra erro e interrompe.
     """
     db_local = _db_local_path()
 
-    # 1) Tenta via TOKEN/API Dropbox
+    # 1) Tenta via TOKEN/API Dropbox (tolerante à ausência de secrets.toml)
+    dbx_cfg = _safe_get_secrets("dropbox")
     access_token = (
-        st.secrets.get("dropbox", {}).get("access_token", "").strip()
+        (dbx_cfg.get("access_token") or "").strip()
         or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
     )
     dropbox_path = (
-        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/data/flowdash_data.db").strip()
+        (dbx_cfg.get("file_path") or "").strip()
         or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
     )
     force_download = (
-        (st.secrets.get("dropbox", {}).get("force_download", "0") == "1")
+        (str(dbx_cfg.get("force_download", "0")) == "1")
         or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
     )
 
-    if access_token:
+    if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
                 access_token=access_token,
@@ -120,7 +129,7 @@ def ensure_db_available() -> str:
                 return str(candidate)
             else:
                 info = _debug_file_info(candidate)
-                st.warning("Banco baixado via token é inválido (ou sem 'usuarios').")
+                st.warning("Banco baixado via token é inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {info}")
         except Exception as e:
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
@@ -136,12 +145,12 @@ def ensure_db_available() -> str:
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
 
-    # 3) Nada válido → erro explícito e stop
+    # 3) Nada válido → erro explícito e stop (não explode por falta de secrets)
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido.\n\n"
-        "- Verifique o TOKEN do Dropbox e o caminho `file_path` nos *secrets* (ou nas variáveis de ambiente).\n"
-        "- Ou coloque manualmente um arquivo SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
+        "- Preencha `dropbox.access_token` e `dropbox.file_path` nos *secrets* (ou variáveis de ambiente) **ou**\n"
+        "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
     )
     st.stop()
