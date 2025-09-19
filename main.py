@@ -8,10 +8,10 @@ Ponto de entrada do aplicativo Streamlit do FlowDash.
 from __future__ import annotations
 import importlib
 import inspect
+import os
 import pathlib
 import shutil
 import sqlite3
-import requests  # baixar DB do OneDrive
 import streamlit as st
 
 from auth.auth import (
@@ -21,6 +21,7 @@ from auth.auth import (
     limpar_todas_as_paginas,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
+from shared.db_from_dropbox import ensure_local_db  # ← novo: loader Dropbox
 
 
 # ======================================================================================
@@ -54,7 +55,7 @@ def _list_tables_sqlite(path: pathlib.Path) -> list[str]:
 
 
 # ======================================================================================
-# Infra de BD para Cloud: baixa do OneDrive (via st.secrets) ou cai no template
+# Infra de BD para Cloud: baixa do Dropbox (via secrets/env) ou cai no template
 # ======================================================================================
 def _db_local_path() -> str:
     root = pathlib.Path(__file__).resolve().parent
@@ -87,46 +88,44 @@ def _has_required_tables(path: pathlib.Path) -> bool:
 def ensure_db_available() -> str:
     """
     Política:
-      1) Se houver URL do OneDrive em secrets, SEMPRE tentar baixar e substituir o arquivo local
-         (só promove se o download for válido: SQLite + tabela 'usuarios').
+      1) Se houver URL do Dropbox (st.secrets/env/constante), tentar baixar e promover
+         (só vale se for SQLite válido + tiver tabela 'usuarios').
       2) Se não houver URL (ou download inválido), usar o DB local se for válido.
       3) Caso contrário, cair no template.
     """
     db_local = pathlib.Path(_db_local_path())
     tpl = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
-    url = st.secrets.get("onedrive", {}).get("shared_download_url", "").strip()
 
-    # 1) Prioriza OneDrive quando houver URL
+    # fonte da URL (ordem de prioridade)
+    url = (
+        st.secrets.get("dropbox", {}).get("shared_download_url", "").strip()
+        or os.getenv("FLOWDASH_DB_URL", "").strip()
+        or "https://www.dropbox.com/scl/fi/rxgjlvt6qeldmmn54mwcf/flowdash_data.db?rlkey=k3mrb8riaw1u8rr7xhy8ngsog&st=raptd0yv&dl=1"
+    )
+
+    # 1) Tenta Dropbox se houver URL
     if url:
         try:
-            tmp = db_local.with_suffix(".tmp")
-            with requests.get(url, stream=True, timeout=60, allow_redirects=True) as r:
-                r.raise_for_status()
-                with open(tmp, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=8192):
-                        if chunk:
-                            f.write(chunk)
-            # valida e promove
-            if tmp.exists() and tmp.stat().st_size > 0 and _is_sqlite(tmp) and _has_required_tables(tmp):
-                db_local.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(tmp, db_local)
-                st.session_state["db_source"] = "onedrive"
-                return str(db_local)
+            path = ensure_local_db(
+                dropbox_url=url,
+                dest_path=str(db_local),
+                force_download=False,
+            )
+            candidate = pathlib.Path(path)
+            if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_required_tables(candidate):
+                st.session_state["db_source"] = "dropbox"
+                return str(candidate)
             else:
-                info = _debug_file_info(tmp)
-                tables = _list_tables_sqlite(tmp)
-                try:
-                    tmp.unlink(missing_ok=True)
-                except Exception:
-                    pass
+                info = _debug_file_info(candidate)
+                tables = _list_tables_sqlite(candidate)
                 st.warning(
-                    "Arquivo do OneDrive não é SQLite válido ou está sem a tabela 'usuarios'.\n"
+                    "Arquivo do Dropbox não é SQLite válido ou está sem a tabela 'usuarios'.\n"
                     f"Debug: {info}\nTabelas detectadas: {tables}"
                 )
         except Exception as e:
-            st.warning(f"Falha ao baixar banco do OneDrive: {e}")
+            st.warning(f"Falha ao baixar banco do Dropbox: {e}")
 
-    # 2) Sem OneDrive (ou download falhou): usa local se válido
+    # 2) Sem Dropbox (ou download falhou): usa local se válido
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
         st.session_state["db_source"] = "local"
         return str(db_local)
