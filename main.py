@@ -24,8 +24,8 @@ import streamlit as st
 
 from auth.auth import (
     validar_login,
-    verificar_acesso,      # disponível dentro das páginas
-    exibir_usuario_logado, # disponível dentro das páginas
+    verificar_acesso,      # disponível dentro das páginas (mantido para uso interno)
+    exibir_usuario_logado, # disponível dentro das páginas (mantido para uso interno)
     limpar_todas_as_paginas,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
@@ -59,7 +59,10 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
         with sqlite3.connect(str(path)) as conn:
-            cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (table,))
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                (table,),
+            )
             return cur.fetchone() is not None
     except Exception:
         return False
@@ -106,9 +109,14 @@ def ensure_db_available() -> str:
                 validate_table="usuarios",  # garante login
             )
             candidate = pathlib.Path(candidate_path)
-            if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
+            if (
+                candidate.exists()
+                and candidate.stat().st_size > 0
+                and _is_sqlite(candidate)
+                and _has_table(candidate, "usuarios")
+            ):
                 st.session_state["db_source"] = "dropbox_token"
-                os.environ["FLOWDASH_DB"] = str(candidate)   # exporta para módulos que leem ENV
+                os.environ["FLOWDASH_DB"] = str(candidate)  # exporta para módulos que usam ENV
                 return str(candidate)
             else:
                 info = _debug_file_info(candidate)
@@ -118,7 +126,12 @@ def ensure_db_available() -> str:
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
     # 2) LOCAL válido?
-    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
+    if (
+        db_local.exists()
+        and db_local.stat().st_size > 0
+        and _is_sqlite(db_local)
+        and _has_table(db_local, "usuarios")
+    ):
         st.session_state["db_source"] = "local"
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
@@ -188,7 +201,8 @@ def _call_page(module_path: str):
             has_default = (p.default is not inspect._empty)
 
             if name == "caminho_banco":
-                args.append(caminho_banco); continue
+                args.append(caminho_banco)
+                continue
 
             if name in known:
                 val = known[name]
@@ -219,13 +233,21 @@ def _call_page(module_path: str):
     tail = seg.split("_", 1)[1] if "_" in seg else seg
 
     base = ["render", "page", "main", "pagina", "show", "pagina_fechamento_caixa"]
-    derived = [f"render_{tail}", "render_page", f"render_{seg}", f"render_{parent}",
-               f"page_{tail}", f"show_{tail}", seg]
+    derived = [
+        f"render_{tail}",
+        "render_page",
+        f"render_{seg}",
+        f"render_{parent}",
+        f"page_{tail}",
+        f"show_{tail}",
+        seg,
+    ]
 
     tried = set()
     for fn_name in base + derived:
         if fn_name in tried or not hasattr(mod, fn_name):
-            tried.add(fn_name); continue
+            tried.add(fn_name)
+            continue
         tried.add(fn_name)
         fn = getattr(mod, fn_name)
         if callable(fn):
@@ -260,8 +282,7 @@ if not st.session_state.usuario_logado:
             if usuario:
                 st.session_state.usuario_logado = usuario
                 st.session_state.pagina_atual = (
-                    "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente")
-                    else "🧾 Lançamentos"
+                    "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
                 )
                 limpar_todas_as_paginas()
                 st.rerun()
@@ -270,7 +291,7 @@ if not st.session_state.usuario_logado:
     st.stop()
 
 # ======================================================================================
-# Sidebar: usuário + navegação
+# Sidebar: usuário + navegação (sem o botão "Nova Venda")
 # ======================================================================================
 usuario = st.session_state.get("usuario_logado")
 if usuario is None:
@@ -281,34 +302,47 @@ perfil = usuario["perfil"]
 st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
-    limpar_todas_as_paginas(); st.session_state.usuario_logado = None; st.rerun()
-
-st.sidebar.markdown("---")
-if st.sidebar.button("➕ Nova Venda", key="nova_venda", use_container_width=True):
-    st.session_state.pagina_atual = "🧾 Lançamentos"
-    st.session_state.ir_para_formulario = True
+    limpar_todas_as_paginas()
+    st.session_state.usuario_logado = None
     st.rerun()
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("## 🧭 Menu de Navegação")
-for title in ["📊 Dashboard","📉 DRE","🧾 Lançamentos","💼 Fechamento de Caixa","🎯 Metas"]:
+for title in ["📊 Dashboard", "📉 DRE", "🧾 Lançamentos", "💼 Fechamento de Caixa", "🎯 Metas"]:
     if st.sidebar.button(title, use_container_width=True):
-        st.session_state.pagina_atual = title; st.rerun()
+        st.session_state.pagina_atual = title
+        st.rerun()
 
 with st.sidebar.expander("📋 DataFrames", expanded=False):
-    for title in ["📥 Entradas","📤 Saídas","📦 Mercadorias","💳 Fatura Cartão de Crédito","📄 Contas a Pagar","🏦 Empréstimos/Financiamentos"]:
+    for title in [
+        "📥 Entradas",
+        "📤 Saídas",
+        "📦 Mercadorias",
+        "💳 Fatura Cartão de Crédito",
+        "📄 Contas a Pagar",
+        "🏦 Empréstimos/Financiamentos",
+    ]:
         if st.button(title, use_container_width=True):
-            st.session_state.pagina_atual = title; st.rerun()
+            st.session_state.pagina_atual = title
+            st.rerun()
 
 if perfil == "Administrador":
     with st.sidebar.expander("🛠️ Cadastros", expanded=False):
         for title in [
-            "👥 Usuários","🎯 Cadastro de Metas","⚙️ Taxas Maquinetas","📇 Cartão de Crédito",
-            "💵 Caixa","🛠️ Correção de Caixa","🏦 Saldos Bancários","🏛️ Cadastro de Empréstimos",
-            "🏦 Cadastro de Bancos","📂 Cadastro de Saídas",
+            "👥 Usuários",
+            "🎯 Cadastro de Metas",
+            "⚙️ Taxas Maquinetas",
+            "📇 Cartão de Crédito",
+            "💵 Caixa",
+            "🛠️ Correção de Caixa",
+            "🏦 Saldos Bancários",
+            "🏛️ Cadastro de Empréstimos",
+            "🏦 Cadastro de Bancos",
+            "📂 Cadastro de Saídas",
         ]:
             if st.button(title, use_container_width=True):
-                st.session_state.pagina_atual = title; st.rerun()
+                st.session_state.pagina_atual = title
+                st.rerun()
 
 # ======================================================================================
 # Título + Roteamento
