@@ -21,7 +21,7 @@ from auth.auth import (
     limpar_todas_as_paginas,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
-from shared.db_from_dropbox import ensure_local_db  # ← novo: loader Dropbox
+from shared.db_from_dropbox_api import ensure_local_db_api  # ← usar APENAS o loader por token
 
 
 # ======================================================================================
@@ -55,7 +55,7 @@ def _list_tables_sqlite(path: pathlib.Path) -> list[str]:
 
 
 # ======================================================================================
-# Infra de BD para Cloud: baixa do Dropbox (via secrets/env) ou cai no template
+# Infra de BD para Cloud: BAIXA do Dropbox via TOKEN (API) ou cai no local/template
 # ======================================================================================
 def _db_local_path() -> str:
     root = pathlib.Path(__file__).resolve().parent
@@ -88,49 +88,57 @@ def _has_required_tables(path: pathlib.Path) -> bool:
 def ensure_db_available() -> str:
     """
     Política:
-      1) Se houver URL do Dropbox (st.secrets/env/constante), tentar baixar e promover
+      1) Se houver TOKEN do Dropbox (st.secrets/env), baixar via API e promover
          (só vale se for SQLite válido + tiver tabela 'usuarios').
-      2) Se não houver URL (ou download inválido), usar o DB local se for válido.
+      2) Se o download falhar ou não houver token, usar o DB local se for válido.
       3) Caso contrário, cair no template.
     """
     db_local = pathlib.Path(_db_local_path())
     tpl = pathlib.Path(__file__).resolve().parent / "data" / "flowdash_template.db"
 
-    # fonte da URL (ordem de prioridade)
-    url = (
-        st.secrets.get("dropbox", {}).get("shared_download_url", "").strip()
-        or os.getenv("FLOWDASH_DB_URL", "").strip()
-        or "https://www.dropbox.com/scl/fi/rxgjlvt6qeldmmn54mwcf/flowdash_data.db?rlkey=k3mrb8riaw1u8rr7xhy8ngsog&st=raptd0yv&dl=1"
+    # -------- 1) PRIORIDADE: token da API do Dropbox --------
+    access_token = (
+        st.secrets.get("dropbox", {}).get("access_token", "").strip()
+        or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
+    )
+    dropbox_path = (
+        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/flowdash_data.db").strip()
+        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/flowdash_data.db").strip()
+    )
+    force_download = (
+        (st.secrets.get("dropbox", {}).get("force_download", "0") == "1")
+        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
     )
 
-    # 1) Tenta Dropbox se houver URL
-    if url:
+    if access_token:
         try:
-            path = ensure_local_db(
-                dropbox_url=url,
+            candidate_path = ensure_local_db_api(
+                access_token=access_token,
+                dropbox_path=dropbox_path,
                 dest_path=str(db_local),
-                force_download=False,
+                force_download=force_download,
+                validate_table="usuarios",
             )
-            candidate = pathlib.Path(path)
+            candidate = pathlib.Path(candidate_path)
             if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_required_tables(candidate):
-                st.session_state["db_source"] = "dropbox"
+                st.session_state["db_source"] = "dropbox_token"
                 return str(candidate)
             else:
                 info = _debug_file_info(candidate)
                 tables = _list_tables_sqlite(candidate)
                 st.warning(
-                    "Arquivo do Dropbox não é SQLite válido ou está sem a tabela 'usuarios'.\n"
+                    "Arquivo baixado via token não é SQLite válido ou está sem a tabela 'usuarios'.\n"
                     f"Debug: {info}\nTabelas detectadas: {tables}"
                 )
         except Exception as e:
-            st.warning(f"Falha ao baixar banco do Dropbox: {e}")
+            st.warning(f"Falha ao baixar banco via token do Dropbox: {e}")
 
-    # 2) Sem Dropbox (ou download falhou): usa local se válido
+    # -------- 2) Sem token ou falhou: usa local se válido --------
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_required_tables(db_local):
         st.session_state["db_source"] = "local"
         return str(db_local)
 
-    # 3) Fallback: template ou vazio
+    # -------- 3) Fallback: template ou vazio --------
     try:
         db_local.parent.mkdir(parents=True, exist_ok=True)
         if tpl.exists():
