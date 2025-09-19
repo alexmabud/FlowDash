@@ -22,38 +22,66 @@ import streamlit as st
 from utils.pin_utils import validar_pin
 
 # ---------------------------------------------------------------------------
-# Path/bootstrap
+# Bootstrap do BD via Dropbox (TOKEN) — alinhado ao main.py
 # ---------------------------------------------------------------------------
-
 import pathlib
+from shared.db_from_dropbox_api import ensure_local_db_api  # usa token + file_path
 
 _CURR_DIR = pathlib.Path(__file__).resolve().parent
 if str(_CURR_DIR) not in sys.path:
     sys.path.insert(0, str(_CURR_DIR))
 
-ABS_DB = r"C:\Users\User\OneDrive\Documentos\Python\FlowDash\data\flowdash_data.db"
-REL_DB = str(_CURR_DIR / "data" / "flowdash_data.db")
-TEMPLATE_DB = str(_CURR_DIR / "data" / "flowdash_template.db")
+st.set_page_config(page_title="FlowDash PDV", layout="wide", initial_sidebar_state="collapsed")
 
 
-def _ensure_db() -> str:
-    """Garante FLOWDASH_DB e copia o template se necessário; retorna caminho do DB."""
-    db = (os.environ.get("FLOWDASH_DB") or "").strip() or (ABS_DB if os.path.exists(ABS_DB) else REL_DB)
-    os.makedirs(os.path.dirname(db), exist_ok=True)
-    if (not os.path.exists(db)) and os.path.exists(TEMPLATE_DB):
-        import shutil
-
-        shutil.copyfile(TEMPLATE_DB, db)
-    os.environ["FLOWDASH_DB"] = db
-    return db
+def _db_local_path() -> str:
+    """Caminho local para a cópia do banco usada pelo PDV."""
+    p = _CURR_DIR / "data" / "flowdash_data.db"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
 
-DB_PATH = _ensure_db()
+@st.cache_resource(show_spinner=True)
+def get_db_path() -> str:
+    """
+    Baixa o DB do Dropbox via token (secrets) e retorna o caminho local.
+    Se o download falhar, usa o arquivo local (se existir).
+    """
+    dest = _db_local_path()
+    access_token = (st.secrets.get("dropbox", {}).get("access_token", "") or os.getenv("FLOWDASH_DBX_TOKEN", "")).strip()
+    dropbox_path = (
+        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/data/flowdash_data.db")
+        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db")
+    ).strip()
+    force_download = (
+        (st.secrets.get("dropbox", {}).get("force_download", "0") == "1")
+        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
+    )
+
+    if access_token:
+        try:
+            path = ensure_local_db_api(
+                access_token=access_token,
+                dropbox_path=dropbox_path,
+                dest_path=dest,
+                force_download=force_download,
+                validate_table="usuarios",  # garante login disponível
+            )
+            return path
+        except Exception as e:
+            st.warning(f"PDV: falha ao baixar DB do Dropbox (token): {e}")
+
+    # Fallback: mantém/local (se já existir)
+    return dest
+
+
+DB_PATH = get_db_path()
+st.session_state.setdefault("caminho_banco", DB_PATH)
+st.caption(f"🗃️ (PDV) Banco em uso: `{DB_PATH}`")
 
 # ---------------------------------------------------------------------------
 # Login
 # ---------------------------------------------------------------------------
-
 try:
     from auth import validar_login as auth_validar_login  # type: ignore
 except Exception:
@@ -66,7 +94,7 @@ except Exception:
             from utils.utils import gerar_hash_senha
 
             senha_hash = gerar_hash_senha(senha)
-            caminho_banco = caminho_banco or os.environ.get("FLOWDASH_DB") or ""
+            caminho_banco = caminho_banco or DB_PATH
             with sqlite3.connect(caminho_banco) as conn:
                 row = conn.execute(
                     "SELECT id, nome, email, perfil FROM usuarios WHERE email=? AND senha=? AND ativo=1",
@@ -78,8 +106,6 @@ except Exception:
 # ---------------------------------------------------------------------------
 # UI base
 # ---------------------------------------------------------------------------
-
-st.set_page_config(page_title="FlowDash PDV", layout="wide", initial_sidebar_state="collapsed")
 st.markdown(
     """
     <style>
@@ -103,8 +129,8 @@ st.markdown(
 
 
 def _conn() -> sqlite3.Connection:
-    """Abre conexão SQLite usando FLOWDASH_DB; aborta com mensagem se não existir."""
-    db = (os.environ.get("FLOWDASH_DB") or "").strip()
+    """Abre conexão SQLite usando DB_PATH; aborta com mensagem se não existir."""
+    db = DB_PATH
     if not db or not os.path.exists(db):
         st.error(f"❌ Banco de dados não encontrado em: `{db or '(vazio)'}`")
         st.stop()
@@ -324,9 +350,7 @@ def _metas_loja_gauges(ref_day: date) -> None:
             lower_cols = [c.lower() for c in cols]
             if perc_col and perc_col.lower() in lower_cols:
                 perc_dow = float(
-                    conn.execute(f"SELECT COALESCE({perc_col}, 0.0) FROM metas ORDER BY rowid DESC LIMIT 1").fetchone()[
-                        0
-                    ]
+                    conn.execute(f"SELECT COALESCE({perc_col}, 0.0) FROM metas ORDER BY rowid DESC LIMIT 1").fetchone()[0]
                     or 0.0
                 )
 
