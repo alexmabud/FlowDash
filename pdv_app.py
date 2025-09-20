@@ -105,6 +105,29 @@ DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
 FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
 
+# ---------- PROBES de diagnóstico (iguais ao Main) ----------
+def _probe_current_account(token: str) -> str:
+    if not token:
+        return "Sem token carregado (secrets/env)."
+    try:
+        url = "https://api.dropboxapi.com/2/users/get_current_account"
+        r = requests.post(url, headers={"Authorization": f"Bearer {token}"}, timeout=30)
+        return f"HTTP {r.status_code}\n{r.text}"
+    except Exception as e:
+        return f"(erro: {e})"
+
+def _probe_get_metadata(token: str, path: str) -> str:
+    if not token:
+        return "Sem token carregado (secrets/env)."
+    try:
+        url = "https://api.dropboxapi.com/2/files/get_metadata"
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        r = requests.post(url, headers=headers, json={"path": path}, timeout=30)
+        return f"HTTP {r.status_code}\n{r.text}"
+    except Exception as e:
+        return f"(erro: {e})"
+
+# ---------- Diagnóstico visual (com botão) ----------
 if _DEBUG:
     with st.expander("🔎 Diagnóstico Dropbox (PDV)", expanded=True):
         try:
@@ -118,6 +141,19 @@ if _DEBUG:
             st.write("token_length:", len(ACCESS_TOKEN_CFG))
             st.write("file_path:", DROPBOX_PATH_CFG)
             st.write("force_download:", "1" if FORCE_DOWNLOAD_CFG else "0")
+
+            run = False
+            if st.button("🔄 Rodar diagnóstico agora"):
+                run = True
+            if st.session_state.get("_dbg_dropbox_pdv_ran") is None:
+                run = True  # roda automático na primeira vez
+
+            if run:
+                st.session_state["_dbg_dropbox_pdv_ran"] = True
+                st.markdown("**users/get_current_account**")
+                st.code(_probe_current_account(ACCESS_TOKEN_CFG))
+                st.markdown("**files/get_metadata**")
+                st.code(_probe_get_metadata(ACCESS_TOKEN_CFG, DROPBOX_PATH_CFG))
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox (PDV): {e}")
 
@@ -175,7 +211,9 @@ def _dropbox_upload(token: str, remote_path: str, local_path: str) -> dict:
     }
     with open(local_path, "rb") as f:
         r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
-    r.raise_for_status()
+    if r.status_code != 200:
+        # Erro mais claro (exibe corpo retornado pelo Dropbox)
+        raise RuntimeError(f"upload failed: HTTP {r.status_code} — {r.text}")
     return r.json()
 
 # ------------- ensure db disponível (igual ao main, retorno determinístico) -------------
@@ -261,8 +299,7 @@ def _auto_pull_if_remote_newer():
             _dropbox_download(_effective_token, _effective_path, DB_PATH)
             st.session_state["_pdv_db_last_pull_ts"] = remote_ts
             st.toast("☁️ PDV: banco atualizado do Dropbox.", icon="🔄")
-            # limpa caches para refletir o novo arquivo imediatamente
-            st.cache_data.clear()
+            st.cache_data.clear()  # limpa caches para refletir o novo arquivo imediatamente
         except Exception as e:
             st.warning(f"PDV: não foi possível baixar DB remoto: {e}")
 
