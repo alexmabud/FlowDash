@@ -1,6 +1,6 @@
-streamlit>=1.36
-pandas>=2.2
-plotly
-workalendar
-matplotlib
-requests>=2.32
+streamlit>=1.36,<1.41
+pandas>=2.2,<2.3
+plotly>=5.22,<6
+workalendar>=17.0,<18
+matplotlib>=3.8,<3.10
+requests>=2.32,<3
