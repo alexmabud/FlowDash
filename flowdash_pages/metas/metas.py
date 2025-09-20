@@ -71,15 +71,17 @@ def _gauge_percentual_zonas(
     percentual: float,
     bronze_pct: float,
     prata_pct: float,
-    axis_max: float = 120.0,
+    axis_max: float = 100.0,  # FIX: eixo máximo agora é 100 por padrão
     bar_color_rgba: str = "rgba(0,200,83,0.75)",
     valor_label: Optional[str] = None
 ) -> go.Figure:
+    """Gauge 0–100 com zonas (vermelho/bronze/prata/ouro) e label inferior destacado."""
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata  = max(bronze, min(100.0, float(prata_pct)))
     max_axis = max(100.0, float(axis_max))
     value = float(max(0.0, min(max_axis, percentual)))
 
+    # Mantém 4 cores; com eixo 0–100 a faixa 'ouro' vira [100,100] (sem extrapolar 120).
     steps = [
         {"range": [0, bronze],      "color": "#E53935"},  # vermelho
         {"range": [bronze, prata],  "color": "#CD7F32"},  # bronze
@@ -90,8 +92,9 @@ def _gauge_percentual_zonas(
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
-        number={"suffix": "%"},
-        title={"text": titulo, "font": {"size": 18}},
+        number={"suffix": "%", "font": {"size": 44}},  # deixa a % confortável
+        # FIX: título menor e com margem superior extra para não cortar
+        title={"text": f"<span>{titulo}</span>", "font": {"size": 16}},
         gauge={
             "shape": "angular",
             "axis": {"range": [0, max_axis]},
@@ -101,13 +104,17 @@ def _gauge_percentual_zonas(
             "borderwidth": 0,
         },
     ))
+
+    # FIX: label inferior maior, verde, e um pouco mais abaixo para não colidir
     if valor_label:
         fig.add_annotation(
-            x=0.5, y=0.06, xref="paper", yref="paper",
-            text=f"<span style='font-size:12px;color:#B0BEC5'>{valor_label}</span>",
+            x=0.5, y=0.0, xref="paper", yref="paper",
+            text=f"<span style='font-size:16px;font-weight:700;color:#00C853'>{valor_label}</span>",
             showarrow=False, align="center"
         )
-    fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=230)
+
+    # FIX: margens maiores no topo e rodapé para evitar cortes/ocultação
+    fig.update_layout(margin=dict(l=10, r=10, t=70, b=70), height=260)
     return fig
 
 # ======================= Cards de metas (HTML) =======================
