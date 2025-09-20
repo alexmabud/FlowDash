@@ -71,17 +71,15 @@ def _gauge_percentual_zonas(
     percentual: float,
     bronze_pct: float,
     prata_pct: float,
-    axis_max: float = 100.0,  # FIX: eixo máximo agora é 100 por padrão
+    axis_max: float = 120.0,  # NÃO mexi no gauge/escala
     bar_color_rgba: str = "rgba(0,200,83,0.75)",
     valor_label: Optional[str] = None
 ) -> go.Figure:
-    """Gauge 0–100 com zonas (vermelho/bronze/prata/ouro) e label inferior destacado."""
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata  = max(bronze, min(100.0, float(prata_pct)))
     max_axis = max(100.0, float(axis_max))
     value = float(max(0.0, min(max_axis, percentual)))
 
-    # Mantém 4 cores; com eixo 0–100 a faixa 'ouro' vira [100,100] (sem extrapolar 120).
     steps = [
         {"range": [0, bronze],      "color": "#E53935"},  # vermelho
         {"range": [bronze, prata],  "color": "#CD7F32"},  # bronze
@@ -92,9 +90,9 @@ def _gauge_percentual_zonas(
     fig = go.Figure(go.Indicator(
         mode="gauge+number",
         value=value,
-        number={"suffix": "%", "font": {"size": 44}},  # deixa a % confortável
-        # FIX: título menor e com margem superior extra para não cortar
-        title={"text": f"<span>{titulo}</span>", "font": {"size": 16}},
+        number={"suffix": "%"},
+        # >>> Título: mais margem superior (layout) para não cortar
+        title={"text": titulo, "font": {"size": 18}},
         gauge={
             "shape": "angular",
             "axis": {"range": [0, max_axis]},
@@ -105,16 +103,19 @@ def _gauge_percentual_zonas(
         },
     ))
 
-    # FIX: label inferior maior, verde, e um pouco mais abaixo para não colidir
+    # >>> Valor vendido: MAIOR, VERDE e FORA do gauge (abaixo), sem sobrepor a %
+    # Colocamos no "paper" (y=0, âncora no topo) e aumentamos a margem inferior.
     if valor_label:
         fig.add_annotation(
             x=0.5, y=0.0, xref="paper", yref="paper",
-            text=f"<span style='font-size:16px;font-weight:700;color:#00C853'>{valor_label}</span>",
+            yanchor="top", yshift=-6,
+            text=f"<span style='font-size:18px;font-weight:700;color:#00C853'>{valor_label}</span>",
             showarrow=False, align="center"
         )
 
-    # FIX: margens maiores no topo e rodapé para evitar cortes/ocultação
-    fig.update_layout(margin=dict(l=10, r=10, t=70, b=70), height=260)
+    # Margens: topo ↑ para o título e base ↑ para caber o valor — sem encostar no gauge
+    # Mantive o gauge em si; só criei espaço fora dele.
+    fig.update_layout(margin=dict(l=10, r=10, t=80, b=80), height=300)
     return fig
 
 # ======================= Cards de metas (HTML) =======================
@@ -295,10 +296,8 @@ def _metas_vigentes(df_metas: pd.DataFrame, ref_day: date) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=["vendedor"])
 
-    # pega a última por vendedor
     df = df.sort_values(["vendedor", "_mes_key"]).groupby("vendedor", as_index=False).tail(1)
 
-    # Derivar colunas absolutas (mensal, semanal, dias, níveis) se não existirem
     def _num(s, default=0.0): return pd.to_numeric(s, errors="coerce").fillna(default)
 
     if "mensal" not in df.columns:
@@ -325,10 +324,6 @@ def _extrair_metas_completo(
     vendedor_upper: str,
     coluna_dia: str
 ) -> Tuple[float, float, float, float, float, float]:
-    """
-    Extrai (meta_dia, meta_sem, meta_mes, ouro, prata, bronze) a partir do DF já
-    consolidado por vigência (`_metas_vigentes`). Match case-insensitive/trim.
-    """
     metas_v = df_metas_vig[df_metas_vig["vendedor"].astype(str).str.strip().str.upper() == vendedor_upper]
     if metas_v.empty:
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -354,7 +349,6 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
     if available_dates.empty:
         st.info("Sem dados de vendas para exibir."); return
 
-    # Seletor de data — sempre HOJE como default (chave diária no session_state)
     min_d, max_d = available_dates.min(), max(available_dates.max(), date.today())
     ref_day = st.date_input(
         "📅 Data de referência",
@@ -369,10 +363,8 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
     inicio_sem, inicio_mes = _inicio_semana(ref_day), ref_day.replace(day=1)
     coluna_dia, mes_key = _coluna_dia(ref_day), f"{inicio_mes:%Y%m}"
 
-    # Consolidar metas por "vigente a partir de"
     df_m_vig = _metas_vigentes(df_metas, ref_day)
 
-    # ---------------- LOJA ----------------
     # LOJA = soma de TODAS as vendas dos vendedores (exclui Usuario='LOJA')
     df_loja = df_e[df_e["UsuarioUpper"] != "LOJA"]
     mask_dia = (df_loja["Data"].dt.date == ref_day)
@@ -415,14 +407,13 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
 
     _cards_periodo(ouro_l, prata_l, bronz_l, m_dia, m_sem, valor_dia_loja, valor_sem_loja, valor_mes_loja)
 
-    # ------------- VENDEDORES (vindos da tabela METAS – vigentes) -------------
+    # ------------- VENDEDORES -------------
     st.markdown("#### 👥 Vendedores")
     if "vendedor" in df_m_vig.columns:
         vendedores = sorted([v for v in df_m_vig["vendedor"].dropna().astype(str).str.strip().unique() if v and v.upper() != "LOJA"])
     else:
         vendedores = []
 
-    # se perfil for Vendedor, restringe ao próprio nome
     if str(perfil_logado).strip().lower() == "vendedor":
         vendedores = [v for v in vendedores if v.upper() == str(usuario_logado).strip().upper()]
 
@@ -433,17 +424,15 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
         nome_upper = str(vendedor).strip().upper()
         slug = _slug_key(vendedor)
 
-        # vendas do vendedor (podem ser zero)
         df_u = df_e[df_e["UsuarioUpper"] == nome_upper]
         mask_d = (df_u["Data"].dt.date == ref_day)
-        mask_s = (df_u["Data"].dt.date >= inicio_sem) & (df_u["Data"].dt.date <= ref_day)
+        mask_s = (df_u["Data"].dt.date >= _inicio_semana(ref_day)) & (df_u["Data"].dt.date <= ref_day)
         mask_m = (df_u["Data"].dt.date >= inicio_mes) & (df_u["Data"].dt.date <= ref_day)
         valor_dia = df_u.loc[mask_d, "Valor"].sum()
         valor_sem = df_u.loc[mask_s, "Valor"].sum()
         valor_mes = df_u.loc[mask_m, "Valor"].sum()
 
-        # metas do vendedor (vigentes)
-        m_dia, m_sem, m_mes, ouro, prata, bronz = _extrair_metas_completo(df_m_vig, nome_upper, coluna_dia)
+        m_dia, m_sem, m_mes, ouro, prata, bronz = _extrair_metas_completo(df_m_vig, nome_upper, _coluna_dia(ref_day))
         perc_dia = _calcular_percentual(valor_dia, m_dia)
         perc_sem = _calcular_percentual(valor_sem, m_sem)
         perc_mes = _calcular_percentual(valor_mes, m_mes)
@@ -453,11 +442,11 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
         st.markdown(f"<h5 style='margin: 5px 0 -25px;'>👤 {vendedor}</h5>", unsafe_allow_html=True)
         c1, c2, c3 = st.columns(3)
         c1.plotly_chart(_gauge_percentual_zonas("Meta do Dia", perc_dia, bronze_pct, prata_pct, valor_label=_fmt(valor_dia)),
-                        use_container_width=True, key=f"gauge_{slug}_dia_{mes_key}_{ref_day}")
+                        use_container_width=True, key=f"gauge_{slug}_dia_{ref_day}")
         c2.plotly_chart(_gauge_percentual_zonas("Meta da Semana", perc_sem, bronze_pct, prata_pct, valor_label=_fmt(valor_sem)),
-                        use_container_width=True, key=f"gauge_{slug}_sem_{mes_key}_{ref_day}")
+                        use_container_width=True, key=f"gauge_{slug}_sem_{ref_day}")
         c3.plotly_chart(_gauge_percentual_zonas("Meta do Mês", perc_mes, bronze_pct, prata_pct, valor_label=_fmt(valor_mes)),
-                        use_container_width=True, key=f"gauge_{slug}_mes_{mes_key}_{ref_day}")
+                        use_container_width=True, key=f"gauge_{slug}_mes_{ref_day}")
 
         # cards do vendedor
         def _ratios(ouro: float, prata: float, bronze: float) -> Tuple[float,float]:
