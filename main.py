@@ -20,8 +20,8 @@ import inspect
 import os
 import pathlib
 import sqlite3
+import requests
 import streamlit as st
-import requests  # diagnóstico opcional no expander
 
 from auth.auth import (
     validar_login,
@@ -77,10 +77,16 @@ def _safe_get_secrets(section: str) -> dict:
     except Exception:
         return {}
 
+def _mask(s: str, keep: int = 6) -> str:
+    s = str(s or "")
+    return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
+
 # -----------------------------------------------------------------------------
 # Ler SECRETS/ENVs fora do cache (servem de chave para invalidar)
 # -----------------------------------------------------------------------------
 _dbx_cfg = _safe_get_secrets("dropbox")
+TOKEN_SOURCE = "secrets" if (_dbx_cfg.get("access_token") or "").strip() else ("env" if os.getenv("FLOWDASH_DBX_TOKEN") else "none")
+
 _ACCESS_TOKEN = (
     (_dbx_cfg.get("access_token") or "").strip()
     or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
@@ -97,31 +103,41 @@ _FORCE_DOWNLOAD = (
 # -----------------------------------------------------------------------------
 # Diagnóstico ANTES do ensure (fica visível mesmo se der st.stop)
 # -----------------------------------------------------------------------------
-with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
+with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
     try:
-        token = _ACCESS_TOKEN
-        filep = _DROPBOX_PATH
-        force = "1" if _FORCE_DOWNLOAD else "0"
-
-        def _mask(s: str, keep: int = 6) -> str:
-            s = str(s or "")
-            return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
-
         st.write("Tem seção [dropbox] nos Secrets?", bool(_dbx_cfg))
-        st.write("access_token (mascarado):", _mask(token))
-        st.write("file_path:", filep)
-        st.write("force_download:", force)
-        # Probe opcional: testa se o path existe no Dropbox via get_metadata
-        if st.button("Testar path no Dropbox (get_metadata)"):
-            try:
-                url = "https://api.dropboxapi.com/2/files/get_metadata"
-                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                resp = requests.post(url, headers=headers, json={"path": filep}, timeout=30)
-                st.code(f"HTTP {resp.status_code}\n{resp.text}")
-            except Exception as e:
-                st.error(f"Probe get_metadata falhou: {e}")
+        st.write("token_source:", TOKEN_SOURCE)                 # "secrets", "env" ou "none"
+        st.write("access_token (mascarado):", _mask(_ACCESS_TOKEN))
+        st.write("token_length:", len(_ACCESS_TOKEN))
+        st.write("file_path:", _DROPBOX_PATH)
+        st.write("force_download:", "1" if _FORCE_DOWNLOAD else "0")
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Validar token (users/get_current_account)"):
+                if not _ACCESS_TOKEN:
+                    st.error("Sem token carregado (secrets/env).")
+                else:
+                    try:
+                        url = "https://api.dropboxapi.com/2/users/get_current_account"
+                        r = requests.post(url, headers={"Authorization": f"Bearer {_ACCESS_TOKEN}"}, timeout=30)
+                        st.code(f"HTTP {r.status_code}\n{r.text}")
+                    except Exception as e:
+                        st.error(f"Erro na validação: {e}")
+        with col2:
+            if st.button("Testar path no Dropbox (files/get_metadata)"):
+                if not _ACCESS_TOKEN:
+                    st.error("Sem token carregado (secrets/env).")
+                else:
+                    try:
+                        url = "https://api.dropboxapi.com/2/files/get_metadata"
+                        headers = {"Authorization": f"Bearer {_ACCESS_TOKEN}", "Content-Type": "application/json"}
+                        r = requests.post(url, headers=headers, json={"path": _DROPBOX_PATH}, timeout=30)
+                        st.code(f"HTTP {r.status_code}\n{r.text}")
+                    except Exception as e:
+                        st.error(f"Probe get_metadata falhou: {e}")
     except Exception as e:
-        st.warning(f"Falha lendo st.secrets: {e}")
+        st.warning(f"Falha lendo st.secrets/env: {e}")
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
@@ -134,10 +150,11 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     3) Caso contrário: erro explícito.
 
     OBS: receber (access_token, dropbox_path, force_download) como parâmetros garante
-    que mudanças nos Secrets invalidem o cache no Streamlit Cloud.
+    que mudanças nos Secrets/ENVs invalidem o cache no Streamlit Cloud.
     """
     db_local = _db_local_path()
 
+    # 1) Dropbox
     if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
@@ -149,7 +166,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
             )
             candidate = pathlib.Path(candidate_path)
             if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
-                st.session_state["db_source"] = "dropbox_token"
+                st.session_state["db_source"] = f"dropbox_token({_mask(access_token, 4)})"
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
             else:
@@ -168,8 +185,9 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido.\n\n"
-        "- Preencha `dropbox.access_token` e `dropbox.file_path` nos *secrets* (ou variáveis de ambiente) **ou**\n"
-        "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
+        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, "
+        "e `file_path` correto; **ou**\n"
+        "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` com a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
     )
     st.stop()
