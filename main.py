@@ -83,14 +83,28 @@ def _mask(s: str, keep: int = 6) -> str:
 
 # -----------------------------------------------------------------------------
 # Ler SECRETS/ENVs fora do cache (servem de chave para invalidar)
+# + permitir override manual via UI (st.session_state["override_token"])
 # -----------------------------------------------------------------------------
 _dbx_cfg = _safe_get_secrets("dropbox")
-TOKEN_SOURCE = "secrets" if (_dbx_cfg.get("access_token") or "").strip() else ("env" if os.getenv("FLOWDASH_DBX_TOKEN") else "none")
 
+# Ordem de precedência do token: override (UI) > secrets > env > none
+_OVERRIDE_TOKEN = st.session_state.get("override_token", "").strip()
 _ACCESS_TOKEN = (
-    (_dbx_cfg.get("access_token") or "").strip()
+    _OVERRIDE_TOKEN
+    or (_dbx_cfg.get("access_token") or "").strip()
     or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
 )
+
+# De onde o token veio (só para diagnóstico)
+if _OVERRIDE_TOKEN:
+    TOKEN_SOURCE = "override"
+elif (_dbx_cfg.get("access_token") or "").strip():
+    TOKEN_SOURCE = "secrets"
+elif os.getenv("FLOWDASH_DBX_TOKEN", "").strip():
+    TOKEN_SOURCE = "env"
+else:
+    TOKEN_SOURCE = "none"
+
 _DROPBOX_PATH = (
     (_dbx_cfg.get("file_path") or "").strip()
     or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
@@ -105,8 +119,23 @@ _FORCE_DOWNLOAD = (
 # -----------------------------------------------------------------------------
 with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
     try:
+        # Campo para token manual (override só desta sessão)
+        tok_manual = st.text_input("🔑 Token (manual, só nesta sessão):", type="password", help="Prioridade: override > secrets > env")
+        col_set, col_clear = st.columns(2)
+        with col_set:
+            if st.button("Usar token manual nesta sessão"):
+                if tok_manual.strip():
+                    st.session_state["override_token"] = tok_manual.strip()
+                    st.success("Token manual aplicado. Clique em Rerun.")
+                    st.stop()
+        with col_clear:
+            if st.button("Limpar token manual"):
+                st.session_state.pop("override_token", None)
+                st.info("Override removido. Clique em Rerun.")
+                st.stop()
+
         st.write("Tem seção [dropbox] nos Secrets?", bool(_dbx_cfg))
-        st.write("token_source:", TOKEN_SOURCE)                 # "secrets", "env" ou "none"
+        st.write("token_source:", TOKEN_SOURCE)                 # "override" | "secrets" | "env" | "none"
         st.write("access_token (mascarado):", _mask(_ACCESS_TOKEN))
         st.write("token_length:", len(_ACCESS_TOKEN))
         st.write("file_path:", _DROPBOX_PATH)
@@ -116,7 +145,7 @@ with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
         with col1:
             if st.button("Validar token (users/get_current_account)"):
                 if not _ACCESS_TOKEN:
-                    st.error("Sem token carregado (secrets/env).")
+                    st.error("Sem token carregado (override/secrets/env).")
                 else:
                     try:
                         url = "https://api.dropboxapi.com/2/users/get_current_account"
@@ -127,7 +156,7 @@ with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
         with col2:
             if st.button("Testar path no Dropbox (files/get_metadata)"):
                 if not _ACCESS_TOKEN:
-                    st.error("Sem token carregado (secrets/env).")
+                    st.error("Sem token carregado (override/secrets/env).")
                 else:
                     try:
                         url = "https://api.dropboxapi.com/2/files/get_metadata"
@@ -185,7 +214,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido.\n\n"
-        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, "
+        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs/override, "
         "e `file_path` correto; **ou**\n"
         "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` com a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
