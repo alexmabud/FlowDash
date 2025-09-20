@@ -12,6 +12,10 @@ Política do banco:
        force_download = "0"
   2) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
   3) Se nada der certo, exibir erro claro.
+
+Flags úteis (produção x debug):
+  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"     -> mostra diagnóstico
+  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"  -> ignora Dropbox (força DB local)
 """
 from __future__ import annotations
 
@@ -31,7 +35,7 @@ from auth.auth import (
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
 from shared.db_from_dropbox_api import ensure_local_db_api
-from shared.dropbox_config import load_dropbox_settings, mask_token  # <<< unificado
+from shared.dropbox_config import load_dropbox_settings, mask_token  # leitor unificado
 
 # -----------------------------------------------------------------------------
 # Config
@@ -74,67 +78,90 @@ def _db_local_path() -> pathlib.Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
-# -----------------------------------------------------------------------------
-# Diagnóstico Dropbox (usa o leitor unificado: load_dropbox_settings)
-# -----------------------------------------------------------------------------
-with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
+def _flag_debug() -> bool:
+    # DEBUG via env ou secrets
     try:
-        cfg = load_dropbox_settings(prefer_env_first=True)
-        ACCESS_TOKEN = cfg.get("access_token") or ""
-        DROPBOX_PATH = cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
-        FORCE_DOWNLOAD = bool(cfg.get("force_download", False))
-        TOKEN_SOURCE = cfg.get("token_source", "none")
+        sec = dict(st.secrets.get("dropbox", {}))
+        if str(sec.get("debug", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+            return True
+    except Exception:
+        pass
+    return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
+def _flag_dropbox_disable() -> bool:
+    # OFFLINE (ignorar Dropbox) via env ou secrets
+    try:
+        sec = dict(st.secrets.get("dropbox", {}))
+        if str(sec.get("disable", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+            return True
+    except Exception:
+        pass
+    return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+# -----------------------------------------------------------------------------
+# Diagnóstico Dropbox (apenas se DEBUG ativo)
+# -----------------------------------------------------------------------------
+_DEBUG = _flag_debug()
+_cfg = load_dropbox_settings(prefer_env_first=True)
+
+ACCESS_TOKEN_CFG = _cfg.get("access_token") or ""
+DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
+FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
+TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
+
+if _DEBUG:
+    with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
         try:
-            st.write("st.secrets keys:", list(st.secrets.keys()))
-            st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
-        except Exception:
-            st.write("st.secrets indisponível neste contexto (ok para CLI/local).")
+            try:
+                st.write("st.secrets keys:", list(st.secrets.keys()))
+                st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
+            except Exception:
+                st.write("st.secrets indisponível neste contexto (ok para CLI/local).")
 
-        st.write("token_source:", TOKEN_SOURCE)  # "env", "st.secrets:/...", "none"
-        st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN))
-        st.write("token_length:", len(ACCESS_TOKEN))
-        st.write("file_path:", DROPBOX_PATH)
-        st.write("force_download:", "1" if FORCE_DOWNLOAD else "0")
+            st.write("token_source:", TOKEN_SOURCE_CFG)  # "env", "st.secrets:/...", "none"
+            st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN_CFG))
+            st.write("token_length:", len(ACCESS_TOKEN_CFG))
+            st.write("file_path:", DROPBOX_PATH_CFG)
+            st.write("force_download:", "1" if FORCE_DOWNLOAD_CFG else "0")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Validar token (users/get_current_account)"):
-                if not ACCESS_TOKEN:
-                    st.error("Sem token carregado (secrets/env).")
-                else:
-                    try:
-                        url = "https://api.dropboxapi.com/2/users/get_current_account"
-                        r = requests.post(
-                            url,
-                            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
-                            timeout=30,
-                        )
-                        st.code(f"HTTP {r.status_code}\n{r.text}")
-                    except Exception as e:
-                        st.error(f"Erro na validação: {e}")
-        with col2:
-            if st.button("Testar path no Dropbox (files/get_metadata)"):
-                if not ACCESS_TOKEN:
-                    st.error("Sem token carregado (secrets/env).")
-                else:
-                    try:
-                        url = "https://api.dropboxapi.com/2/files/get_metadata"
-                        headers = {
-                            "Authorization": f"Bearer {ACCESS_TOKEN}",
-                            "Content-Type": "application/json",
-                        }
-                        r = requests.post(
-                            url,
-                            headers=headers,
-                            json={"path": DROPBOX_PATH},
-                            timeout=30,
-                        )
-                        st.code(f"HTTP {r.status_code}\n{r.text}")
-                    except Exception as e:
-                        st.error(f"Probe get_metadata falhou: {e}")
-    except Exception as e:
-        st.warning(f"Falha lendo config Dropbox: {e}")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Validar token (users/get_current_account)"):
+                    if not ACCESS_TOKEN_CFG:
+                        st.error("Sem token carregado (secrets/env).")
+                    else:
+                        try:
+                            url = "https://api.dropboxapi.com/2/users/get_current_account"
+                            r = requests.post(
+                                url,
+                                headers={"Authorization": f"Bearer {ACCESS_TOKEN_CFG}"},
+                                timeout=30,
+                            )
+                            st.code(f"HTTP {r.status_code}\n{r.text}")
+                        except Exception as e:
+                            st.error(f"Erro na validação: {e}")
+            with col2:
+                if st.button("Testar path no Dropbox (files/get_metadata)"):
+                    if not ACCESS_TOKEN_CFG:
+                        st.error("Sem token carregado (secrets/env).")
+                    else:
+                        try:
+                            url = "https://api.dropboxapi.com/2/files/get_metadata"
+                            headers = {
+                                "Authorization": f"Bearer {ACCESS_TOKEN_CFG}",
+                                "Content-Type": "application/json",
+                            }
+                            r = requests.post(
+                                url,
+                                headers=headers,
+                                json={"path": DROPBOX_PATH_CFG},
+                                timeout=30,
+                            )
+                            st.code(f"HTTP {r.status_code}\n{r.text}")
+                        except Exception as e:
+                            st.error(f"Probe get_metadata falhou: {e}")
+        except Exception as e:
+            st.warning(f"Falha lendo config Dropbox: {e}")
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
@@ -199,16 +226,25 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
-# Carrega cfg unificada e passa para o recurso cacheado
-_cfg = load_dropbox_settings(prefer_env_first=True)
-_caminho_banco = ensure_db_available(
-    _cfg.get("access_token") or "",
-    _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db",
-    bool(_cfg.get("force_download", False)),
-)
+# Flags efetivas: modo offline força token vazio
+_DROPBOX_DISABLED = _flag_dropbox_disable()
+_effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
+_effective_path = DROPBOX_PATH_CFG
+_effective_force = FORCE_DOWNLOAD_CFG
+
+# Recurso cacheado
+_caminho_banco = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
 # INFO de origem do banco
-st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`")
+if _DEBUG:
+    st.caption(
+        "🗃️ Banco em uso: "
+        f"**{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`  •  "
+        f"token_source={TOKEN_SOURCE_CFG}  •  dropbox_path={_effective_path}  •  "
+        f"offline={'1' if _DROPBOX_DISABLED else '0'}"
+    )
+else:
+    st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`")
 
 # Garantias/infra mínimas
 try:
