@@ -4,14 +4,14 @@ FlowDash — Main App
 ===================
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 
-Política do banco (SEM TEMPLATE por padrão):
+Política do banco:
   1) Tentar baixar via TOKEN do Dropbox (API) usando secrets/env:
        [dropbox]
        access_token   = "sl.ABC...SEU_TOKEN..."
-       file_path      = "/FlowDash/data/flowdash_data.db"
-       force_download = "0"           # "1" força re-download a cada start
-  2) Se falhar ou não houver token/caminho, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
-  3) Se não houver DB válido, exibir erro e interromper a execução.
+       file_path      = "/FlowDash/data/flowdash_data.db"    # OU /Apps/SeuApp/FlowDash/data/flowdash_data.db
+       force_download = "0"                                  # "1" força re-download a cada start
+  2) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
+  3) Se nada der certo, exibir erro claro.
 """
 
 from __future__ import annotations
@@ -24,28 +24,27 @@ import streamlit as st
 
 from auth.auth import (
     validar_login,
-    verificar_acesso,      # disponível dentro das páginas (mantido para uso interno)
-    exibir_usuario_logado, # disponível dentro das páginas (mantido para uso interno)
+    verificar_acesso,
+    exibir_usuario_logado,
     limpar_todas_as_paginas,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
-from shared.db_from_dropbox_api import ensure_local_db_api  # usa a API do Dropbox (TOKEN)
+from shared.db_from_dropbox_api import ensure_local_db_api
 
-# ======================================================================================
-# Configuração inicial da página
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Config
+# -----------------------------------------------------------------------------
 st.set_page_config(page_title="FlowDash", layout="wide")
 
-# ======================================================================================
-# Helpers de diagnóstico
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def _debug_file_info(path: pathlib.Path) -> str:
-    """Retorna tamanho e primeiros bytes do arquivo (para checar cabeçalho SQLite)."""
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
-            head = f.read(64)
-        return f"size=%s bytes, head=%r" % (size, head)
+            head = f.read(16)
+        return f"size={size}B, head={head!r}"
     except Exception as e:
         return f"(falha ao inspecionar: {e})"
 
@@ -59,10 +58,7 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
         with sqlite3.connect(str(path)) as conn:
-            cur = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
-                (table,),
-            )
+            cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (table,))
             return cur.fetchone() is not None
     except Exception:
         return False
@@ -74,26 +70,25 @@ def _db_local_path() -> pathlib.Path:
     return p
 
 def _safe_get_secrets(section: str) -> dict:
-    """Lê st.secrets[section] sem quebrar quando não existir (Cloud ou local)."""
     try:
         sec = st.secrets.get(section, {})
         return dict(sec) if isinstance(sec, dict) else {}
     except Exception:
         return {}
 
-# ======================================================================================
-# Infra de BD: TOKEN (Dropbox) opcional → LOCAL; sem template obrigatório
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Banco: Dropbox TOKEN -> Local; sem template obrigatório
+# -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available() -> str:
     """
     1) Se houver TOKEN do Dropbox (secrets/env) e file_path: baixa via API para data/flowdash_data.db.
-    2) Se download falhar ou não houver token/caminho: usa DB local se for válido.
-    3) Caso contrário: mostra erro e interrompe.
+    2) Se download falhar ou não houver token/caminho: usa DB local se válido.
+    3) Caso contrário: erro explícito.
     """
     db_local = _db_local_path()
 
-    # 1) Tenta via TOKEN/API Dropbox (tolerante à ausência de secrets.toml)
+    # 1) Secrets/env
     dbx_cfg = _safe_get_secrets("dropbox")
     access_token = (
         (dbx_cfg.get("access_token") or "").strip()
@@ -104,8 +99,8 @@ def ensure_db_available() -> str:
         or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
     )
     force_download = (
-        (str(dbx_cfg.get("force_download", "0")) == "1")
-        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
+        (str(dbx_cfg.get("force_download", "0")).strip() == "1")
+        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0").strip() == "1")
     )
 
     if access_token and dropbox_path:
@@ -115,37 +110,26 @@ def ensure_db_available() -> str:
                 dropbox_path=dropbox_path,
                 dest_path=str(db_local),
                 force_download=force_download,
-                validate_table="usuarios",  # garante login
+                validate_table="usuarios",
             )
             candidate = pathlib.Path(candidate_path)
-            if (
-                candidate.exists()
-                and candidate.stat().st_size > 0
-                and _is_sqlite(candidate)
-                and _has_table(candidate, "usuarios")
-            ):
+            if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
                 st.session_state["db_source"] = "dropbox_token"
-                os.environ["FLOWDASH_DB"] = str(candidate)  # exporta para módulos que usam ENV
+                os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
             else:
-                info = _debug_file_info(candidate)
-                st.warning("Banco baixado via token é inválido (ou sem tabela 'usuarios').")
-                st.caption(f"Debug: {info}")
+                st.warning("Banco baixado via token parece inválido (ou sem tabela 'usuarios').")
+                st.caption(f"Debug: {_debug_file_info(candidate)}")
         except Exception as e:
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
-    # 2) LOCAL válido?
-    if (
-        db_local.exists()
-        and db_local.stat().st_size > 0
-        and _is_sqlite(db_local)
-        and _has_table(db_local, "usuarios")
-    ):
+    # 2) Local
+    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
         st.session_state["db_source"] = "local"
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
 
-    # 3) Nada válido → erro explícito e stop (não explode por falta de secrets)
+    # 3) Erro
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido.\n\n"
@@ -158,29 +142,47 @@ def ensure_db_available() -> str:
 # Caminho do banco (garantido ou interrompe)
 caminho_banco = ensure_db_available()
 
-# Mostra de onde veio o banco (útil no deploy)
+# INFO de origem do banco
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
 
-# Disponibiliza caminho para os módulos
-st.session_state.setdefault("caminho_banco", caminho_banco)
+# Painel de diagnóstico (temporário) — ajuda a debugar no Cloud
+with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
+    try:
+        sec = st.secrets.get("dropbox", {})
+        token = (sec.get("access_token") or os.getenv("FLOWDASH_DBX_TOKEN") or "")
+        filep = (sec.get("file_path")     or os.getenv("FLOWDASH_DBX_FILE") or "")
+        force = (str(sec.get("force_download", "")) or os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", ""))
 
-# Infra mínima de BD (idempotente)
+        def _mask(s: str, keep: int = 6) -> str:
+            s = str(s or "")
+            return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
+
+        st.write("Tem seção [dropbox] nos Secrets?", isinstance(sec, dict) and bool(sec))
+        st.write("access_token (mascarado):", _mask(token))
+        st.write("file_path:", filep)
+        st.write("force_download:", force)
+        st.write("Fonte atual do banco:", st.session_state.get("db_source"))
+        st.write("Caminho local em uso:", caminho_banco)
+    except Exception as e:
+        st.warning(f"Falha lendo st.secrets: {e}")
+
+# Garantias/infra mínimas
 try:
     garantir_trigger_totais_saldos_caixas(caminho_banco)
 except Exception as e:
     st.warning(f"Trigger de totais não criada: {e}")
 
-# ======================================================================================
+# -----------------------------------------------------------------------------
 # Estado de sessão
-# ======================================================================================
+# -----------------------------------------------------------------------------
 if "usuario_logado" not in st.session_state:
     st.session_state.usuario_logado = None
 if "pagina_atual" not in st.session_state:
     st.session_state.pagina_atual = "📊 Dashboard"
 
-# ======================================================================================
+# -----------------------------------------------------------------------------
 # Roteamento (import dinâmico + injeção de caminho_banco)
-# ======================================================================================
+# -----------------------------------------------------------------------------
 def _call_page(module_path: str):
     try:
         mod = importlib.import_module(module_path)
@@ -190,8 +192,7 @@ def _call_page(module_path: str):
 
     def _invoke(fn):
         sig = inspect.signature(fn)
-        args: list = []
-        kwargs: dict = {}
+        args, kwargs = [], {}
 
         ss = st.session_state
         usuario_logado = ss.get("usuario_logado")
@@ -205,30 +206,23 @@ def _call_page(module_path: str):
         }
 
         for p in sig.parameters.values():
-            name = p.name
-            kind = p.kind
-            has_default = (p.default is not inspect._empty)
-
+            name, kind, has_default = p.name, p.kind, (p.default is not inspect._empty)
             if name == "caminho_banco":
-                args.append(caminho_banco)
-                continue
-
+                args.append(caminho_banco); continue
             if name in known:
-                val = known[name]
+                (args if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) else kwargs).__setitem__(slice(None), None)
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(val)
+                    args.append(known[name])
                 else:
-                    kwargs[name] = val
+                    kwargs[name] = known[name]
                 continue
-
             if name in ss:
-                val = ss[name]
+                (args if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) else kwargs).__setitem__(slice(None), None)
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(val)
+                    args.append(ss[name])
                 else:
-                    kwargs[name] = val
+                    kwargs[name] = ss[name]
                 continue
-
             if not has_default:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(None)
@@ -239,24 +233,17 @@ def _call_page(module_path: str):
 
     seg = module_path.rsplit(".", 1)[-1]
     parent = module_path.rsplit(".", 2)[-2] if "." in module_path else ""
-    tail = seg.split("_", 1)[1] if "_" in seg else seg
+    tail = seg.split("_", 1)[-1] if "_" in seg else seg
 
-    base = ["render", "page", "main", "pagina", "show", "pagina_fechamento_caixa"]
-    derived = [
-        f"render_{tail}",
-        "render_page",
-        f"render_{seg}",
-        f"render_{parent}",
-        f"page_{tail}",
-        f"show_{tail}",
-        seg,
+    candidates = [
+        "render", "page", "main", "pagina", "show", "pagina_fechamento_caixa",
+        f"render_{tail}", "render_page", f"render_{seg}", f"render_{parent}",
+        f"page_{tail}", f"show_{tail}", seg,
     ]
-
     tried = set()
-    for fn_name in base + derived:
+    for fn_name in candidates:
         if fn_name in tried or not hasattr(mod, fn_name):
-            tried.add(fn_name)
-            continue
+            tried.add(fn_name); continue
         tried.add(fn_name)
         fn = getattr(mod, fn_name)
         if callable(fn):
@@ -277,31 +264,28 @@ def _call_page(module_path: str):
 
     st.warning(f"O módulo '{module_path}' não possui função compatível (render/page/main/pagina*/show).")
 
-# ======================================================================================
-# LOGIN
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Login
+# -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
     st.title("🔐 Login")
     with st.form("form_login"):
         email = st.text_input("Email")
         senha = st.text_input("Senha", type="password")
-        submitted = st.form_submit_button("Entrar")
-        if submitted:
+        if st.form_submit_button("Entrar"):
             usuario = validar_login(email, senha, caminho_banco)
             if usuario:
                 st.session_state.usuario_logado = usuario
-                st.session_state.pagina_atual = (
-                    "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
-                )
+                st.session_state.pagina_atual = "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
                 limpar_todas_as_paginas()
                 st.rerun()
             else:
                 st.error("❌ Email ou senha inválidos, ou usuário inativo.")
     st.stop()
 
-# ======================================================================================
-# Sidebar: usuário + navegação (sem o botão "Nova Venda")
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Sidebar
+# -----------------------------------------------------------------------------
 usuario = st.session_state.get("usuario_logado")
 if usuario is None:
     st.warning("Faça login para continuar.")
@@ -323,39 +307,22 @@ for title in ["📊 Dashboard", "📉 DRE", "🧾 Lançamentos", "💼 Fechament
         st.rerun()
 
 with st.sidebar.expander("📋 DataFrames", expanded=False):
-    for title in [
-        "📥 Entradas",
-        "📤 Saídas",
-        "📦 Mercadorias",
-        "💳 Fatura Cartão de Crédito",
-        "📄 Contas a Pagar",
-        "🏦 Empréstimos/Financiamentos",
-    ]:
+    for title in ["📥 Entradas", "📤 Saídas", "📦 Mercadorias", "💳 Fatura Cartão de Crédito", "📄 Contas a Pagar", "🏦 Empréstimos/Financiamentos"]:
         if st.button(title, use_container_width=True):
             st.session_state.pagina_atual = title
             st.rerun()
 
 if perfil == "Administrador":
     with st.sidebar.expander("🛠️ Cadastros", expanded=False):
-        for title in [
-            "👥 Usuários",
-            "🎯 Cadastro de Metas",
-            "⚙️ Taxas Maquinetas",
-            "📇 Cartão de Crédito",
-            "💵 Caixa",
-            "🛠️ Correção de Caixa",
-            "🏦 Saldos Bancários",
-            "🏛️ Cadastro de Empréstimos",
-            "🏦 Cadastro de Bancos",
-            "📂 Cadastro de Saídas",
-        ]:
+        for title in ["👥 Usuários", "🎯 Cadastro de Metas", "⚙️ Taxas Maquinetas", "📇 Cartão de Crédito", "💵 Caixa", "🛠️ Correção de Caixa",
+                      "🏦 Saldos Bancários", "🏛️ Cadastro de Empréstimos", "🏦 Cadastro de Bancos", "📂 Cadastro de Saídas"]:
             if st.button(title, use_container_width=True):
                 st.session_state.pagina_atual = title
                 st.rerun()
 
-# ======================================================================================
-# Título + Roteamento
-# ======================================================================================
+# -----------------------------------------------------------------------------
+# Roteamento
+# -----------------------------------------------------------------------------
 st.title(st.session_state.pagina_atual)
 
 ROTAS = {
