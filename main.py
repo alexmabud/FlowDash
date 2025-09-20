@@ -21,6 +21,7 @@ import os
 import pathlib
 import sqlite3
 import streamlit as st
+import requests  # <- adicionado para probe no expander
 
 from auth.auth import (
     validar_login,
@@ -121,6 +122,7 @@ def ensure_db_available() -> str:
                 st.warning("Banco baixado via token parece inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {_debug_file_info(candidate)}")
         except Exception as e:
+            # Mostra erro completo (status/JSON) vindo do loader
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
     # 2) Local
@@ -163,6 +165,16 @@ with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
         st.write("force_download:", force)
         st.write("Fonte atual do banco:", st.session_state.get("db_source"))
         st.write("Caminho local em uso:", caminho_banco)
+
+        # ---- PROBE: testa se o path existe no Dropbox via get_metadata ----
+        if st.button("Testar path no Dropbox (get_metadata)"):
+            try:
+                url = "https://api.dropboxapi.com/2/files/get_metadata"
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                resp = requests.post(url, headers=headers, json={"path": filep}, timeout=30)
+                st.code(f"HTTP {resp.status_code}\n{resp.text}")
+            except Exception as e:
+                st.error(f"Probe get_metadata falhou: {e}")
     except Exception as e:
         st.warning(f"Falha lendo st.secrets: {e}")
 
@@ -211,7 +223,6 @@ def _call_page(module_path: str):
             kind = p.kind
             has_default = (p.default is not inspect._empty)
 
-            # Resolve valor a injetar
             if name == "caminho_banco":
                 value = caminho_banco
             elif name in known:
@@ -221,8 +232,6 @@ def _call_page(module_path: str):
             else:
                 value = None
 
-            # Se o parâmetro NÃO tem default, passamos algo (None se necessário).
-            # Se tem default, só passamos quando temos um valor resolvido (value is not None).
             should_pass = (not has_default) or (value is not None)
 
             if should_pass:
