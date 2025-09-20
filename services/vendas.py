@@ -2,14 +2,16 @@
 Módulo VendasService
 ====================
 
-Serviço responsável por registrar **vendas** no sistema, aplicar a
-**liquidação** (caixa/banco) na data correta e gravar **log idempotente**
+Serviço responsável por registrar **vendas** no sistema, calcular a
+**data de liquidação** correta (caixa/banco) e gravar **log idempotente**
 em `movimentacoes_bancarias`.
 
-Regras de datas (alinhadas):
-- Dinheiro/PIX: liquidação imediata => entrada.Data = data_venda
-- Crédito/Débito/Link: liquidação no próximo dia útil => entrada.Data = proximo_dia_util(data_venda + 1)
-- created_at: timestamp da venda em **America/Sao_Paulo** (Brasília)
+Regras de datas (alinhadas com o combinado):
+- `entrada.Data`        = **data_referencia** escolhida no lançamento (data da venda).
+- `entrada.created_at`  = **timestamp do salvamento** em America/Sao_Paulo (Brasília).
+- `entrada.Data_Liq`    = **data em que o dinheiro cai**:
+    • Dinheiro / PIX  → **mesmo dia** da data_referencia.
+    • Débito / Crédito / Link de Pagamento → **D+1 útil** (usa Workalendar BR; fallback seg–sex).
 """
 
 from __future__ import annotations
@@ -184,7 +186,8 @@ class VendasService:
         """
         Insere a venda na tabela `entrada`.
 
-        - **Data** = **data de liquidação** (contábil).
+        - **Data**       = **data da venda (data_referencia)** escolhida no formulário.
+        - **Data_Liq**   = **data de liquidação** (quando o dinheiro cai).
         - **created_at** = data/hora da venda em America/Sao_Paulo.
         """
         cols_df = pd.read_sql("PRAGMA table_info(entrada);", conn)
@@ -234,8 +237,8 @@ class VendasService:
 
         # Montar INSERT
         to_insert = {
-            "Data": data_liq,                     # contábil (liquidação)
-            "Data_Liq": data_liq,
+            "Data": data_venda,                  # <<< muda para data da venda (referência)
+            "Data_Liq": data_liq,               # dia que cai
             "Valor": float(valor_bruto),
             "valor_liquido": liquido,
             "Forma_de_Pagamento": forma_upper,
@@ -244,10 +247,10 @@ class VendasService:
             "maquineta": maq_eff,
             "Banco_Destino": banco_destino or None,
             "Usuario": usuario,
-            "created_at": created_at_value,       # horário BR
+            "created_at": created_at_value,     # horário BR
         }
 
-        # Se existir a coluna opcional Data_Venda, preenche também
+        # Se existir a coluna opcional Data_Venda, preenche também (compat)
         if "Data_Venda" in colnames:
             to_insert["Data_Venda"] = data_venda
 
@@ -378,7 +381,7 @@ class VendasService:
 
             cur = conn.cursor()
 
-            # 1) INSERT em `entrada` (Data = data_liq; created_at = horário BR)
+            # 1) INSERT em `entrada`
             venda_id = self._insert_entrada(
                 conn,
                 data_venda=str(data_venda),

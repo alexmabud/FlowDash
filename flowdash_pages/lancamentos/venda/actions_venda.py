@@ -8,6 +8,11 @@ Estratégia:
   um fallback local: Dinheiro/PIX = D; Débito/Crédito/Link = próximo dia útil.
 - `created_at` é responsabilidade do service moderno.
 
+Regras de datas (alinhadas ao service):
+- `entrada.Data`        = data da VENDA (data selecionada no formulário).
+- `entrada.Data_Liq`    = data em que o dinheiro cai (D ou D+1 útil).
+- `entrada.created_at`  = timestamp do salvamento (America/Sao_Paulo).
+
 Mantemos aqui:
 - Validações de formulário
 - Descoberta de taxa e banco_destino (tabela taxas_maquinas)
@@ -137,7 +142,7 @@ def _next_working_day_br(df: date) -> date:
 
 
 def _calc_data_liq_fallback(data_venda_str: str, forma_up: str) -> str:
-    """Regra do cliente: Dinheiro/PIX = D; Débito/Crédito/Link = D+1 útil (BR-DF)."""
+    """Regra: Dinheiro/PIX = D; Débito/Crédito/Link = D+1 útil (BR-DF)."""
     dv = pd.to_datetime(data_venda_str).date()
     if forma_up in ("DINHEIRO", "PIX"):
         liq = dv
@@ -314,24 +319,27 @@ def _extrair_nome_simples(x: Any) -> str | None:
 
 def _descobrir_data_liq_gravada(db_like: Any, venda_id: int) -> Optional[str]:
     """
-    Obtém a `Data` efetivamente gravada em `entrada` para compor a mensagem.
-    Tenta por rowid; se não achar, tenta por coluna `id`.
+    Obtém a **Data_Liq** efetivamente gravada em `entrada` para compor a mensagem.
+    Tenta por rowid; se não achar, tenta por coluna `id`. Fallback para `Data` se `Data_Liq` não existir.
     """
     if venda_id is None or venda_id < 0:
         return None
     try:
         with get_conn(db_like) as conn:
+            # Verifica colunas existentes
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(entrada)")}
+            alvo = "Data_Liq" if "Data_Liq" in cols else "Data"
+
             # 1) tentar pelo rowid
-            row = conn.execute("SELECT Data FROM entrada WHERE rowid = ?", (venda_id,)).fetchone()
+            row = conn.execute(f'SELECT {alvo} FROM entrada WHERE rowid = ?', (venda_id,)).fetchone()
             if row and row[0]:
                 return str(row[0])
+
             # 2) tentar por coluna id (se existir)
-            try:
-                row = conn.execute("SELECT Data FROM entrada WHERE id = ?", (venda_id,)).fetchone()
+            if "id" in cols:
+                row = conn.execute(f'SELECT {alvo} FROM entrada WHERE id = ?', (venda_id,)).fetchone()
                 if row and row[0]:
                     return str(row[0])
-            except sqlite3.OperationalError:
-                pass
     except Exception:
         pass
     return None
@@ -455,7 +463,7 @@ def registrar_venda(*, db_like: Any = None, data_lanc=None, payload: dict | None
     if venda_id == -1:
         msg = "⚠️ Venda já registrada (idempotência)."
     else:
-        # Busca a `Data` realmente gravada (liquidação) para compor a mensagem
+        # Busca a **Data_Liq** realmente gravada para compor a mensagem (fallback para Data)
         data_liq_gravada = _descobrir_data_liq_gravada(db_like, int(venda_id))
         valor_liq = _r2(float(valor) * (1 - float(taxa or 0.0) / 100.0))
         if data_liq_gravada:
