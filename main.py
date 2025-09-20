@@ -165,16 +165,17 @@ if _DEBUG:
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
+#   -> agora retorna (caminho_banco, origem_label)
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
-def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool) -> str:
+def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
     """
     1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db.
     2) Se download falhar ou não houver token/caminho: usa DB local se válido.
     3) Caso contrário: erro explícito.
 
-    Recebe (access_token, dropbox_path, force_download) como parâmetros
-    para invalidar corretamente o cache ao mudar Secrets/ENVs.
+    Retorna:
+        (caminho_do_banco: str, origem: str)  # origem ∈ {"Dropbox", "Local"}
     """
     db_local = _db_local_path()
 
@@ -195,13 +196,13 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 and _is_sqlite(candidate)
                 and _has_table(candidate, "usuarios")
             ):
-                # === Marca origem / legenda / path (para badge) ===
+                # marca session_state (compatibilidade) e retorna origem
                 st.session_state["db_mode"] = "online"
                 st.session_state["db_origem"] = "Dropbox"
                 st.session_state["db_in_use_label"] = "Dropbox"
                 st.session_state["db_path"] = str(candidate)
                 os.environ["FLOWDASH_DB"] = str(candidate)
-                return str(candidate)
+                return str(candidate), "Dropbox"
             else:
                 st.warning("Banco baixado via token parece inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {_debug_file_info(candidate)}")
@@ -215,13 +216,12 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         and _is_sqlite(db_local)
         and _has_table(db_local, "usuarios")
     ):
-        # === Marca origem / legenda / path (para badge) ===
         st.session_state["db_mode"] = "local"
         st.session_state["db_origem"] = "Local"
         st.session_state["db_in_use_label"] = "Local"
         st.session_state["db_path"] = str(db_local)
         os.environ["FLOWDASH_DB"] = str(db_local)
-        return str(db_local)
+        return str(db_local), "Local"
 
     # 3) Erro
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
@@ -241,15 +241,10 @@ _effective_path = DROPBOX_PATH_CFG
 _effective_force = FORCE_DOWNLOAD_CFG
 
 # Recurso cacheado
-_caminho_banco = ensure_db_available(_effective_token, _effective_path, _effective_force)
+_caminho_banco, _db_origem = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# ---- Legenda curta conforme solicitado ----
-# Preferimos o rótulo explícito; se ausente, caímos no modo.
-_label = st.session_state.get("db_in_use_label")
-if not _label:
-    _mode = st.session_state.get("db_mode", "?")
-    _label = {"online": "Dropbox", "local": "Local"}.get(_mode, "Desconhecido")
-st.caption(f"🗃️ Banco em uso: **{_label}**")
+# ---- Badge (agora determinístico pela origem retornada) ----
+st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
 
 # Garantias/infra mínimas
 try:
