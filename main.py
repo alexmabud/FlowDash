@@ -195,7 +195,8 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 and _is_sqlite(candidate)
                 and _has_table(candidate, "usuarios")
             ):
-                st.session_state["db_source"] = f"dropbox_token({mask_token(access_token)})"
+                # Simplifica: marcamos só o modo "online"
+                st.session_state["db_mode"] = "online"
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
             else:
@@ -211,7 +212,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         and _is_sqlite(db_local)
         and _has_table(db_local, "usuarios")
     ):
-        st.session_state["db_source"] = "local"
+        st.session_state["db_mode"] = "local"
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
 
@@ -235,16 +236,14 @@ _effective_force = FORCE_DOWNLOAD_CFG
 # Recurso cacheado
 _caminho_banco = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# INFO de origem do banco
-if _DEBUG:
-    st.caption(
-        "🗃️ Banco em uso: "
-        f"**{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`  •  "
-        f"token_source={TOKEN_SOURCE_CFG}  •  dropbox_path={_effective_path}  •  "
-        f"offline={'1' if _DROPBOX_DISABLED else '0'}"
-    )
+# ---- Legenda curta conforme solicitado ----
+_mode = st.session_state.get("db_mode", "?")
+if _mode == "online":
+    st.caption("🗃️ Banco em uso: **Online**")
+elif _mode == "local":
+    st.caption("🗃️ Banco em uso: **Local**")
 else:
-    st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`")
+    st.caption("🗃️ Banco em uso: **Desconhecido**")
 
 # Garantias/infra mínimas
 try:
