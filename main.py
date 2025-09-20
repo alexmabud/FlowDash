@@ -192,7 +192,8 @@ def _call_page(module_path: str):
 
     def _invoke(fn):
         sig = inspect.signature(fn)
-        args, kwargs = [], {}
+        args = []
+        kwargs = {}
 
         ss = st.session_state
         usuario_logado = ss.get("usuario_logado")
@@ -206,28 +207,29 @@ def _call_page(module_path: str):
         }
 
         for p in sig.parameters.values():
-            name, kind, has_default = p.name, p.kind, (p.default is not inspect._empty)
+            name = p.name
+            kind = p.kind
+            has_default = (p.default is not inspect._empty)
+
+            # Resolve valor a injetar
             if name == "caminho_banco":
-                args.append(caminho_banco); continue
-            if name in known:
-                (args if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) else kwargs).__setitem__(slice(None), None)
+                value = caminho_banco
+            elif name in known:
+                value = known[name]
+            elif name in ss:
+                value = ss[name]
+            else:
+                value = None
+
+            # Se o parâmetro NÃO tem default, passamos algo (None se necessário).
+            # Se tem default, só passamos quando temos um valor resolvido (value is not None).
+            should_pass = (not has_default) or (value is not None)
+
+            if should_pass:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(known[name])
+                    args.append(value)
                 else:
-                    kwargs[name] = known[name]
-                continue
-            if name in ss:
-                (args if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD) else kwargs).__setitem__(slice(None), None)
-                if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(ss[name])
-                else:
-                    kwargs[name] = ss[name]
-                continue
-            if not has_default:
-                if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(None)
-                else:
-                    kwargs[name] = None
+                    kwargs[name] = value
 
         return fn(*args, **kwargs)
 
