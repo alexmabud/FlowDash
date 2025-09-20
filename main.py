@@ -26,6 +26,8 @@ import pathlib
 import sqlite3
 import json
 import requests
+import shutil
+from datetime import datetime, timezone
 import streamlit as st
 
 from auth.auth import (
@@ -124,45 +126,71 @@ if _DEBUG:
             st.write("token_length:", len(ACCESS_TOKEN_CFG))
             st.write("file_path:", DROPBOX_PATH_CFG)
             st.write("force_download:", "1" if FORCE_DOWNLOAD_CFG else "0")
-
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Validar token (users/get_current_account)"):
-                    if not ACCESS_TOKEN_CFG:
-                        st.error("Sem token carregado (secrets/env).")
-                    else:
-                        try:
-                            url = "https://api.dropboxapi.com/2/users/get_current_account"
-                            r = requests.post(
-                                url,
-                                headers={"Authorization": f"Bearer {ACCESS_TOKEN_CFG}"},
-                                timeout=30,
-                            )
-                            st.code(f"HTTP {r.status_code}\n{r.text}")
-                        except Exception as e:
-                            st.error(f"Erro na validação: {e}")
-            with col2:
-                if st.button("Testar path no Dropbox (files/get_metadata)"):
-                    if not ACCESS_TOKEN_CFG:
-                        st.error("Sem token carregado (secrets/env).")
-                    else:
-                        try:
-                            url = "https://api.dropboxapi.com/2/files/get_metadata"
-                            headers = {
-                                "Authorization": f"Bearer {ACCESS_TOKEN_CFG}",
-                                "Content-Type": "application/json",
-                            }
-                            r = requests.post(
-                                url,
-                                headers=headers,
-                                json={"path": DROPBOX_PATH_CFG},
-                                timeout=30,
-                            )
-                            st.code(f"HTTP {r.status_code}\n{r.text}")
-                        except Exception as e:
-                            st.error(f"Probe get_metadata falhou: {e}")
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox: {e}")
+
+# -----------------------------------------------------------------------------
+# Dropbox helpers (sync)
+# -----------------------------------------------------------------------------
+def _parse_dt(dt_str: str) -> float:
+    try:
+        if dt_str.endswith("Z"):
+            return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+def _dropbox_get_metadata(token: str, remote_path: str) -> dict | None:
+    if not token or not remote_path:
+        return None
+    try:
+        r = requests.post(
+            "https://api.dropboxapi.com/2/files/get_metadata",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"path": remote_path},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        return {
+            "rev": j.get("rev"),
+            "server_modified": j.get("server_modified"),
+            "server_ts": _parse_dt(j.get("server_modified", "")),
+            "size": j.get("size"),
+        }
+    except Exception:
+        return None
+
+def _dropbox_download(token: str, remote_path: str, dest_path: str) -> str:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Dropbox-API-Arg": json.dumps({"path": remote_path}),
+    }
+    url = "https://content.dropboxapi.com/2/files/download"
+    tmp = dest_path + ".tmp"
+    with requests.post(url, headers=headers, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+    # troca atômica
+    shutil.move(tmp, dest_path)
+    return dest_path
+
+def _dropbox_upload(token: str, remote_path: str, local_path: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": json.dumps(
+            {"path": remote_path, "mode": "overwrite", "autorename": False, "mute": False, "strict_conflict": False}
+        ),
+    }
+    with open(local_path, "rb") as f:
+        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
+    r.raise_for_status()
+    return r.json()
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
@@ -197,10 +225,8 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 and _is_sqlite(candidate)
                 and _has_table(candidate, "usuarios")
             ):
-                # marca session_state (compatibilidade) e retorna origem
                 st.session_state["db_mode"] = "online"
                 st.session_state["db_origem"] = "Dropbox"
-                st.session_state["db_in_use_label"] = "Dropbox"
                 st.session_state["db_path"] = str(candidate)
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate), "Dropbox"
@@ -219,7 +245,6 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     ):
         st.session_state["db_mode"] = "local"
         st.session_state["db_origem"] = "Local"
-        st.session_state["db_in_use_label"] = "Local"
         st.session_state["db_path"] = str(db_local)
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local), "Local"
@@ -235,46 +260,6 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
-# --- Upload do DB para o Dropbox (manual e automático) ---
-def _dropbox_upload_db(local_path: str, remote_path: str, token: str) -> None:
-    if not token:
-        raise RuntimeError("Sem token do Dropbox configurado.")
-    if not os.path.exists(local_path):
-        raise FileNotFoundError(f"Arquivo não encontrado: {local_path}")
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": json.dumps(
-            {"path": remote_path, "mode": "overwrite", "autorename": False, "mute": False, "strict_conflict": False}
-        ),
-    }
-    with open(local_path, "rb") as f:
-        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
-    if r.status_code != 200:
-        raise RuntimeError(f"Upload falhou: HTTP {r.status_code} — {r.text}")
-
-def _maybe_auto_upload_db(local_path: str, remote_path: str, token: str, origem: str) -> None:
-    """Se o arquivo local mudou desde o último run e origem=Dropbox, faz upload automático."""
-    if origem != "Dropbox" or not token:
-        return
-    try:
-        mtime = os.path.getmtime(local_path)
-    except Exception:
-        return
-    last = st.session_state.get("_db_last_mtime")
-    # Primeiro run: só memoriza
-    if last is None:
-        st.session_state["_db_last_mtime"] = mtime
-        return
-    # Mudou? sobe para o Dropbox
-    if mtime > last:
-        try:
-            _dropbox_upload_db(local_path, remote_path, token)
-            st.toast("☁️ DB sincronizado com o Dropbox.", icon="✅")
-            st.session_state["_db_last_mtime"] = mtime
-        except Exception as e:
-            st.warning(f"Falha ao sincronizar DB: {e}")
-
 # Flags efetivas: modo offline força token vazio
 _DROPBOX_DISABLED = _flag_dropbox_disable()
 _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
@@ -284,25 +269,57 @@ _effective_force = FORCE_DOWNLOAD_CFG
 # Recurso cacheado
 _caminho_banco, _db_origem = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# ---- Badge + botão de sincronização manual ----
-cols = st.columns([0.7, 0.3])
-with cols[0]:
-    st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
-with cols[1]:
-    if st.button("☁️ Enviar DB p/ Dropbox", help="Faz upload do arquivo local atual para o caminho do Dropbox configurado."):
-        try:
-            _dropbox_upload_db(_caminho_banco, _effective_path, _effective_token)
-            st.success("DB enviado para o Dropbox.")
-            # Atualiza o mtime memorizado após um upload manual
-            try:
-                st.session_state["_db_last_mtime"] = os.path.getmtime(_caminho_banco)
-            except Exception:
-                pass
-        except Exception as e:
-            st.error(f"Falha ao enviar: {e}")
+# ---- Sync automático: PULL antes de usar; PUSH quando arquivo mudar ----
+def _auto_pull_if_remote_newer():
+    """Se houver versão remota mais nova no Dropbox, baixa e faz swap do arquivo local."""
+    if _db_origem != "Dropbox" or not _effective_token:
+        return
+    meta = _dropbox_get_metadata(_effective_token, _effective_path)
+    if not meta:
+        return
+    remote_ts = float(meta.get("server_ts") or 0.0)
+    remote_rev = meta.get("rev")
+    local_ts = 0.0
+    try:
+        local_ts = os.path.getmtime(_caminho_banco)
+    except Exception:
+        pass
+    last_pull = float(st.session_state.get("_db_last_pull_ts") or 0.0)
 
-# ---- Upload automático caso o DB tenha sido alterado no último run ----
-_maybe_auto_upload_db(_caminho_banco, _effective_path, _effective_token, _db_origem)
+    # Evita download redundante; baixa se remoto é mais novo que o local OU mais novo que o último pull conhecido
+    if remote_ts > max(local_ts, last_pull):
+        try:
+            _dropbox_download(_effective_token, _effective_path, _caminho_banco)
+            st.session_state["_db_last_pull_ts"] = remote_ts
+            st.session_state["_db_remote_rev"] = remote_rev
+            st.toast("☁️ Banco atualizado do Dropbox.", icon="🔄")
+        except Exception as e:
+            st.warning(f"Não foi possível baixar a versão remota do DB: {e}")
+
+def _auto_push_if_local_changed():
+    """Se o .db local mudou desde o último push, sobe para o Dropbox (last-writer-wins)."""
+    if _db_origem != "Dropbox" or not _effective_token:
+        return
+    try:
+        mtime = os.path.getmtime(_caminho_banco)
+    except Exception:
+        return
+    last_sent = float(st.session_state.get("_db_last_push_ts") or 0.0)
+    # margem de 0.1s para sistemas de arquivo com granularidade maior
+    if mtime > (last_sent + 0.1):
+        try:
+            j = _dropbox_upload(_effective_token, _effective_path, _caminho_banco)
+            st.session_state["_db_last_push_ts"] = mtime
+            st.session_state["_db_remote_rev"] = j.get("rev", st.session_state.get("_db_remote_rev"))
+            st.toast("☁️ Banco sincronizado com o Dropbox.", icon="✅")
+        except Exception as e:
+            st.warning(f"Falha ao enviar DB ao Dropbox: {e}")
+
+# Executa PULL antes de abrir conexões/garantias
+_auto_pull_if_remote_newer()
+
+# ---- Badge ----
+st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
 
 # Garantias/infra mínimas
 try:
@@ -514,3 +531,6 @@ if pagina in ROTAS:
         _call_page(ROTAS[pagina])
 else:
     st.warning("Página não encontrada.")
+
+# --- PUSH automático ao final do run (detecta modificação de arquivo) ---
+_auto_push_if_local_changed()

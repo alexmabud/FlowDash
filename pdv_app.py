@@ -22,10 +22,13 @@ from __future__ import annotations
 
 import hmac
 import importlib
+import json
 import os
 import sqlite3
 import sys
-from datetime import date, timedelta
+import shutil
+import requests
+from datetime import date, timedelta, datetime, timezone
 from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
@@ -34,7 +37,7 @@ import streamlit as st
 from utils.pin_utils import validar_pin
 
 # ---------------------------------------------------------------------------
-# Bootstrap do BD via Dropbox (TOKEN) — alinhado ao main.py
+# Bootstrap do BD via Dropbox (TOKEN) — alinhado ao main.py + sync automático
 # ---------------------------------------------------------------------------
 import pathlib
 from shared.db_from_dropbox_api import ensure_local_db_api
@@ -118,6 +121,63 @@ if _DEBUG:
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox (PDV): {e}")
 
+# ------------- Dropbox helpers (metadata / download / upload) -------------
+def _parse_dt(dt_str: str) -> float:
+    try:
+        if dt_str.endswith("Z"):
+            return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+def _dropbox_get_metadata(token: str, remote_path: str) -> Optional[dict]:
+    if not token or not remote_path:
+        return None
+    try:
+        r = requests.post(
+            "https://api.dropboxapi.com/2/files/get_metadata",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"path": remote_path},
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return None
+        j = r.json()
+        return {
+            "rev": j.get("rev"),
+            "server_modified": j.get("server_modified"),
+            "server_ts": _parse_dt(j.get("server_modified", "")),
+            "size": j.get("size"),
+        }
+    except Exception:
+        return None
+
+def _dropbox_download(token: str, remote_path: str, dest_path: str) -> str:
+    headers = {"Authorization": f"Bearer {token}", "Dropbox-API-Arg": json.dumps({"path": remote_path})}
+    url = "https://content.dropboxapi.com/2/files/download"
+    tmp = dest_path + ".tmp"
+    with requests.post(url, headers=headers, stream=True, timeout=60) as r:
+        r.raise_for_status()
+        with open(tmp, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 256):
+                if chunk:
+                    f.write(chunk)
+    shutil.move(tmp, dest_path)  # swap atômico
+    return dest_path
+
+def _dropbox_upload(token: str, remote_path: str, local_path: str) -> dict:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": json.dumps(
+            {"path": remote_path, "mode": "overwrite", "autorename": False, "mute": False, "strict_conflict": False}
+        ),
+    }
+    with open(local_path, "rb") as f:
+        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
+    r.raise_for_status()
+    return r.json()
+
 # ------------- ensure db disponível (igual ao main, retorno determinístico) -------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
@@ -180,6 +240,51 @@ _effective_force = FORCE_DOWNLOAD_CFG
 
 DB_PATH, DB_ORIG = ensure_db_available(_effective_token, _effective_path, _effective_force)
 st.session_state.setdefault("caminho_banco", DB_PATH)
+
+# ---- Sync automático: PULL antes de usar; PUSH quando arquivo mudar ----
+def _auto_pull_if_remote_newer():
+    """Se houver versão remota mais nova no Dropbox, baixa e troca o arquivo local (last-writer-wins)."""
+    if DB_ORIG != "Dropbox" or not _effective_token:
+        return
+    meta = _dropbox_get_metadata(_effective_token, _effective_path)
+    if not meta:
+        return
+    remote_ts = float(meta.get("server_ts") or 0.0)
+    local_ts = 0.0
+    try:
+        local_ts = os.path.getmtime(DB_PATH)
+    except Exception:
+        pass
+    last_pull = float(st.session_state.get("_pdv_db_last_pull_ts") or 0.0)
+    if remote_ts > max(local_ts, last_pull):
+        try:
+            _dropbox_download(_effective_token, _effective_path, DB_PATH)
+            st.session_state["_pdv_db_last_pull_ts"] = remote_ts
+            st.toast("☁️ PDV: banco atualizado do Dropbox.", icon="🔄")
+            # limpa caches para refletir o novo arquivo imediatamente
+            st.cache_data.clear()
+        except Exception as e:
+            st.warning(f"PDV: não foi possível baixar DB remoto: {e}")
+
+def _auto_push_if_local_changed():
+    """Se o .db local mudou desde o último push, envia para o Dropbox."""
+    if DB_ORIG != "Dropbox" or not _effective_token:
+        return
+    try:
+        mtime = os.path.getmtime(DB_PATH)
+    except Exception:
+        return
+    last_sent = float(st.session_state.get("_pdv_db_last_push_ts") or 0.0)
+    if mtime > (last_sent + 0.1):
+        try:
+            _dropbox_upload(_effective_token, _effective_path, DB_PATH)
+            st.session_state["_pdv_db_last_push_ts"] = mtime
+            st.toast("☁️ PDV: banco sincronizado com o Dropbox.", icon="✅")
+        except Exception as e:
+            st.warning(f"PDV: falha ao enviar DB ao Dropbox: {e}")
+
+# Executa PULL antes de abrir conexões/consultas
+_auto_pull_if_remote_newer()
 
 # Badge igual ao main
 st.caption(f"🗃️ Banco em uso: **{DB_ORIG}**")
@@ -260,9 +365,9 @@ def _entrada_date_bounds() -> Tuple[date, date]:
             row = conn.execute("SELECT MIN(date(Data)), MAX(date(Data)) FROM entrada").fetchone()
             if not row or not row[0]:
                 return (today, today)
-            from datetime import datetime
-            dmin = datetime.strptime(row[0], "%Y-%m-%d").date()
-            dmax = datetime.strptime(row[1], "%Y-%m-%d").date() if row[1] else today
+            from datetime import datetime as _dt
+            dmin = _dt.strptime(row[0], "%Y-%m-%d").date()
+            dmax = _dt.strptime(row[1], "%Y-%m-%d").date() if row[1] else today
             return (dmin, dmax)
     except Exception:
         return (today, today)
@@ -423,7 +528,7 @@ def _metas_loja_gauges(ref_day: date) -> None:
         vendido_mes = sum_between(inicio_mes, ref_day)
 
     meta_sem = meta_mensal * (perc_semanal / 100.0) if meta_mensal > 0 else 0.0
-    meta_dia = (meta_sem / 7.0) if not perc_dow or perc_dow <= 0 else (meta_sem * (perc_dow / 100.0))
+    meta_dia = (meta_sem / 7.0) if not perc_dow or perc_dow <= 0 else (meta_sem * (perc_dow) / 100.0)
 
     ouro_m, prata_m, bronze_m = meta_mensal, meta_mensal * (perc_prata / 100.0), meta_mensal * (perc_bronze / 100.0)
     ouro_s, prata_s, bronze_s = meta_sem, meta_sem * (perc_prata / 100.0), meta_sem * (perc_bronze / 100.0)
@@ -600,6 +705,8 @@ def main() -> None:
 
     if not st.session_state.get("usuario_logado"):
         if not _login_box():
+            # Antes de sair do ciclo, tenta enviar se houve modificação local (ex.: cadastro de usuário)
+            _auto_push_if_local_changed()
             return
     else:
         header_user = st.session_state.get("pdv_header_user", st.session_state["usuario_logado"])
@@ -650,6 +757,7 @@ def main() -> None:
             st.session_state.pop("pdv_vendedor_venda", None)
             st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
+        _auto_push_if_local_changed()
         return
 
     vendedor = st.session_state.get("pdv_vendedor_venda")
@@ -660,6 +768,7 @@ def main() -> None:
             st.session_state["pdv_flash_ok"] = f"Vendedor **{vendedor['nome']}** identificado para a venda."
             st.rerun()
         else:
+            _auto_push_if_local_changed()
             return
 
     _render_form_venda(vendedor)
@@ -680,6 +789,9 @@ def main() -> None:
                 st.session_state.pop(k, None)
             st.session_state["pdv_flash_ok"] = "Venda cancelada."
             st.rerun()
+
+    # Ao final do ciclo de renderização, tenta enviar alterações locais
+    _auto_push_if_local_changed()
 
 if __name__ == "__main__":
     main()
