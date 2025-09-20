@@ -13,8 +13,8 @@ Política do banco:
   2) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
   3) Se nada der certo, exibir erro claro.
 """
-
 from __future__ import annotations
+
 import importlib
 import inspect
 import os
@@ -31,6 +31,7 @@ from auth.auth import (
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
 from shared.db_from_dropbox_api import ensure_local_db_api
+from shared.dropbox_config import load_dropbox_settings, mask_token  # <<< unificado
 
 # -----------------------------------------------------------------------------
 # Config
@@ -38,7 +39,7 @@ from shared.db_from_dropbox_api import ensure_local_db_api
 st.set_page_config(page_title="FlowDash", layout="wide")
 
 # -----------------------------------------------------------------------------
-# Helpers
+# Helpers (debug/local)
 # -----------------------------------------------------------------------------
 def _debug_file_info(path: pathlib.Path) -> str:
     try:
@@ -59,7 +60,10 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
         with sqlite3.connect(str(path)) as conn:
-            cur = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (table,))
+            cur = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
+                (table,),
+            )
             return cur.fetchone() is not None
     except Exception:
         return False
@@ -70,42 +74,25 @@ def _db_local_path() -> pathlib.Path:
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
-def _mask(s: str, keep: int = 6) -> str:
-    s = str(s or "")
-    return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
-
-def _safe_get_secrets(section: str) -> dict:
-    try:
-        sec = st.secrets.get(section, {})
-        return dict(sec) if isinstance(sec, dict) else {}
-    except Exception:
-        return {}
-
-def _load_cfg():
-    """
-    Carrega as configs de forma *preguiçosa* (lazy), depois que o app já iniciou.
-    Evita pegar st.secrets "vazio" em alguns cenários do Streamlit Cloud.
-    """
-    dbx_cfg = _safe_get_secrets("dropbox")
-    token = (dbx_cfg.get("access_token") or "").strip() or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
-    dropbox_path = (dbx_cfg.get("file_path") or "").strip() or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
-    force_download = (str(dbx_cfg.get("force_download", "0")).strip() == "1") or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0").strip() == "1")
-    token_source = (
-        "secrets" if (dbx_cfg.get("access_token") or "").strip()
-        else ("env" if os.getenv("FLOWDASH_DBX_TOKEN") else "none")
-    )
-    return dbx_cfg, token, dropbox_path, force_download, token_source
-
 # -----------------------------------------------------------------------------
-# Diagnóstico (ANTES do ensure), mas lendo cfg de forma lazy
+# Diagnóstico Dropbox (usa o leitor unificado: load_dropbox_settings)
 # -----------------------------------------------------------------------------
 with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
     try:
-        dbx_cfg, ACCESS_TOKEN, DROPBOX_PATH, FORCE_DOWNLOAD, TOKEN_SOURCE = _load_cfg()
-        st.write("st.secrets keys:", list(st.secrets.keys()))
-        st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
-        st.write("token_source:", TOKEN_SOURCE)  # "secrets", "env", "none"
-        st.write("access_token (mascarado):", _mask(ACCESS_TOKEN))
+        cfg = load_dropbox_settings(prefer_env_first=True)
+        ACCESS_TOKEN = cfg.get("access_token") or ""
+        DROPBOX_PATH = cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
+        FORCE_DOWNLOAD = bool(cfg.get("force_download", False))
+        TOKEN_SOURCE = cfg.get("token_source", "none")
+
+        try:
+            st.write("st.secrets keys:", list(st.secrets.keys()))
+            st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
+        except Exception:
+            st.write("st.secrets indisponível neste contexto (ok para CLI/local).")
+
+        st.write("token_source:", TOKEN_SOURCE)  # "env", "st.secrets:/...", "none"
+        st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN))
         st.write("token_length:", len(ACCESS_TOKEN))
         st.write("file_path:", DROPBOX_PATH)
         st.write("force_download:", "1" if FORCE_DOWNLOAD else "0")
@@ -118,7 +105,11 @@ with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
                 else:
                     try:
                         url = "https://api.dropboxapi.com/2/users/get_current_account"
-                        r = requests.post(url, headers={"Authorization": f"Bearer {ACCESS_TOKEN}"}, timeout=30)
+                        r = requests.post(
+                            url,
+                            headers={"Authorization": f"Bearer {ACCESS_TOKEN}"},
+                            timeout=30,
+                        )
                         st.code(f"HTTP {r.status_code}\n{r.text}")
                     except Exception as e:
                         st.error(f"Erro na validação: {e}")
@@ -129,13 +120,21 @@ with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
                 else:
                     try:
                         url = "https://api.dropboxapi.com/2/files/get_metadata"
-                        headers = {"Authorization": f"Bearer {ACCESS_TOKEN}", "Content-Type": "application/json"}
-                        r = requests.post(url, headers=headers, json={"path": DROPBOX_PATH}, timeout=30)
+                        headers = {
+                            "Authorization": f"Bearer {ACCESS_TOKEN}",
+                            "Content-Type": "application/json",
+                        }
+                        r = requests.post(
+                            url,
+                            headers=headers,
+                            json={"path": DROPBOX_PATH},
+                            timeout=30,
+                        )
                         st.code(f"HTTP {r.status_code}\n{r.text}")
                     except Exception as e:
                         st.error(f"Probe get_metadata falhou: {e}")
     except Exception as e:
-        st.warning(f"Falha lendo st.secrets/env: {e}")
+        st.warning(f"Falha lendo config Dropbox: {e}")
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
@@ -163,8 +162,13 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 validate_table="usuarios",
             )
             candidate = pathlib.Path(candidate_path)
-            if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
-                st.session_state["db_source"] = f"dropbox_token({_mask(access_token, 4)})"
+            if (
+                candidate.exists()
+                and candidate.stat().st_size > 0
+                and _is_sqlite(candidate)
+                and _has_table(candidate, "usuarios")
+            ):
+                st.session_state["db_source"] = f"dropbox_token({mask_token(access_token)})"
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
             else:
@@ -174,7 +178,12 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
     # 2) Local
-    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
+    if (
+        db_local.exists()
+        and db_local.stat().st_size > 0
+        and _is_sqlite(db_local)
+        and _has_table(db_local, "usuarios")
+    ):
         st.session_state["db_source"] = "local"
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
@@ -190,9 +199,13 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
-# Carrega cfg de forma lazy e passa para o recurso cacheado
-_cfg = _load_cfg()
-_caminho_banco = ensure_db_available(_cfg[1], _cfg[2], _cfg[3])
+# Carrega cfg unificada e passa para o recurso cacheado
+_cfg = load_dropbox_settings(prefer_env_first=True)
+_caminho_banco = ensure_db_available(
+    _cfg.get("access_token") or "",
+    _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db",
+    bool(_cfg.get("force_download", False)),
+)
 
 # INFO de origem do banco
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{_caminho_banco}`")
@@ -294,7 +307,9 @@ if not st.session_state.usuario_logado:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
                 st.session_state.usuario_logado = usuario
-                st.session_state.pagina_atual = "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
+                st.session_state.pagina_atual = (
+                    "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
+                )
                 limpar_todas_as_paginas()
                 st.rerun()
             else:
@@ -325,15 +340,21 @@ for title in ["📊 Dashboard", "📉 DRE", "🧾 Lançamentos", "💼 Fechament
         st.rerun()
 
 with st.sidebar.expander("📋 DataFrames", expanded=False):
-    for title in ["📥 Entradas", "📤 Saídas", "📦 Mercadorias", "💳 Fatura Cartão de Crédito", "📄 Contas a Pagar", "🏦 Empréstimos/Financiamentos"]:
+    for title in [
+        "📥 Entradas", "📤 Saídas", "📦 Mercadorias",
+        "💳 Fatura Cartão de Crédito", "📄 Contas a Pagar", "🏦 Empréstimos/Financiamentos"
+    ]:
         if st.button(title, use_container_width=True):
             st.session_state.pagina_atual = title
             st.rerun()
 
 if perfil == "Administrador":
     with st.sidebar.expander("🛠️ Cadastros", expanded=False):
-        for title in ["👥 Usuários", "🎯 Cadastro de Metas", "⚙️ Taxas Maquinetas", "📇 Cartão de Crédito", "💵 Caixa", "🛠️ Correção de Caixa",
-                      "🏦 Saldos Bancários", "🏛️ Cadastro de Empréstimos", "🏦 Cadastro de Bancos", "📂 Cadastro de Saídas"]:
+        for title in [
+            "👥 Usuários", "🎯 Cadastro de Metas", "⚙️ Taxas Maquinetas", "📇 Cartão de Crédito", "💵 Caixa",
+            "🛠️ Correção de Caixa", "🏦 Saldos Bancários", "🏛️ Cadastro de Empréstimos",
+            "🏦 Cadastro de Bancos", "📂 Cadastro de Saídas"
+        ]:
             if st.button(title, use_container_width=True):
                 st.session_state.pagina_atual = title
                 st.rerun()
