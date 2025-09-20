@@ -195,8 +195,11 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 and _is_sqlite(candidate)
                 and _has_table(candidate, "usuarios")
             ):
-                # Simplifica: marcamos só o modo "online"
+                # === Marca origem / legenda / path (para badge) ===
                 st.session_state["db_mode"] = "online"
+                st.session_state["db_origem"] = "Dropbox"
+                st.session_state["db_in_use_label"] = "Dropbox"
+                st.session_state["db_path"] = str(candidate)
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
             else:
@@ -212,7 +215,11 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         and _is_sqlite(db_local)
         and _has_table(db_local, "usuarios")
     ):
+        # === Marca origem / legenda / path (para badge) ===
         st.session_state["db_mode"] = "local"
+        st.session_state["db_origem"] = "Local"
+        st.session_state["db_in_use_label"] = "Local"
+        st.session_state["db_path"] = str(db_local)
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local)
 
@@ -237,13 +244,12 @@ _effective_force = FORCE_DOWNLOAD_CFG
 _caminho_banco = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
 # ---- Legenda curta conforme solicitado ----
-_mode = st.session_state.get("db_mode", "?")
-if _mode == "online":
-    st.caption("🗃️ Banco em uso: **Online**")
-elif _mode == "local":
-    st.caption("🗃️ Banco em uso: **Local**")
-else:
-    st.caption("🗃️ Banco em uso: **Desconhecido**")
+# Preferimos o rótulo explícito; se ausente, caímos no modo.
+_label = st.session_state.get("db_in_use_label")
+if not _label:
+    _mode = st.session_state.get("db_mode", "?")
+    _label = {"online": "Dropbox", "local": "Local"}.get(_mode, "Desconhecido")
+st.caption(f"🗃️ Banco em uso: **{_label}**")
 
 # Garantias/infra mínimas
 try:
