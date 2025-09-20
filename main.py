@@ -95,6 +95,35 @@ _FORCE_DOWNLOAD = (
 )
 
 # -----------------------------------------------------------------------------
+# Diagnóstico ANTES do ensure (fica visível mesmo se der st.stop)
+# -----------------------------------------------------------------------------
+with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
+    try:
+        token = _ACCESS_TOKEN
+        filep = _DROPBOX_PATH
+        force = "1" if _FORCE_DOWNLOAD else "0"
+
+        def _mask(s: str, keep: int = 6) -> str:
+            s = str(s or "")
+            return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
+
+        st.write("Tem seção [dropbox] nos Secrets?", bool(_dbx_cfg))
+        st.write("access_token (mascarado):", _mask(token))
+        st.write("file_path:", filep)
+        st.write("force_download:", force)
+        # Probe opcional: testa se o path existe no Dropbox via get_metadata
+        if st.button("Testar path no Dropbox (get_metadata)"):
+            try:
+                url = "https://api.dropboxapi.com/2/files/get_metadata"
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+                resp = requests.post(url, headers=headers, json={"path": filep}, timeout=30)
+                st.code(f"HTTP {resp.status_code}\n{resp.text}")
+            except Exception as e:
+                st.error(f"Probe get_metadata falhou: {e}")
+    except Exception as e:
+        st.warning(f"Falha lendo st.secrets: {e}")
+
+# -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
@@ -150,36 +179,6 @@ caminho_banco = ensure_db_available(_ACCESS_TOKEN, _DROPBOX_PATH, _FORCE_DOWNLOA
 
 # INFO de origem do banco
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
-
-# Painel de diagnóstico (temporário) — ajuda a debugar no Cloud
-with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
-    try:
-        token = _ACCESS_TOKEN
-        filep = _DROPBOX_PATH
-        force = "1" if _FORCE_DOWNLOAD else "0"
-
-        def _mask(s: str, keep: int = 6) -> str:
-            s = str(s or "")
-            return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
-
-        st.write("Tem seção [dropbox] nos Secrets?", bool(_dbx_cfg))
-        st.write("access_token (mascarado):", _mask(token))
-        st.write("file_path:", filep)
-        st.write("force_download:", force)
-        st.write("Fonte atual do banco:", st.session_state.get("db_source"))
-        st.write("Caminho local em uso:", caminho_banco)
-
-        # Probe opcional: testa se o path existe no Dropbox via get_metadata
-        if st.button("Testar path no Dropbox (get_metadata)"):
-            try:
-                url = "https://api.dropboxapi.com/2/files/get_metadata"
-                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-                resp = requests.post(url, headers=headers, json={"path": filep}, timeout=30)
-                st.code(f"HTTP {resp.status_code}\n{resp.text}")
-            except Exception as e:
-                st.error(f"Probe get_metadata falhou: {e}")
-    except Exception as e:
-        st.warning(f"Falha lendo st.secrets: {e}")
 
 # Garantias/infra mínimas
 try:
