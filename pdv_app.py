@@ -12,8 +12,8 @@ Política do banco:
   3) Se nada der certo, exibir erro claro.
 
 Flags úteis (produção x debug):
-  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"     -> mostra diagnóstico
-  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"  -> ignora Dropbox (força DB local)
+  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"
+  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"
 
 Uso local:
     streamlit run pdv_app.py
@@ -37,14 +37,14 @@ from utils.pin_utils import validar_pin
 # Bootstrap do BD via Dropbox (TOKEN) — alinhado ao main.py
 # ---------------------------------------------------------------------------
 import pathlib
-from shared.db_from_dropbox_api import ensure_local_db_api  # usa token + file_path
+from shared.db_from_dropbox_api import ensure_local_db_api
 from shared.dropbox_config import load_dropbox_settings, mask_token
 
 _CURR_DIR = pathlib.Path(__file__).resolve().parent
 if str(_CURR_DIR) not in sys.path:
     sys.path.insert(0, str(_CURR_DIR))
 
-st.set_page_config(page_title="FlowDash PDV", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="FlowDash PDV", layout="wide")
 
 # ------------- helpers de arquivo/sqlite -------------
 def _db_local_path() -> pathlib.Path:
@@ -84,7 +84,7 @@ def _flag_debug() -> bool:
             return True
     except Exception:
         pass
-    return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 def _flag_dropbox_disable() -> bool:
     try:
@@ -93,7 +93,7 @@ def _flag_dropbox_disable() -> bool:
             return True
     except Exception:
         pass
-    return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "on", "y"}
 
 _DEBUG = _flag_debug()
 _cfg = load_dropbox_settings(prefer_env_first=True)
@@ -118,13 +118,16 @@ if _DEBUG:
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox (PDV): {e}")
 
-# ------------- ensure db disponível (igual ao main) -------------
+# ------------- ensure db disponível (igual ao main, retorno determinístico) -------------
 @st.cache_resource(show_spinner=True)
-def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool) -> str:
+def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
     """
     1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db.
     2) Se download falhar ou não houver token/caminho: usa DB local se válido.
     3) Caso contrário: erro explícito.
+
+    Retorna:
+        (caminho_do_banco: str, origem: str)  # {"Dropbox", "Local"}
     """
     db_local = _db_local_path()
 
@@ -141,8 +144,10 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
             candidate = pathlib.Path(candidate_path)
             if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
                 st.session_state["db_mode"] = "online"
+                st.session_state["db_origem"] = "Dropbox"
+                st.session_state["db_path"] = str(candidate)
                 os.environ["FLOWDASH_DB"] = str(candidate)
-                return str(candidate)
+                return str(candidate), "Dropbox"
             else:
                 st.warning("PDV: banco baixado via token parece inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {_debug_file_info(candidate)}")
@@ -152,15 +157,16 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     # 2) Local
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
         st.session_state["db_mode"] = "local"
+        st.session_state["db_origem"] = "Local"
+        st.session_state["db_path"] = str(db_local)
         os.environ["FLOWDASH_DB"] = str(db_local)
-        return str(db_local)
+        return str(db_local), "Local"
 
     # 3) Erro
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido para o PDV.\n\n"
-        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, "
-        "e `file_path` correto; **ou**\n"
+        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, e `file_path` correto; ou\n"
         "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` com a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
     )
@@ -172,47 +178,19 @@ _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
 _effective_path = DROPBOX_PATH_CFG
 _effective_force = FORCE_DOWNLOAD_CFG
 
-DB_PATH = ensure_db_available(_effective_token, _effective_path, _effective_force)
+DB_PATH, DB_ORIG = ensure_db_available(_effective_token, _effective_path, _effective_force)
 st.session_state.setdefault("caminho_banco", DB_PATH)
 
-# legenda curta (como no main)
-_mode = st.session_state.get("db_mode", "?")
-if _mode == "online":
-    st.caption("🗃️ Banco em uso: **Online**")
-elif _mode == "local":
-    st.caption("🗃️ Banco em uso: **Local**")
-else:
-    st.caption("🗃️ Banco em uso: **Desconhecido**")
+# Badge igual ao main
+st.caption(f"🗃️ Banco em uso: **{DB_ORIG}**")
 
 # ---------------------------------------------------------------------------
-# Login (fallback se auth.auth não estiver disponível)
-# ---------------------------------------------------------------------------
-try:
-    from auth import validar_login as auth_validar_login  # type: ignore
-except Exception:
-    try:
-        from auth.auth import validar_login as auth_validar_login  # type: ignore
-    except Exception:
-        def auth_validar_login(email: str, senha: str, caminho_banco: Optional[str] = None) -> Optional[dict]:
-            """Fallback de login direto no SQLite (apenas se módulo auth indisponível)."""
-            from utils.utils import gerar_hash_senha
-            senha_hash = gerar_hash_senha(senha)
-            caminho_banco = caminho_banco or DB_PATH
-            with sqlite3.connect(caminho_banco) as conn:
-                row = conn.execute(
-                    "SELECT id, nome, email, perfil FROM usuarios WHERE email=? AND senha=? AND ativo=1",
-                    (email, senha_hash),
-                ).fetchone()
-            return {"id": row[0], "nome": row[1], "email": row[2], "perfil": row[3]} if row else None
-
-# ---------------------------------------------------------------------------
-# Estilo base (PDV sem sidebar)
+# Estilo base (mantém header visível; oculta apenas sidebar)
 # ---------------------------------------------------------------------------
 st.markdown(
     """
     <style>
     [data-testid="stSidebar"] { display: none !important; }
-    header, footer {visibility: hidden;}
     .block-container {padding-top: 2rem; padding-bottom: 2rem; max-width: 1200px;}
     button[data-testid="baseButton-secondary"]{
         background: transparent !important; border: none !important; color: #64B5F6 !important;
@@ -239,7 +217,6 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    """Retorna True se a tabela existir (case-insensitive)."""
     return (
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1;", (name,)
@@ -249,7 +226,6 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
-    """Lista usuários ativos que não têm perfil PDV (id, nome, perfil)."""
     with _conn() as conn:
         rows = conn.execute(
             "SELECT id, nome, perfil FROM usuarios "
@@ -259,27 +235,23 @@ def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
     return [(int(r["id"]), str(r["nome"]), str(r["perfil"] or "")) for r in rows]
 
 def _buscar_pin_usuario(usuario_id: int) -> Optional[str]:
-    """Retorna PIN do usuário ativo ou None."""
     with _conn() as conn:
         row = conn.execute("SELECT pin FROM usuarios WHERE id = ? AND ativo = 1", (usuario_id,)).fetchone()
     return None if not row else row["pin"]
 
 def _inc_tentativa(usuario_id: int) -> int:
-    """Incrementa contador de tentativas de PIN por usuário na sessão."""
     key = "pdv_pin_tentativas"
     st.session_state.setdefault(key, {})
     st.session_state[key][usuario_id] = st.session_state[key].get(usuario_id, 0) + 1
     return st.session_state[key][usuario_id]
 
 def _reset_tentativas(usuario_id: int) -> None:
-    """Zera tentativas de PIN para o usuário na sessão."""
     key = "pdv_pin_tentativas"
     if key in st.session_state and usuario_id in st.session_state[key]:
         st.session_state[key][usuario_id] = 0
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _entrada_date_bounds() -> Tuple[date, date]:
-    """Faixa de datas (min, max) presentes em `entrada`; se vazia, (hoje, hoje)."""
     today = date.today()
     try:
         with _conn() as conn:
@@ -299,7 +271,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
 # Metas / visualizações
 # ---------------------------------------------------------------------------
 def _fmt_moeda(v: float) -> str:
-    """Formata número como moeda BR (R$)."""
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def _gauge_percentual_zonas(
@@ -311,7 +282,6 @@ def _gauge_percentual_zonas(
     bar_color_rgba: str = "rgba(76,175,80,0.85)",
     valor_label: Optional[str] = None,
 ) -> go.Figure:
-    """Cria gauge com zonas Bronze/Prata/Ouro (+120%)."""
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata = max(bronze, min(100.0, float(prata_pct)))
     max_axis = max(100.0, float(axis_max))
@@ -348,7 +318,6 @@ def _gauge_percentual_zonas(
     return fig
 
 def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, acumulado: float) -> str:
-    """Retorna HTML do card de metas (ouro/prata/bronze) para um período."""
     def _linha(nivel: str, meta: float) -> str:
         falta = max(float(meta) - float(acumulado), 0.0)
         falta_txt = f"<span style='color:#00C853'>✅ {_fmt_moeda(0)}</span>" if falta <= 0.00001 else _fmt_moeda(falta)
@@ -495,19 +464,15 @@ def _metas_loja_gauges(ref_day: date) -> None:
 # Venda (reuso do seu módulo)
 # ---------------------------------------------------------------------------
 def _render_form_venda(vendedor: Dict[str, object]) -> None:
-    """Renderiza o formulário de venda no contexto do PDV (vendedor mascarado)."""
     st.markdown("## 🧾 Nova Venda")
-
-    # Garantir ENV para módulos que usam FLOWDASH_DB internamente
     os.environ["FLOWDASH_DB"] = DB_PATH
     if not os.path.exists(DB_PATH):
         st.error(f"❌ DB não existe no caminho esperado:\n`{DB_PATH}`")
         st.stop()
 
-    # Máscara de usuário: durante a venda, o "usuario_logado" vira o vendedor
     if "pdv_original_user" not in st.session_state and "usuario_logado" in st.session_state:
         st.session_state["pdv_original_user"] = st.session_state["usuario_logado"]
-        st.session_state["pdv_header_user"] = st.session_state["pdv_original_user"]  # cabeçalho mostra o real
+        st.session_state["pdv_header_user"] = st.session_state["pdv_original_user"]
 
     st.session_state["usuario_logado"] = {
         "id": vendedor["id"],
@@ -515,15 +480,8 @@ def _render_form_venda(vendedor: Dict[str, object]) -> None:
         "email": f"vendedor_{vendedor['id']}@pdv.local",
         "perfil": vendedor.get("perfil") or "Vendedor",
     }
+    st.session_state["pdv_context"] = {"vendedor_id": vendedor["id"], "vendedor_nome": vendedor["nome"], "origem": "PDV"}
 
-    # Contexto PDV
-    st.session_state["pdv_context"] = {
-        "vendedor_id": vendedor["id"],
-        "vendedor_nome": vendedor["nome"],
-        "origem": "PDV",
-    }
-
-    # Chamada da página de venda
     try:
         mod = importlib.import_module("flowdash_pages.lancamentos.venda.page_venda")
         render_venda = getattr(mod, "render_venda", None)
@@ -541,8 +499,24 @@ def _render_form_venda(vendedor: Dict[str, object]) -> None:
 # ---------------------------------------------------------------------------
 # Login / seleção de vendedor
 # ---------------------------------------------------------------------------
+try:
+    from auth import validar_login as auth_validar_login  # type: ignore
+except Exception:
+    try:
+        from auth.auth import validar_login as auth_validar_login  # type: ignore
+    except Exception:
+        def auth_validar_login(email: str, senha: str, caminho_banco: Optional[str] = None) -> Optional[dict]:
+            from utils.utils import gerar_hash_senha
+            senha_hash = gerar_hash_senha(senha)
+            caminho_banco = caminho_banco or DB_PATH
+            with sqlite3.connect(caminho_banco) as conn:
+                row = conn.execute(
+                    "SELECT id, nome, email, perfil FROM usuarios WHERE email=? AND senha=? AND ativo=1",
+                    (email, senha_hash),
+                ).fetchone()
+            return {"id": row[0], "nome": row[1], "email": row[2], "perfil": row[3]} if row else None
+
 def _login_box() -> bool:
-    """Formulário de login do PDV; retorna True se autenticado."""
     st.markdown("### 🔐 Login do PDV")
     with st.form("form_login_pdv", clear_on_submit=False):
         email = st.text_input("Email", max_chars=100)
@@ -559,7 +533,6 @@ def _login_box() -> bool:
     return bool(st.session_state.get("usuario_logado"))
 
 def _selecionar_vendedor_e_validar_pin() -> Optional[Dict]:
-    """Fluxo de seleção do vendedor + validação de PIN; retorna dict do vendedor ou None."""
     st.markdown("#### 👤 Vendedor da Venda")
     usuarios = _listar_usuarios_ativos_sem_pdv()
     if not usuarios:
@@ -616,8 +589,6 @@ def _selecionar_vendedor_e_validar_pin() -> Optional[Dict]:
 # App
 # ---------------------------------------------------------------------------
 def main() -> None:
-    """Entrada principal do PDV (dashboard + fluxo de venda)."""
-    # Banner global de sucesso (fora de formulários)
     _flash = None
     for k in ("pdv_flash_ok", "msg_ok", "flash_ok"):
         if not _flash:
@@ -631,7 +602,6 @@ def main() -> None:
         if not _login_box():
             return
     else:
-        # Cabeçalho mostra SEMPRE o usuário real (não o vendedor mascarado)
         header_user = st.session_state.get("pdv_header_user", st.session_state["usuario_logado"])
         dmin, dmax = _entrada_date_bounds()
         today = date.today()
@@ -661,7 +631,6 @@ def main() -> None:
             with logout:
                 st.write("")
                 if st.button("Sair", key="btn_logout", type="secondary"):
-                    # Restaura usuário original (se estava mascarado)
                     if "pdv_original_user" in st.session_state:
                         st.session_state["usuario_logado"] = st.session_state.pop("pdv_original_user")
                     st.session_state.pop("pdv_header_user", None)
@@ -669,13 +638,11 @@ def main() -> None:
                         st.session_state.pop(k, None)
                     st.rerun()
 
-    # Metas (gauges + cards) na data escolhida
     ref_day = st.session_state.get("pdv_ref_date", date.today())
     st.markdown(f"**Metas do dia — {ref_day:%Y-%m-%d}**")
     _metas_loja_gauges(ref_day)
     st.divider()
 
-    # Fluxo de nova venda
     if not st.session_state.get("pdv_mostrar_form"):
         st.markdown('<div class="nv-wrap">', unsafe_allow_html=True)
         if st.button("➕ Nova Venda", key="btn_nova_venda", use_container_width=True):
