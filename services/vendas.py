@@ -5,6 +5,11 @@ Módulo VendasService
 Serviço responsável por registrar **vendas** no sistema, aplicar a
 **liquidação** (caixa/banco) na data correta e gravar **log idempotente**
 em `movimentacoes_bancarias`.
+
+Regras de datas (alinhadas):
+- Dinheiro/PIX: liquidação imediata => entrada.Data = data_venda
+- Crédito/Débito/Link: liquidação no próximo dia útil => entrada.Data = proximo_dia_util(data_venda + 1)
+- created_at: timestamp da venda em **America/Sao_Paulo** (Brasília)
 """
 
 from __future__ import annotations
@@ -12,7 +17,8 @@ from __future__ import annotations
 from typing import Optional, Tuple
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -21,6 +27,48 @@ from shared.ids import uid_venda_liquidacao, sanitize
 
 __all__ = ["VendasService"]
 
+# -----------------------------------------------------------------------------#
+# Helpers de data (próximo dia útil)
+# -----------------------------------------------------------------------------#
+def _is_working_day(d: date) -> bool:
+    """Usa Workalendar BR-DF se disponível; senão Brasil; senão seg-sex."""
+    # 1) tentar calendário específico do DF (feriados locais)
+    try:
+        from workalendar.registry import registry
+        cal_cls = registry.get("BR-DF")
+        if cal_cls:
+            cal = cal_cls()
+            return bool(cal.is_working_day(d))
+    except Exception:
+        pass
+    # 2) tentar Brasil geral
+    try:
+        from workalendar.america import Brazil
+        cal = Brazil()
+        return bool(cal.is_working_day(d))
+    except Exception:
+        pass
+    # 3) fallback simples: seg-sex
+    return d.weekday() < 5  # 0..4
+
+def _proximo_dia_util(d: date) -> date:
+    """Retorna o próprio dia se for útil; do contrário, avança até ser útil."""
+    while not _is_working_day(d):
+        d += timedelta(days=1)
+    return d
+
+def _liq_para_forma(data_venda_str: str, forma_upper: str) -> str:
+    """
+    Calcula a data de liquidação para a forma de pagamento.
+    - Dinheiro/PIX: mesmo dia da venda
+    - Crédito/Débito/Link: D+1 útil
+    """
+    dv = pd.to_datetime(data_venda_str).date()
+    if forma_upper in ("DINHEIRO", "PIX"):
+        data_liq = dv
+    else:
+        data_liq = _proximo_dia_util(dv + timedelta(days=1))
+    return data_liq.isoformat()
 
 # -----------------------------------------------------------------------------#
 # Helper de taxa (consulta a tabela de taxas da maquineta)
@@ -34,33 +82,31 @@ def _resolver_taxa_percentual(
     maquineta: Optional[str],
 ) -> float:
     """
-    Busca na tabela `taxas_maquinas` uma taxa compatível com
-    (forma, bandeira, parcelas, maquineta). Retorna 0.0 se não encontrar.
+    Busca na tabela `taxas_maquinas` uma taxa compatível; retorna 0.0 se não encontrar.
+    Tolera tanto coluna `forma_pagamento` quanto `forma`.
     """
+    forma_u = (forma or "").upper()
+    params = [forma_u, bandeira, int(parcelas or 1), maquineta]
     try:
-        row = pd.read_sql(
+        row = conn.execute(
             """
             SELECT COALESCE(taxa_percentual,0) AS taxa
               FROM taxas_maquinas
-             WHERE UPPER(forma)=?
-               AND (bandeira IS NULL OR bandeira=?)
-               AND (parcelas IS NULL OR parcelas=?)
-               AND (maquineta IS NULL OR maquineta=?)
+             WHERE UPPER(COALESCE(forma_pagamento, forma)) = ?
+               AND (bandeira  IS NULL OR bandeira  = ?)
+               AND (parcelas  IS NULL OR parcelas  = ?)
+               AND (maquineta IS NULL OR maquineta = ?)
              ORDER BY 
-               CASE WHEN bandeira IS NULL THEN 1 ELSE 0 END,
-               CASE WHEN parcelas IS NULL THEN 1 ELSE 0 END,
+               CASE WHEN bandeira  IS NULL THEN 1 ELSE 0 END,
+               CASE WHEN parcelas  IS NULL THEN 1 ELSE 0 END,
                CASE WHEN maquineta IS NULL THEN 1 ELSE 0 END
              LIMIT 1
             """,
-            conn,
-            params=[(forma or "").upper(), bandeira, int(parcelas or 1), maquineta],
-        )
-        if not row.empty:
-            return float(row.loc[0, "taxa"]) or 0.0
+            params,
+        ).fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
     except Exception:
-        pass
-    return 0.0
-
+        return 0.0
 
 class VendasService:
     """Regras de negócio para registro de vendas."""
@@ -70,19 +116,15 @@ class VendasService:
     # ------------------------------------------------------------------ #
     def __init__(self, db_path_like: object) -> None:
         """
-        Inicializa o serviço.
-
         Args:
-            db_path_like: Caminho do SQLite (str/Path) ou objeto com
-                atributo de caminho (ex.: SimpleNamespace(caminho_banco=...)).
+            db_path_like: Caminho do SQLite (str/Path) ou objeto com attr caminho (ex.: SimpleNamespace).
         """
-        self.db_path_like = db_path_like  # get_conn aceita db_path_like direto.
+        self.db_path_like = db_path_like
 
     # =============================
     # Infraestrutura interna
     # =============================
     def _garantir_linha_saldos_caixas(self, conn: sqlite3.Connection, data: str) -> None:
-        """Garante existência da linha em `saldos_caixas` para a data."""
         cur = conn.execute("SELECT 1 FROM saldos_caixas WHERE data = ? LIMIT 1", (data,))
         if not cur.fetchone():
             conn.execute(
@@ -95,7 +137,6 @@ class VendasService:
             )
 
     def _garantir_linha_saldos_bancos(self, conn: sqlite3.Connection, data: str) -> None:
-        """Garante existência da linha em `saldos_bancos` para a data."""
         cur = conn.execute("SELECT 1 FROM saldos_bancos WHERE data = ? LIMIT 1", (data,))
         if not cur.fetchone():
             conn.execute("INSERT OR IGNORE INTO saldos_bancos (data) VALUES (?)", (data,))
@@ -111,7 +152,6 @@ class VendasService:
     def _ajustar_banco_dynamic(
         self, conn: sqlite3.Connection, banco_col: str, delta: float, data: str
     ) -> None:
-        """Ajusta dinamicamente a coluna do banco em `saldos_bancos`."""
         banco_col = self._validar_nome_coluna_banco(banco_col)
         cols = pd.read_sql("PRAGMA table_info(saldos_bancos);", conn)["name"].tolist()
         if banco_col not in cols:
@@ -136,26 +176,21 @@ class VendasService:
         forma: str,
         parcelas: int,
         bandeira: Optional[str],
-        maquineta: Optional[str],           # None para PIX direto / dinheiro
+        maquineta: Optional[str],
         banco_destino: Optional[str],
-        taxa_percentual: Optional[float],   # se None -> buscar tabela
+        taxa_percentual: Optional[float],
         usuario: str,
     ) -> int:
         """
         Insere a venda na tabela `entrada`.
 
-        Regras:
-        - `Valor` sempre recebe o valor bruto.
-        - `valor_liquido` = bruto se não houver taxa; senão líquido com desconto.
-        - `Forma_de_Pagamento` sempre preenchida (DINHEIRO, PIX, etc).
-        - DINHEIRO / PIX direto -> taxa=0, maquineta=NULL.
-        - PIX via maquineta / DÉBITO / CRÉDITO -> aplica taxa da tabela.
-        - Garante colunas: Usuario, valor_liquido, maquineta, created_at.
+        - **Data** = **data de liquidação** (contábil).
+        - **created_at** = data/hora da venda em America/Sao_Paulo.
         """
         cols_df = pd.read_sql("PRAGMA table_info(entrada);", conn)
         colnames = set(cols_df["name"].astype(str).tolist())
 
-        # garantir colunas obrigatórias
+        # garantir colunas que usamos
         if "Usuario" not in colnames:
             conn.execute('ALTER TABLE entrada ADD COLUMN "Usuario" TEXT;'); colnames.add("Usuario")
         if "valor_liquido" not in colnames:
@@ -163,7 +198,15 @@ class VendasService:
         if "maquineta" not in colnames:
             conn.execute('ALTER TABLE entrada ADD COLUMN "maquineta" TEXT;'); colnames.add("maquineta")
         if "created_at" not in colnames:
-            conn.execute('ALTER TABLE entrada ADD COLUMN "created_at" TEXT DEFAULT (CURRENT_TIMESTAMP);'); colnames.add("created_at")
+            conn.execute('ALTER TABLE entrada ADD COLUMN "created_at" TEXT;'); colnames.add("created_at")
+        if "Data_Liq" not in colnames:
+            conn.execute('ALTER TABLE entrada ADD COLUMN "Data_Liq" TEXT;'); colnames.add("Data_Liq")
+
+        # timestamp Brasília
+        try:
+            created_at_value = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
+        except Exception:
+            created_at_value = datetime.now().isoformat(timespec="seconds")
 
         forma_upper = (forma or "").upper()
         parcelas = int(parcelas or 1)
@@ -189,9 +232,9 @@ class VendasService:
         else:
             liquido = float(valor_liquido)
 
-        # montar INSERT (usar None para gravar NULL em campos opcionais)
+        # Montar INSERT
         to_insert = {
-            "Data": data_venda,
+            "Data": data_liq,                     # contábil (liquidação)
             "Data_Liq": data_liq,
             "Valor": float(valor_bruto),
             "valor_liquido": liquido,
@@ -201,8 +244,12 @@ class VendasService:
             "maquineta": maq_eff,
             "Banco_Destino": banco_destino or None,
             "Usuario": usuario,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": created_at_value,       # horário BR
         }
+
+        # Se existir a coluna opcional Data_Venda, preenche também
+        if "Data_Venda" in colnames:
+            to_insert["Data_Venda"] = data_venda
 
         if "Taxa_percentual" in colnames:
             to_insert["Taxa_percentual"] = float(taxa_eff)
@@ -225,12 +272,10 @@ class VendasService:
     def registrar_venda(self, *args, **kwargs) -> Tuple[int, int]:
         """
         Wrapper de compatibilidade:
-        - Aceita 'caminho_banco' e usa como db_path_like (legado).
-        - Mapeia nomes alternativos de parâmetros:
-          data|data_venda, data_liq|data_liquidacao,
-          valor|valor_bruto, forma|forma_pagamento,
-          taxa|taxa_percentual.
-        - Encaminha para _registrar_venda_impl.
+        - Se 'data_liq' NÃO for informado, calcula automaticamente conforme a forma:
+          • DINHEIRO/PIX => data_liq = data_venda
+          • CRÉDITO/DÉBITO/LINK_PAGAMENTO => data_liq = próximo dia útil (D+1 útil)
+        - Aceita 'caminho_banco' (legado) como db_path_like.
         """
         if "caminho_banco" in kwargs and kwargs["caminho_banco"]:
             self.db_path_like = kwargs.pop("caminho_banco")
@@ -246,11 +291,16 @@ class VendasService:
         taxa_percentual = kwargs.pop("taxa_percentual", kwargs.pop("taxa", 0.0))
         usuario = kwargs.pop("usuario", "Sistema")
 
+        # Se não veio data_liq -> calcula
+        forma_u = (forma or "").upper()
+        if not data_liq or str(data_liq).strip() == "":
+            data_liq = _liq_para_forma(str(data_venda), forma_u)
+
         return self._registrar_venda_impl(
             data_venda=data_venda,
             data_liq=data_liq,
             valor_bruto=valor_bruto,
-            forma=forma,
+            forma=forma_u,
             parcelas=parcelas,
             bandeira=bandeira,
             maquineta=maquineta,
@@ -265,7 +315,7 @@ class VendasService:
     def _registrar_venda_impl(
         self,
         data_venda: str,            # YYYY-MM-DD
-        data_liq: str,              # YYYY-MM-DD
+        data_liq: str,              # YYYY-MM-DD (já calculada)
         valor_bruto: float,
         forma: str,                 # "DINHEIRO" | "PIX" | "DÉBITO" | "CRÉDITO" | "LINK_PAGAMENTO"
         parcelas: int,
@@ -275,13 +325,7 @@ class VendasService:
         taxa_percentual: float,
         usuario: str,
     ) -> Tuple[int, int]:
-        """Registra a venda, aplica a liquidação e grava log idempotente.
-
-        Fluxo:
-        1. Insere em `entrada` (valor bruto e líquido).
-        2. Atualiza saldos na `data_liq` (caixa_vendas **ou** banco).
-        3. Registra **um** log na `movimentacoes_bancarias` protegido por idempotência.
-        """
+        """Registra a venda, aplica a liquidação e grava log idempotente."""
         # Validações básicas
         try:
             pd.to_datetime(data_venda)
@@ -309,35 +353,22 @@ class VendasService:
         with get_conn(self.db_path_like) as conn:
             # decidir taxa efetiva
             if forma_u == "DINHEIRO" or (forma_u == "PIX" and not (maquineta and maquineta.strip())):
-                taxa_eff = 0.0  # PIX direto e DINHEIRO sem taxa
+                taxa_eff = 0.0
             else:
                 taxa_eff = float(taxa_percentual or 0.0)
                 if taxa_eff == 0.0:
                     taxa_eff = _resolver_taxa_percentual(
-                        conn,
-                        forma=forma_u,
-                        bandeira=bandeira,
-                        parcelas=int(parcelas),
-                        maquineta=maquineta,
+                        conn, forma=forma_u, bandeira=bandeira, parcelas=int(parcelas), maquineta=maquineta
                     )
 
             valor_liquido = round(float(valor_bruto) * (1.0 - float(taxa_eff) / 100.0), 2)
 
             # Idempotência — um único log por liquidação
             trans_uid = uid_venda_liquidacao(
-                data_venda,
-                data_liq,
-                float(valor_bruto),
-                forma_u,
-                int(parcelas),
-                bandeira,
-                maquineta,
-                banco_destino,
-                float(taxa_eff),
-                usuario,
+                data_venda, data_liq, float(valor_bruto), forma_u, int(parcelas),
+                bandeira, maquineta, banco_destino, float(taxa_eff), usuario,
             )
 
-            # Se já existe movimentação com esse trans_uid, não duplica
             row = conn.execute(
                 "SELECT id FROM movimentacoes_bancarias WHERE trans_uid=? LIMIT 1;",
                 (trans_uid,),
@@ -347,11 +378,11 @@ class VendasService:
 
             cur = conn.cursor()
 
-            # 1) INSERT em `entrada`
+            # 1) INSERT em `entrada` (Data = data_liq; created_at = horário BR)
             venda_id = self._insert_entrada(
                 conn,
-                data_venda=data_venda,
-                data_liq=data_liq,
+                data_venda=str(data_venda),
+                data_liq=str(data_liq),
                 valor_bruto=float(valor_bruto),
                 valor_liquido=float(valor_liquido),
                 forma=forma_u,
@@ -375,17 +406,12 @@ class VendasService:
                 if not banco_destino:
                     raise ValueError("banco_destino é obrigatório para formas não-DINHEIRO.")
                 self._garantir_linha_saldos_bancos(conn, data_liq)
-                self._ajustar_banco_dynamic(
-                    conn,
-                    banco_col=banco_destino,
-                    delta=float(valor_liquido),
-                    data=data_liq,
-                )
+                self._ajustar_banco_dynamic(conn, banco_col=banco_destino, delta=float(valor_liquido), data=data_liq)
                 banco_label = banco_destino
 
-            # 3) Log em movimentacoes_bancarias (OBS padronizada)
+            # 3) Log em movimentacoes_bancarias
             if forma_u == "PIX" and not (maquineta and maquineta.strip()):
-                detalhe_meio = f"Direto — {banco_destino or '—'}"      # PIX direto para banco
+                detalhe_meio = f"Direto — {banco_destino or '—'}"
             elif forma_u in ("CRÉDITO", "DÉBITO", "LINK_PAGAMENTO"):
                 detalhe_meio = f"{(bandeira or '—')}/{(maquineta or '—')}"
             elif forma_u == "DINHEIRO":
@@ -395,25 +421,28 @@ class VendasService:
 
             obs = (
                 f"Lançamento VENDA {forma_u} {parcelas}x / "
-                f"{detalhe_meio} • Bruto R$ {valor_bruto:.2f} • "
-                f"Taxa {taxa_eff:.2f}% -> Líquido R$ {valor_liquido:.2f}"
+                f"{detalhe_meio} • Bruto R$ {float(valor_bruto):.2f} • "
+                f"Taxa {float(taxa_eff):.2f}% -> Líquido R$ {valor_liquido:.2f}"
             ).strip()
 
-            # INSERT dinâmico: inclui data_hora/usuario apenas se as colunas existirem
             cols_exist = {r[1] for r in conn.execute("PRAGMA table_info(movimentacoes_bancarias)")}
             payload = {
-                "data": data_liq,                 # data contábil (liquidação)
+                "data": data_liq,
                 "banco": banco_label,
                 "tipo": "entrada",
                 "valor": float(valor_liquido),
-                "origem": "lancamentos",          # padronizado
+                "origem": "lancamentos",
                 "observacao": obs,
                 "referencia_tabela": "entrada",
                 "referencia_id": int(venda_id),
                 "trans_uid": trans_uid,
             }
             if "data_hora" in cols_exist:
-                payload["data_hora"] = datetime.now().isoformat(timespec="seconds")
+                # horário BR para log também
+                try:
+                    payload["data_hora"] = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
+                except Exception:
+                    payload["data_hora"] = datetime.now().isoformat(timespec="seconds")
             if "usuario" in cols_exist:
                 payload["usuario"] = usuario
 

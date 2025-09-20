@@ -123,83 +123,66 @@ def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, fl
     return (_get(b1), _get(b2), _get(b3), _get(b4))
 
 
-# ================== Cálculos (entradas do dia para cartões/dinheiro/pix) ==================
-def _dinheiro_e_pix_do_dia(caminho_banco: str, data_sel: date) -> tuple[float, float]:
-    """Soma, no dia selecionado, o **valor líquido** das entradas em DINHEIRO e PIX (fallback p/ bruto)."""
+# ================== Cálculos dos cartões do topo ==================
+def _dinheiro_e_pix_por_created_at(caminho_banco: str, data_sel: date) -> tuple[float, float]:
+    """
+    Soma, no dia selecionado, o valor (preferência: 'Valor'; fallback para 'valor_liquido')
+    das entradas em DINHEIRO e PIX **filtrando pelo dia da venda (created_at)**.
+    """
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0, 0.0
 
-    c_data = _find_col(df, ["data", "data_venda", "dt"])
+    c_created = _find_col(df, [
+        "created_at", "criado_em", "data_criacao", "data_criação",
+        "data_hora", "datahora", "ts", "timestamp"
+    ])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    # prioridade para líquido; se não existir, usa valor/valor_total
-    c_val = _find_col(
-        df,
-        [
-            "valor_liquido", "valorLiquido", "valor_liq",
-            "valor_liquido_venda", "valor_liq_recebido", "valor_liquido_recebido",
-            "valor", "valor_total",
-        ],
-    )
-    if not (c_data and c_forma and c_val):
+    # preferência: bruto; fallback: líquido
+    c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido", "valor_liq"])
+
+    if not (c_created and c_forma and c_val):
         return 0.0, 0.0
 
-    df[c_data] = _parse_date_col(df, c_data)
-    df_day = df[df[c_data].dt.date == data_sel].copy()
+    df[c_created] = _parse_date_col(df, c_created)
+    df_day = df[df[c_created].dt.date == data_sel].copy()
     if df_day.empty:
         return 0.0, 0.0
 
     formas = df_day[c_forma].astype(str).str.upper().str.strip()
     vals = pd.to_numeric(df_day[c_val], errors="coerce").fillna(0.0)
-    return float(vals[formas == "DINHEIRO"].sum()), float(vals[formas == "PIX"].sum())
+
+    total_dinheiro = float(vals[formas == "DINHEIRO"].sum())
+    total_pix      = float(vals[formas == "PIX"].sum())
+    return round(total_dinheiro, 2), round(total_pix, 2)
 
 
-def _dia_util_anterior(base: date) -> date:
-    """Calcula o dia útil anterior a 'base'. Usa workalendar quando disponível."""
-    if _HAS_WORKACALENDAR:
-        cal = BrazilDistritoFederal()
-        d = base - timedelta(days=1)
-        while not cal.is_working_day(d):
-            d -= timedelta(days=1)
-        return d
-    wd = base.weekday()  # 0=Mon .. 6=Sun
-    if wd == 0:
-        return base - timedelta(days=3)
-    if wd == 6:
-        return base - timedelta(days=2)
-    return base - timedelta(days=1)
-
-
-def _cartao_liquido_d1_por_valor_liquido(caminho_banco: str, data_base: date) -> float:
-    """Soma, para o dia útil anterior, o **valor líquido** das vendas em DÉBITO/CRÉDITO (depósito D-1)."""
+def _cartao_d1_liquido_por_data(caminho_banco: str, data_sel: date) -> float:
+    """
+    Soma, no dia selecionado, o **valor líquido** das entradas em
+    DÉBITO/CRÉDITO/LINK_PAGAMENTO **filtrando pela coluna contábil `Data`**.
+    (Ou seja, o que *caiu hoje*.)
+    """
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0
 
-    c_data = _find_col(df, ["data", "data_venda", "dt"])
+    c_data = _find_col(df, ["data", "data_liq", "data_liquidacao", "data_liquidação", "dt"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    # prioridade para líquido; fallback para valor/valor_total
-    c_val = _find_col(
-        df,
-        [
-            "valor_liquido", "valorLiquido", "valor_liq",
-            "valor_liquido_venda", "valor_liq_recebido", "valor_liquido_recebido",
-            "valor", "valor_total",
-        ],
-    )
+    # preferência: líquido; fallback: bruto
+    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "valor", "valor_total"])
     if not (c_data and c_forma and c_val):
         return 0.0
 
-    dia_anterior = _dia_util_anterior(data_base)
     df[c_data] = _parse_date_col(df, c_data)
-    df_prev = df[df[c_data].dt.date == dia_anterior].copy()
-    if df_prev.empty:
+    df_day = df[df[c_data].dt.date == data_sel].copy()
+    if df_day.empty:
         return 0.0
 
-    formas = df_prev[c_forma].astype(str).str.upper().str.strip()
-    vals = pd.to_numeric(df_prev[c_val], errors="coerce").fillna(0.0)
-    total = float(vals[formas.isin(["DEBITO", "DÉBITO", "CREDITO", "CRÉDITO"])].sum())
-    return round(total, 2)
+    formas = df_day[c_forma].astype(str).str.upper().str.strip()
+    vals = pd.to_numeric(df_day[c_val], errors="coerce").fillna(0.0)
+    is_cartao = formas.isin(["DEBITO", "DÉBITO", "CREDITO", "CRÉDITO", "LINK_PAGAMENTO", "LINK PAGAMENTO"])
+    return float(vals[is_cartao].sum())
 
 
 # ============== Somatórios até a data selecionada ==============
@@ -258,24 +241,7 @@ def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]
     return dict(sorted(pretty.items(), key=lambda x: x[0]))
 
 
-# ============== Resumo de hoje com base nas tabelas entrada/saida ==============
-def _entradas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
-    """Soma, no dia, os valores da tabela `entrada` (coluna 'valor'; fallback p/ líquido)."""
-    df = _carregar_tabela(caminho_banco, "entrada")
-    if df.empty:
-        return 0.0
-    c_data = _find_col(df, ["data", "data_venda", "dt"])
-    # aqui mantém prioridade para 'valor' como solicitado
-    c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido", "valor_liq"])
-    if not (c_data and c_val):
-        return 0.0
-    df[c_data] = _parse_date_col(df, c_data)
-    dia = df[df[c_data].dt.date == data_sel].copy()
-    if dia.empty:
-        return 0.0
-    return float(pd.to_numeric(dia[c_val], errors="coerce").fillna(0.0).sum())
-
-
+# ============== Saídas do dia ==============
 def _saidas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
     """Soma, no dia, os valores da tabela `saida` (coluna 'valor')."""
     df = _carregar_tabela(caminho_banco, "saida")
@@ -355,14 +321,11 @@ def _style_moeda_seguro(df: pd.DataFrame, cols_moeda: list[str]) -> pd.io.format
     """
     if df is None or df.empty:
         return df
-    # Garante que as colunas existem no DF
     cols = [c for c in cols_moeda if c in df.columns]
     try:
-        # Usa callable por coluna (não usa strings de formatação)
         mapping = {c: _fmt for c in cols}
         return df.style.format(mapping, na_rep=_fmt(0))
     except Exception:
-        # Fallback: substitui None/"" por 0 e tenta novamente
         dfx = df.copy()
         for c in cols:
             dfx[c] = dfx[c].apply(lambda v: 0 if v in (None, "", "None") else v)
@@ -379,17 +342,20 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")
     data_ref = str(data_sel)
 
-    # --- Cálculos principais ---
-    valor_dinheiro, valor_pix = _dinheiro_e_pix_do_dia(caminho_banco, data_sel)
-    total_cartao_liquido = _cartao_liquido_d1_por_valor_liquido(caminho_banco, data_sel)
+    # --- Cartões do topo ---
+    # Amarelo (created_at): vendas feitas hoje
+    valor_dinheiro, valor_pix = _dinheiro_e_pix_por_created_at(caminho_banco, data_sel)
+    # Roxo (Data): liquidação de cartão que caiu hoje
+    total_cartao_liquido = _cartao_d1_liquido_por_data(caminho_banco, data_sel)
+    # Vermelho: soma dos dois
+    entradas_total_dia = float(valor_dinheiro + valor_pix + total_cartao_liquido)
 
     # Caixa e Bancos (somatórios até a data)
     soma_caixa_total, soma_caixa2_total = _somar_caixas_totais(caminho_banco, data_sel)
     bancos_totais = _somar_bancos_totais(caminho_banco, data_sel)
     total_bancos = float(sum(bancos_totais.values())) if bancos_totais else 0.0
 
-    # Resumo do dia (AGORA baseado em entrada/saida)
-    entradas_total_dia = _entradas_total_do_dia(caminho_banco, data_sel)
+    # Saídas e correções
     saidas_total_dia = _saidas_total_do_dia(caminho_banco, data_sel)
     corr_dia = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
@@ -397,7 +363,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     # Total consolidado (até a data)
     saldo_total = float(soma_caixa_total + soma_caixa2_total + total_bancos + corr_acum)
 
-    # CSS para mini-tabela compacta (somente nesta página)
+    # CSS para mini-tabela compacta
     st.markdown(
         """
         <style>
@@ -427,8 +393,8 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     render_card_row(
         "📊 Resumo das Movimentações de Hoje",
         [
-            ("Entradas (Caixa/Caixa 2)", entradas_total_dia, True),
-            ("Saídas (Caixa/Caixa 2)", saidas_total_dia, True),
+            ("Entradas", entradas_total_dia, True),
+            ("Saídas", saidas_total_dia, True),
             ("Correções de Caixa", df_corr, False),
         ],
     )
@@ -484,7 +450,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                         float(b1), float(b2), float(b3), float(b4),  # legado
                         float(soma_caixa_total),
                         float(soma_caixa2_total),
-                        float(entradas_total_dia),
+                        float(entradas_total_dia),   # **agora é Dinheiro+Pix(created_at)+CartãoD-1(Data)**
                         float(saidas_total_dia),
                         float(corr_dia),
                         float(saldo_total),  # esperado
@@ -528,7 +494,6 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
         df_fech = pd.DataFrame()
 
     if not df_fech.empty:
-        # Colunas monetárias para aplicar o formatter seguro
         cols_moeda = [
             "Inter", "Bradesco", "InfinitePay", "Outros Bancos",
             "Caixa", "Caixa 2", "Entradas", "Saídas", "Correções",

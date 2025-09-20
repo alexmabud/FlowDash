@@ -1,23 +1,28 @@
 # ===================== Actions: Venda =====================
 """
-Executa a MESMA lógica do módulo original de Vendas (sem Streamlit aqui):
-- Validações de campos
-- Cálculo de taxa/banco_destino a partir de taxas_maquinas
-- Suporte a PIX via maquineta ou direto para banco (com taxa informada)
-- Cálculo de data de liquidação (DIAS_COMPENSACAO + próximo dia útil)
-- Chamada do serviço de vendas (VendasService); fallback para LedgerService se necessário
+Fluxo de registro de venda (sem UI) — centralizado no SERVICE.
+
+Estratégia:
+- Tentamos chamar o service SEM `data_liq` (service calcula BR-DF).
+- Se a assinatura do service exigir `data_liq` (TypeError), fazemos
+  um fallback local: Dinheiro/PIX = D; Débito/Crédito/Link = próximo dia útil.
+- `created_at` é responsabilidade do service moderno.
+
+Mantemos aqui:
+- Validações de formulário
+- Descoberta de taxa e banco_destino (tabela taxas_maquinas)
 """
 
 from __future__ import annotations
 
 from typing import Optional, Tuple, Any
 import pandas as pd
+import sqlite3
+from datetime import datetime, timedelta, date
 
 from shared.db import get_conn
 from flowdash_pages.lancamentos.shared_ui import (
-    DIAS_COMPENSACAO,
-    proximo_dia_util_br,
-    obter_banco_destino,
+    obter_banco_destino,   # só este
 )
 
 # ---- Serviço de vendas: usa services.vendas se existir; fallback para services.ledger ----
@@ -30,7 +35,7 @@ except Exception:
         # Projeto que centraliza tudo no Ledger
         from services.ledger import LedgerService as _VendasService  # type: ignore
     except Exception:
-        _VendasService = None  # será checado em runtime
+        _VendasService = None  # checado em runtime
 
 
 def _r2(x) -> float:
@@ -57,8 +62,8 @@ def _descobrir_taxa_e_banco(
     taxa_pix_direto: float,
 ) -> Tuple[float, Optional[str]]:
     """
-    Mesma lógica do módulo original para determinar taxa% e banco_destino.
-    Usa a tabela taxas_maquinas (colunas: forma_pagamento, maquineta, bandeira, parcelas, taxa_percentual, banco_destino).
+    Mesma lógica para determinar taxa% e banco_destino.
+    Usa `taxas_maquinas` (forma_pagamento, maquineta, bandeira, parcelas, taxa_percentual, banco_destino).
     """
     taxa, banco_destino = 0.0, None
     forma_up = (forma or "").upper()
@@ -105,17 +110,49 @@ def _descobrir_taxa_e_banco(
             taxa = float(taxa_pix_direto or 0.0)
 
     else:  # DINHEIRO
-        banco_destino, taxa, parcelas = None, 0.0, 1  # simples e direto
+        banco_destino, taxa, parcelas = None, 0.0, 1
 
     return _r2(taxa), (banco_destino or None)
 
 
-def _chamar_service_registrar_venda(
+# ------------------ Fallback de liquidação se o service exigir ------------------ #
+
+def _is_working_day_br(df: date) -> bool:
+    """Tenta calendário BR-DF; se não houver, usa seg-sex."""
+    try:
+        from workalendar.registry import registry
+        cal_cls = registry.get("BR-DF")
+        if cal_cls:
+            cal = cal_cls()
+            return bool(cal.is_working_day(df))
+    except Exception:
+        pass
+    return df.weekday() < 5  # fallback: seg-sex
+
+
+def _next_working_day_br(df: date) -> date:
+    while not _is_working_day_br(df):
+        df += timedelta(days=1)
+    return df
+
+
+def _calc_data_liq_fallback(data_venda_str: str, forma_up: str) -> str:
+    """Regra do cliente: Dinheiro/PIX = D; Débito/Crédito/Link = D+1 útil (BR-DF)."""
+    dv = pd.to_datetime(data_venda_str).date()
+    if forma_up in ("DINHEIRO", "PIX"):
+        liq = dv
+    else:
+        liq = _next_working_day_br(dv + timedelta(days=1))
+    return liq.isoformat()
+
+
+# ------------------ Chamadas ao service (com e sem data_liq) ------------------ #
+
+def _chamar_service_registrar_venda_sem_dataliq(
     service: Any,
     *,
     db_like: Any,
     data_venda: str,
-    data_liq: str,
     valor: float,
     forma: str,
     parcelas: int,
@@ -125,13 +162,7 @@ def _chamar_service_registrar_venda(
     taxa_percentual: float,
     usuario: str,
 ):
-    """
-    Tenta registrar_venda em assinaturas diferentes, nesta ordem:
-      1) API moderna (com db_like e nomes 'data', 'valor', 'forma_pagamento', 'data_liq')
-      2) API moderna sem db_like (passado no __init__)
-      3) API antiga ('data_venda', 'valor_bruto', 'forma')
-    Retorna (venda_id, mov_id).
-    """
+    """Tenta 3 assinaturas modernas/antigas, SEM data_liq."""
     last_type_error = None
 
     # 1) Moderna + db_like
@@ -146,13 +177,12 @@ def _chamar_service_registrar_venda(
             maquineta=maquineta or "",
             banco_destino=banco_destino,
             taxa_percentual=_r2(taxa_percentual or 0.0),
-            data_liq=data_liq,
             usuario=usuario,
         )
     except TypeError as e:
         last_type_error = e
     except Exception:
-        raise  # deixe erros reais aparecerem
+        raise
 
     # 2) Moderna sem db_like
     try:
@@ -165,7 +195,6 @@ def _chamar_service_registrar_venda(
             maquineta=maquineta or "",
             banco_destino=banco_destino,
             taxa_percentual=_r2(taxa_percentual or 0.0),
-            data_liq=data_liq,
             usuario=usuario,
         )
     except TypeError as e:
@@ -173,7 +202,85 @@ def _chamar_service_registrar_venda(
     except Exception:
         raise
 
-    # 3) Antiga (valor_bruto/forma/data_venda)
+    # 3) Antiga
+    try:
+        return service.registrar_venda(
+            data_venda=data_venda,
+            valor_bruto=_r2(valor),
+            forma=forma,
+            parcelas=int(parcelas or 1),
+            bandeira=bandeira or "",
+            maquineta=maquineta or "",
+            banco_destino=banco_destino,
+            taxa_percentual=_r2(taxa_percentual or 0.0),
+            usuario=usuario,
+        )
+    except TypeError as e:
+        last_type_error = e
+    except Exception:
+        raise
+
+    raise last_type_error or TypeError("Assinatura incompatível (sem data_liq).")
+
+
+def _chamar_service_registrar_venda_com_dataliq(
+    service: Any,
+    *,
+    db_like: Any,
+    data_venda: str,
+    data_liq: str,
+    valor: float,
+    forma: str,
+    parcelas: int,
+    bandeira: str,
+    maquineta: str,
+    banco_destino: Optional[str],
+    taxa_percentual: float,
+    usuario: str,
+):
+    """Tenta 3 assinaturas modernas/antigas, COM data_liq (fallback de compatibilidade)."""
+    last_type_error = None
+
+    # 1) Moderna + db_like
+    try:
+        return service.registrar_venda(
+            db_like=db_like,
+            data=data_venda,
+            data_liq=data_liq,
+            valor=valor,
+            forma_pagamento=forma,
+            parcelas=int(parcelas or 1),
+            bandeira=bandeira or "",
+            maquineta=maquineta or "",
+            banco_destino=banco_destino,
+            taxa_percentual=_r2(taxa_percentual or 0.0),
+            usuario=usuario,
+        )
+    except TypeError as e:
+        last_type_error = e
+    except Exception:
+        raise
+
+    # 2) Moderna sem db_like
+    try:
+        return service.registrar_venda(
+            data=data_venda,
+            data_liq=data_liq,
+            valor=valor,
+            forma_pagamento=forma,
+            parcelas=int(parcelas or 1),
+            bandeira=bandeira or "",
+            maquineta=maquineta or "",
+            banco_destino=banco_destino,
+            taxa_percentual=_r2(taxa_percentual or 0.0),
+            usuario=usuario,
+        )
+    except TypeError as e:
+        last_type_error = e
+    except Exception:
+        raise
+
+    # 3) Antiga
     try:
         return service.registrar_venda(
             data_venda=data_venda,
@@ -192,8 +299,7 @@ def _chamar_service_registrar_venda(
     except Exception:
         raise
 
-    # Se todas falharam por incompatibilidade de assinatura:
-    raise last_type_error or TypeError("Assinatura de registrar_venda incompatível com as tentativas conhecidas.")
+    raise last_type_error or TypeError("Assinatura incompatível (com data_liq).")
 
 
 def _extrair_nome_simples(x: Any) -> str | None:
@@ -206,10 +312,35 @@ def _extrair_nome_simples(x: Any) -> str | None:
     return s or None
 
 
+def _descobrir_data_liq_gravada(db_like: Any, venda_id: int) -> Optional[str]:
+    """
+    Obtém a `Data` efetivamente gravada em `entrada` para compor a mensagem.
+    Tenta por rowid; se não achar, tenta por coluna `id`.
+    """
+    if venda_id is None or venda_id < 0:
+        return None
+    try:
+        with get_conn(db_like) as conn:
+            # 1) tentar pelo rowid
+            row = conn.execute("SELECT Data FROM entrada WHERE rowid = ?", (venda_id,)).fetchone()
+            if row and row[0]:
+                return str(row[0])
+            # 2) tentar por coluna id (se existir)
+            try:
+                row = conn.execute("SELECT Data FROM entrada WHERE id = ?", (venda_id,)).fetchone()
+                if row and row[0]:
+                    return str(row[0])
+            except sqlite3.OperationalError:
+                pass
+    except Exception:
+        pass
+    return None
+
+
 def registrar_venda(*, db_like: Any = None, data_lanc=None, payload: dict | None = None, **kwargs) -> dict:
     """
     Registra a venda (compatível com chamadas legadas).
-    Usa a data selecionada na tela como Data da VENDA.
+    Usa a data selecionada na tela como **data da VENDA**.
     """
     # Compat: permitir chamadas antigas com 'caminho_banco'
     if db_like is None and "caminho_banco" in kwargs:
@@ -250,15 +381,11 @@ def registrar_venda(*, db_like: Any = None, data_lanc=None, payload: dict | None
         parcelas=parcelas,
         modo_pix=modo_pix,
         banco_pix_direto=banco_pix_direto,
-        taxa_pix_direto=taxa_pix_direto,  # <- forçado 0.0 para PIX direto
+        taxa_pix_direto=taxa_pix_direto,  # 0.0 para PIX direto
     )
 
-    # ------- datas -------
+    # ------- data da VENDA (não calculamos data_liq aqui por padrão) -------
     data_venda_str = pd.to_datetime(data_lanc).strftime("%Y-%m-%d")
-    base = pd.to_datetime(data_lanc).date()
-    dias = DIAS_COMPENSACAO.get(forma, 0)
-    data_liq_date = proximo_dia_util_br(base, dias) if dias > 0 else base
-    data_liq_str = pd.to_datetime(data_liq_date).strftime("%Y-%m-%d")
 
     # ------- usuário (nome simples) -------
     usuario_atual = payload.get("usuario")
@@ -290,32 +417,57 @@ def registrar_venda(*, db_like: Any = None, data_lanc=None, payload: dict | None
     if not hasattr(service, "registrar_venda"):
         raise RuntimeError("O serviço carregado não expõe `registrar_venda(...)`.")
 
-    # ------- chamada ao service -------
-    venda_id, mov_id = _chamar_service_registrar_venda(
-        service,
-        db_like=db_like,
-        data_venda=data_venda_str,
-        data_liq=data_liq_str,
-        valor=_r2(valor),
-        forma=forma,
-        parcelas=int(parcelas or 1),
-        bandeira=bandeira or "",
-        maquineta=maquineta or "",
-        banco_destino=banco_destino,
-        taxa_percentual=_r2(taxa or 0.0),
-        usuario=usuario_atual,
-    )
+    # ------- chamada ao service: 1) tentar SEM data_liq -------
+    try:
+        venda_id, mov_id = _chamar_service_registrar_venda_sem_dataliq(
+            service,
+            db_like=db_like,
+            data_venda=data_venda_str,
+            valor=_r2(valor),
+            forma=forma,
+            parcelas=int(parcelas or 1),
+            bandeira=bandeira or "",
+            maquineta=maquineta or "",
+            banco_destino=banco_destino,
+            taxa_percentual=_r2(taxa or 0.0),
+            usuario=usuario_atual,
+        )
+    except TypeError:
+        # 2) compatibilidade: service exigiu data_liq -> calcular fallback e tentar de novo
+        data_liq_fallback = _calc_data_liq_fallback(data_venda_str, forma)
+        venda_id, mov_id = _chamar_service_registrar_venda_com_dataliq(
+            service,
+            db_like=db_like,
+            data_venda=data_venda_str,
+            data_liq=data_liq_fallback,
+            valor=_r2(valor),
+            forma=forma,
+            parcelas=int(parcelas or 1),
+            bandeira=bandeira or "",
+            maquineta=maquineta or "",
+            banco_destino=banco_destino,
+            taxa_percentual=_r2(taxa or 0.0),
+            usuario=usuario_atual,
+        )
 
     # ------- retorno -------
     from utils.utils import formatar_valor
     if venda_id == -1:
         msg = "⚠️ Venda já registrada (idempotência)."
     else:
+        # Busca a `Data` realmente gravada (liquidação) para compor a mensagem
+        data_liq_gravada = _descobrir_data_liq_gravada(db_like, int(venda_id))
         valor_liq = _r2(float(valor) * (1 - float(taxa or 0.0) / 100.0))
-        msg_liq = (
-            f"Liquidação de {formatar_valor(valor_liq)} em {(banco_destino or 'Caixa_Vendas')}"
-            f" em {pd.to_datetime(data_liq_str).strftime('%d/%m/%Y')}"
-        )
+        if data_liq_gravada:
+            msg_liq = (
+                f"Liquidação de {formatar_valor(valor_liq)} "
+                f"em {(banco_destino or 'Caixa_Vendas')} "
+                f"em {pd.to_datetime(data_liq_gravada).strftime('%d/%m/%Y')}"
+            )
+        else:
+            # fallback: mensagem genérica
+            regra = "hoje (Dinheiro/PIX) ou próximo dia útil (Débito/Crédito/Link)"
+            msg_liq = f"Liquidação de {formatar_valor(valor_liq)} em {(banco_destino or 'Caixa_Vendas')} ({regra})"
         msg = f"✅ Venda registrada! {msg_liq}"
 
     return {"ok": True, "msg": msg}
