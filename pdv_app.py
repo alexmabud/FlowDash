@@ -2,19 +2,22 @@
 """
 FlowDash — PDV Kiosk (login normal + PIN somente na venda)
 
-Política do banco (SEM TEMPLATE):
-  1) Baixar via TOKEN do Dropbox (API) usando secrets/env:
+Política do banco:
+  1) Tentar baixar via TOKEN do Dropbox (API) usando secrets/env:
        [dropbox]
-       access_token = "sl.ABC...SEU_TOKEN..."
-       file_path    = "/FlowDash/data/flowdash_data.db"
+       access_token   = "sl.ABC...SEU_TOKEN..."
+       file_path      = "/FlowDash/data/flowdash_data.db"
        force_download = "0"
-  2) Se falhar, usar o DB local 'data/flowdash_data.db' se for válido (SQLite + 'usuarios').
-  3) Se não houver DB válido, exibir erro e interromper a execução.
+  2) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
+  3) Se nada der certo, exibir erro claro.
+
+Flags úteis (produção x debug):
+  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"     -> mostra diagnóstico
+  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"  -> ignora Dropbox (força DB local)
 
 Uso local:
     streamlit run pdv_app.py
 """
-
 from __future__ import annotations
 
 import hmac
@@ -35,6 +38,7 @@ from utils.pin_utils import validar_pin
 # ---------------------------------------------------------------------------
 import pathlib
 from shared.db_from_dropbox_api import ensure_local_db_api  # usa token + file_path
+from shared.dropbox_config import load_dropbox_settings, mask_token
 
 _CURR_DIR = pathlib.Path(__file__).resolve().parent
 if str(_CURR_DIR) not in sys.path:
@@ -42,12 +46,11 @@ if str(_CURR_DIR) not in sys.path:
 
 st.set_page_config(page_title="FlowDash PDV", layout="wide", initial_sidebar_state="collapsed")
 
-
+# ------------- helpers de arquivo/sqlite -------------
 def _db_local_path() -> pathlib.Path:
     p = _CURR_DIR / "data" / "flowdash_data.db"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
 
 def _is_sqlite(path: pathlib.Path) -> bool:
     try:
@@ -55,7 +58,6 @@ def _is_sqlite(path: pathlib.Path) -> bool:
             return f.read(16).startswith(b"SQLite format 3")
     except Exception:
         return False
-
 
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
@@ -65,70 +67,125 @@ def _has_table(path: pathlib.Path, table: str) -> bool:
     except Exception:
         return False
 
+def _debug_file_info(path: pathlib.Path) -> str:
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            head = f.read(16)
+        return f"size={size}B, head={head!r}"
+    except Exception as e:
+        return f"(falha ao inspecionar: {e})"
 
+# ------------- flags (debug/offline) -------------
+def _flag_debug() -> bool:
+    try:
+        sec = dict(st.secrets.get("dropbox", {}))
+        if str(sec.get("debug", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+            return True
+    except Exception:
+        pass
+    return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _flag_dropbox_disable() -> bool:
+    try:
+        sec = dict(st.secrets.get("dropbox", {}))
+        if str(sec.get("disable", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+            return True
+    except Exception:
+        pass
+    return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+_DEBUG = _flag_debug()
+_cfg = load_dropbox_settings(prefer_env_first=True)
+ACCESS_TOKEN_CFG = _cfg.get("access_token") or ""
+DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
+FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
+TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
+
+if _DEBUG:
+    with st.expander("🔎 Diagnóstico Dropbox (PDV)", expanded=True):
+        try:
+            try:
+                st.write("st.secrets keys:", list(st.secrets.keys()))
+                st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
+            except Exception:
+                st.write("st.secrets indisponível neste contexto.")
+            st.write("token_source:", TOKEN_SOURCE_CFG)
+            st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN_CFG))
+            st.write("token_length:", len(ACCESS_TOKEN_CFG))
+            st.write("file_path:", DROPBOX_PATH_CFG)
+            st.write("force_download:", "1" if FORCE_DOWNLOAD_CFG else "0")
+        except Exception as e:
+            st.warning(f"Falha lendo config Dropbox (PDV): {e}")
+
+# ------------- ensure db disponível (igual ao main) -------------
 @st.cache_resource(show_spinner=True)
-def get_db_path() -> str:
+def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool) -> str:
     """
-    1) Baixa o DB do Dropbox via token para data/flowdash_data.db (secrets/env).
-    2) Se falhar, usa o local se for válido (SQLite + 'usuarios').
-    3) Caso contrário, mostra erro e interrompe.
+    1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db.
+    2) Se download falhar ou não houver token/caminho: usa DB local se válido.
+    3) Caso contrário: erro explícito.
     """
-    dest = _db_local_path()
+    db_local = _db_local_path()
 
-    access_token = (
-        st.secrets.get("dropbox", {}).get("access_token", "").strip()
-        or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
-    )
-    dropbox_path = (
-        st.secrets.get("dropbox", {}).get("file_path", "/FlowDash/data/flowdash_data.db").strip()
-        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
-    )
-    force_download = (
-        (st.secrets.get("dropbox", {}).get("force_download", "0") == "1")
-        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0") == "1")
-    )
-
-    # 1) Tenta baixar via TOKEN
-    if access_token:
+    # 1) Dropbox
+    if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
                 access_token=access_token,
                 dropbox_path=dropbox_path,
-                dest_path=str(dest),
+                dest_path=str(db_local),
                 force_download=force_download,
                 validate_table="usuarios",
             )
             candidate = pathlib.Path(candidate_path)
             if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
-                st.session_state["db_source"] = "dropbox_token"
+                st.session_state["db_mode"] = "online"
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate)
+            else:
+                st.warning("PDV: banco baixado via token parece inválido (ou sem tabela 'usuarios').")
+                st.caption(f"Debug: {_debug_file_info(candidate)}")
         except Exception as e:
-            st.warning(f"PDV: falha ao baixar DB do Dropbox (token): {e}")
+            st.warning(f"PDV: falha ao baixar via token do Dropbox: {e}")
 
-    # 2) Local válido?
-    if dest.exists() and dest.stat().st_size > 0 and _is_sqlite(dest) and _has_table(dest, "usuarios"):
-        st.session_state["db_source"] = "local"
-        os.environ["FLOWDASH_DB"] = str(dest)
-        return str(dest)
+    # 2) Local
+    if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
+        st.session_state["db_mode"] = "local"
+        os.environ["FLOWDASH_DB"] = str(db_local)
+        return str(db_local)
 
-    # 3) Nada válido → erro explícito
-    info = f"(existe={dest.exists()}, size={dest.stat().st_size if dest.exists() else 0})"
+    # 3) Erro
+    info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido para o PDV.\n\n"
-        "- Verifique o TOKEN do Dropbox e o caminho `file_path` nos *secrets* (ou variáveis de ambiente).\n"
-        "- Ou coloque manualmente um arquivo SQLite válido em `data/flowdash_data.db` contendo a tabela 'usuarios'.\n"
+        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, "
+        "e `file_path` correto; **ou**\n"
+        "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` com a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
     )
     st.stop()
 
+# flags efetivas (offline zera token)
+_DROPBOX_DISABLED = _flag_dropbox_disable()
+_effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
+_effective_path = DROPBOX_PATH_CFG
+_effective_force = FORCE_DOWNLOAD_CFG
 
-DB_PATH = get_db_path()
+DB_PATH = ensure_db_available(_effective_token, _effective_path, _effective_force)
 st.session_state.setdefault("caminho_banco", DB_PATH)
-st.caption(f"🗃️ (PDV) Banco em uso: **{st.session_state.get('db_source', '?')}** → `{DB_PATH}`")
+
+# legenda curta (como no main)
+_mode = st.session_state.get("db_mode", "?")
+if _mode == "online":
+    st.caption("🗃️ Banco em uso: **Online**")
+elif _mode == "local":
+    st.caption("🗃️ Banco em uso: **Local**")
+else:
+    st.caption("🗃️ Banco em uso: **Desconhecido**")
 
 # ---------------------------------------------------------------------------
-# Login
+# Login (fallback se auth.auth não estiver disponível)
 # ---------------------------------------------------------------------------
 try:
     from auth import validar_login as auth_validar_login  # type: ignore
@@ -136,11 +193,9 @@ except Exception:
     try:
         from auth.auth import validar_login as auth_validar_login  # type: ignore
     except Exception:
-
         def auth_validar_login(email: str, senha: str, caminho_banco: Optional[str] = None) -> Optional[dict]:
             """Fallback de login direto no SQLite (apenas se módulo auth indisponível)."""
             from utils.utils import gerar_hash_senha
-
             senha_hash = gerar_hash_senha(senha)
             caminho_banco = caminho_banco or DB_PATH
             with sqlite3.connect(caminho_banco) as conn:
@@ -151,7 +206,7 @@ except Exception:
             return {"id": row[0], "nome": row[1], "email": row[2], "perfil": row[3]} if row else None
 
 # ---------------------------------------------------------------------------
-# UI base
+# Estilo base (PDV sem sidebar)
 # ---------------------------------------------------------------------------
 st.markdown(
     """
@@ -183,7 +238,6 @@ def _conn() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     return conn
 
-
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     """Retorna True se a tabela existir (case-insensitive)."""
     return (
@@ -192,7 +246,6 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
         ).fetchone()
         is not None
     )
-
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
@@ -205,13 +258,11 @@ def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
         ).fetchall()
     return [(int(r["id"]), str(r["nome"]), str(r["perfil"] or "")) for r in rows]
 
-
 def _buscar_pin_usuario(usuario_id: int) -> Optional[str]:
     """Retorna PIN do usuário ativo ou None."""
     with _conn() as conn:
         row = conn.execute("SELECT pin FROM usuarios WHERE id = ? AND ativo = 1", (usuario_id,)).fetchone()
     return None if not row else row["pin"]
-
 
 def _inc_tentativa(usuario_id: int) -> int:
     """Incrementa contador de tentativas de PIN por usuário na sessão."""
@@ -220,13 +271,11 @@ def _inc_tentativa(usuario_id: int) -> int:
     st.session_state[key][usuario_id] = st.session_state[key].get(usuario_id, 0) + 1
     return st.session_state[key][usuario_id]
 
-
 def _reset_tentativas(usuario_id: int) -> None:
     """Zera tentativas de PIN para o usuário na sessão."""
     key = "pdv_pin_tentativas"
     if key in st.session_state and usuario_id in st.session_state[key]:
         st.session_state[key][usuario_id] = 0
-
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _entrada_date_bounds() -> Tuple[date, date]:
@@ -240,7 +289,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
             if not row or not row[0]:
                 return (today, today)
             from datetime import datetime
-
             dmin = datetime.strptime(row[0], "%Y-%m-%d").date()
             dmax = datetime.strptime(row[1], "%Y-%m-%d").date() if row[1] else today
             return (dmin, dmax)
@@ -253,7 +301,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
 def _fmt_moeda(v: float) -> str:
     """Formata número como moeda BR (R$)."""
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-
 
 def _gauge_percentual_zonas(
     titulo: str,
@@ -293,17 +340,12 @@ def _gauge_percentual_zonas(
     )
     if valor_label:
         fig.add_annotation(
-            x=0.5,
-            y=0.06,
-            xref="paper",
-            yref="paper",
+            x=0.5, y=0.06, xref="paper", yref="paper",
             text=f"<span style='font-size:12px;color:#B0BEC5'>{valor_label}</span>",
-            showarrow=False,
-            align="center",
+            showarrow=False, align="center",
         )
     fig.update_layout(margin=dict(l=10, r=10, t=40, b=10), height=260)
     return fig
-
 
 def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, acumulado: float) -> str:
     """Retorna HTML do card de metas (ouro/prata/bronze) para um período."""
@@ -317,7 +359,6 @@ def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, ac
             f"<td style='padding:10px 8px;color:#B0BEC5;text-align:right;'>{falta_txt}</td>"
             "</tr>"
         )
-
     return f"""
     <div style='border:1px solid #333; border-radius:12px; padding:12px; background-color:#121212;'>
       <div style='font-weight:700; color:#B0BEC5; margin-bottom:8px;'>📅 {titulo}</div>
@@ -430,18 +471,15 @@ def _metas_loja_gauges(ref_day: date) -> None:
     c1, c2, c3 = st.columns(3)
     c1.plotly_chart(
         _gauge_percentual_zonas("Meta do Dia", p_dia, bronze_pct, prata_pct, valor_label=_fmt_moeda(vendido_dia)),
-        use_container_width=True,
-        key=f"g_dia_{ym}_{ref_day}",
+        use_container_width=True, key=f"g_dia_{ym}_{ref_day}",
     )
     c2.plotly_chart(
         _gauge_percentual_zonas("Meta da Semana", p_sem, bronze_pct, prata_pct, valor_label=_fmt_moeda(vendido_sem)),
-        use_container_width=True,
-        key=f"g_sem_{ym}_{ref_day}",
+        use_container_width=True, key=f"g_sem_{ym}_{ref_day}",
     )
     c3.plotly_chart(
         _gauge_percentual_zonas("Meta do Mês", p_mes, bronze_pct, prata_pct, valor_label=_fmt_moeda(vendido_mes)),
-        use_container_width=True,
-        key=f"g_mes_{ym}_{ref_day}",
+        use_container_width=True, key=f"g_mes_{ym}_{ref_day}",
     )
 
     st.divider()
@@ -675,7 +713,6 @@ def main() -> None:
                 st.session_state.pop(k, None)
             st.session_state["pdv_flash_ok"] = "Venda cancelada."
             st.rerun()
-
 
 if __name__ == "__main__":
     main()
