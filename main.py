@@ -24,6 +24,7 @@ import inspect
 import os
 import pathlib
 import sqlite3
+import json
 import requests
 import streamlit as st
 
@@ -165,7 +166,7 @@ if _DEBUG:
 
 # -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
-#   -> agora retorna (caminho_banco, origem_label)
+#   -> retorna (caminho_banco, origem_label)
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
@@ -234,6 +235,46 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
+# --- Upload do DB para o Dropbox (manual e automático) ---
+def _dropbox_upload_db(local_path: str, remote_path: str, token: str) -> None:
+    if not token:
+        raise RuntimeError("Sem token do Dropbox configurado.")
+    if not os.path.exists(local_path):
+        raise FileNotFoundError(f"Arquivo não encontrado: {local_path}")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/octet-stream",
+        "Dropbox-API-Arg": json.dumps(
+            {"path": remote_path, "mode": "overwrite", "autorename": False, "mute": False, "strict_conflict": False}
+        ),
+    }
+    with open(local_path, "rb") as f:
+        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"Upload falhou: HTTP {r.status_code} — {r.text}")
+
+def _maybe_auto_upload_db(local_path: str, remote_path: str, token: str, origem: str) -> None:
+    """Se o arquivo local mudou desde o último run e origem=Dropbox, faz upload automático."""
+    if origem != "Dropbox" or not token:
+        return
+    try:
+        mtime = os.path.getmtime(local_path)
+    except Exception:
+        return
+    last = st.session_state.get("_db_last_mtime")
+    # Primeiro run: só memoriza
+    if last is None:
+        st.session_state["_db_last_mtime"] = mtime
+        return
+    # Mudou? sobe para o Dropbox
+    if mtime > last:
+        try:
+            _dropbox_upload_db(local_path, remote_path, token)
+            st.toast("☁️ DB sincronizado com o Dropbox.", icon="✅")
+            st.session_state["_db_last_mtime"] = mtime
+        except Exception as e:
+            st.warning(f"Falha ao sincronizar DB: {e}")
+
 # Flags efetivas: modo offline força token vazio
 _DROPBOX_DISABLED = _flag_dropbox_disable()
 _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
@@ -243,8 +284,25 @@ _effective_force = FORCE_DOWNLOAD_CFG
 # Recurso cacheado
 _caminho_banco, _db_origem = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# ---- Badge (agora determinístico pela origem retornada) ----
-st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
+# ---- Badge + botão de sincronização manual ----
+cols = st.columns([0.7, 0.3])
+with cols[0]:
+    st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
+with cols[1]:
+    if st.button("☁️ Enviar DB p/ Dropbox", help="Faz upload do arquivo local atual para o caminho do Dropbox configurado."):
+        try:
+            _dropbox_upload_db(_caminho_banco, _effective_path, _effective_token)
+            st.success("DB enviado para o Dropbox.")
+            # Atualiza o mtime memorizado após um upload manual
+            try:
+                st.session_state["_db_last_mtime"] = os.path.getmtime(_caminho_banco)
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"Falha ao enviar: {e}")
+
+# ---- Upload automático caso o DB tenha sido alterado no último run ----
+_maybe_auto_upload_db(_caminho_banco, _effective_path, _effective_token, _db_origem)
 
 # Garantias/infra mínimas
 try:
