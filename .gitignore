@@ -22,15 +22,13 @@ pip-wheel-metadata/
 venv/
 .env
 .env.*
+.streamlit/        # <-- secrets.toml fica fora do Git
 
 # --- OS/IDE ---
 .DS_Store
 Thumbs.db
 .vscode/
 .idea/
-
-# --- Streamlit ---
-.streamlit/
 
 # --- Logs ---
 *.log
