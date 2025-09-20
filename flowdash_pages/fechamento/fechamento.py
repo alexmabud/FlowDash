@@ -86,7 +86,6 @@ def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
         try:
             parsed = parsed.dt.tz_convert("America/Sao_Paulo")
         except Exception:
-            # se não conseguir converter o fuso, fica em UTC mesmo
             pass
         out.loc[mask_iso] = parsed.dt.tz_localize(None)
 
@@ -150,27 +149,28 @@ def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, fl
 
 
 # ================== Cálculos dos cartões do topo ==================
-def _dinheiro_e_pix_por_created_at(caminho_banco: str, data_sel: date) -> tuple[float, float]:
+def _dinheiro_e_pix_por_data(caminho_banco: str, data_sel: date) -> tuple[float, float]:
     """
-    Soma, no dia selecionado, o valor (preferência: 'Valor'; fallback para 'valor_liquido')
-    das entradas em DINHEIRO e PIX **filtrando pelo dia da venda (created_at)**.
+    Soma, no dia selecionado, o valor (prefere COALESCE(valor_liquido, Valor))
+    das entradas em DINHEIRO e PIX **filtrando por `entrada.Data`**.
     """
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0, 0.0
 
-    c_created = _find_col(df, [
-        "created_at", "criado_em", "data_criacao", "data_criação",
-        "data_hora", "datahora", "ts", "timestamp"
+    # Data da VENDA (não Data_Liq, não created_at)
+    c_data = _find_col(df, [
+        "Data", "data", "data_venda", "dataVenda", "data_lanc", "dataLanc", "data_emissao", "dataEmissao"
     ])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido", "valor_liq"])
+    # Preferir líquido quando existir (não afeta DINHEIRO/PIX direto; cobre PIX via maquineta)
+    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "Valor", "valor", "valor_total"])
 
-    if not (c_created and c_forma and c_val):
+    if not (c_data and c_forma and c_val):
         return 0.0, 0.0
 
-    df[c_created] = _parse_date_col(df, c_created)
-    df_day = df[df[c_created].dt.date == data_sel].copy()
+    df[c_data] = _parse_date_col(df, c_data)
+    df_day = df[df[c_data].dt.date == data_sel].copy()
     if df_day.empty:
         return 0.0, 0.0
 
@@ -182,30 +182,32 @@ def _dinheiro_e_pix_por_created_at(caminho_banco: str, data_sel: date) -> tuple[
     return round(total_dinheiro, 2), round(total_pix, 2)
 
 
-def _cartao_d1_liquido_por_data(caminho_banco: str, data_sel: date) -> float:
+def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_sel: date) -> float:
     """
     Soma, no dia selecionado, o **valor líquido** das entradas em
-    DÉBITO/CRÉDITO/LINK_PAGAMENTO **filtrando pela coluna contábil `Data`**.
-    (Ou seja, o que *caiu hoje*.)
+    DÉBITO/CRÉDITO/LINK_PAGAMENTO **filtrando por `entrada.Data_Liq`**
+    (ou seja, o que *caiu hoje*).
     """
     df = _carregar_tabela(caminho_banco, "entrada")
     if df.empty:
         return 0.0
 
-    c_data = _find_col(df, ["data", "data_liq", "data_liquidacao", "data_liquidação", "dt"])
+    # Aqui precisamos EXPLICITAMENTE da coluna de liquidação
+    c_data_liq = _find_col(df, ["Data_Liq", "data_liq", "data_liquidacao", "data_liquidação", "dt_liq", "data_liquid"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "valor", "valor_total"])
-    if not (c_data and c_forma and c_val):
+    c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "Valor", "valor_total", "valor"])
+
+    if not (c_data_liq and c_forma and c_val):
         return 0.0
 
-    df[c_data] = _parse_date_col(df, c_data)
-    df_day = df[df[c_data].dt.date == data_sel].copy()
+    df[c_data_liq] = _parse_date_col(df, c_data_liq)
+    df_day = df[df[c_data_liq].dt.date == data_sel].copy()
     if df_day.empty:
         return 0.0
 
     formas = df_day[c_forma].astype(str).str.upper().str.strip()
     vals = pd.to_numeric(df_day[c_val], errors="coerce").fillna(0.0)
-    is_cartao = formas.isin(["DEBITO", "DÉBITO", "CREDITO", "CRÉDITO", "LINK_PAGAMENTO", "LINK PAGAMENTO"])
+    is_cartao = formas.isin(["DEBITO", "DÉBITO", "CREDITO", "CRÉDITO", "LINK_PAGAMENTO", "LINK PAGAMENTO", "LINK-DE-PAGAMENTO", "LINK DE PAGAMENTO"])
     return float(vals[is_cartao].sum())
 
 
@@ -367,11 +369,11 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     data_ref = str(data_sel)
 
     # --- Cartões do topo ---
-    # Amarelo (created_at): vendas feitas hoje
-    valor_dinheiro, valor_pix = _dinheiro_e_pix_por_created_at(caminho_banco, data_sel)
-    # Roxo (Data): liquidação de cartão que caiu hoje
-    total_cartao_liquido = _cartao_d1_liquido_por_data(caminho_banco, data_sel)
-    # Vermelho: soma dos dois
+    # Dinheiro/PIX (por entrada.Data) — valores que entraram hoje (venda do dia)
+    valor_dinheiro, valor_pix = _dinheiro_e_pix_por_data(caminho_banco, data_sel)
+    # Cartão D-1 (por entrada.Data_Liq) — liquidações que caíram hoje
+    total_cartao_liquido = _cartao_d1_liquido_por_data_liq(caminho_banco, data_sel)
+    # Entradas do dia (consolidadas)
     entradas_total_dia = float(valor_dinheiro + valor_pix + total_cartao_liquido)
 
     # Caixa e Bancos (somatórios até a data)
@@ -474,7 +476,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                         float(b1), float(b2), float(b3), float(b4),  # legado
                         float(soma_caixa_total),
                         float(soma_caixa2_total),
-                        float(entradas_total_dia),   # Dinheiro+Pix(created_at)+Cartão D-1(Data)
+                        float(entradas_total_dia),   # Dinheiro+Pix(Data) + Cartão D-1(Data_Liq)
                         float(saidas_total_dia),
                         float(corr_dia),
                         float(saldo_total),  # esperado

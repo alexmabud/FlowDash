@@ -5,9 +5,9 @@ Resumo
 Consulta o SQLite e calcula os dados do resumo do dia (vendas, saídas, saldos,
 transferências e mercadorias).
 
-Regra de VENDAS (pedido):
-- Soma SOMENTE vendas cujo **created_at** pertence ao dia selecionado.
-- Não usa Data/Data_Venda para o card Vendas.
+Regra de VENDAS (atualizado):
+- Soma SOMENTE vendas cujo **DATE(Data)** = dia selecionado (data da VENDA).
+- Não usa created_at para o card Vendas.
 - Formas consideradas "venda": DINHEIRO, PIX, DÉBITO, CRÉDITO, LINK_PAGAMENTO (e variações).
 
 Demais cartões permanecem como antes:
@@ -34,10 +34,10 @@ _FORMAS_VENDA = {
 }
 
 
-def _total_vendas_por_created_at(conn, data_str: str) -> float:
+def _total_vendas_por_data(conn, data_str: str) -> float:
     """
-    Soma entrada.Valor das vendas do dia, filtrando EXCLUSIVAMENTE por created_at (AAAA-MM-DD).
-    Se created_at estiver vazio/NULL, a linha NÃO entra no total.
+    Soma entrada.Valor das vendas do dia, filtrando por **Data** (AAAA-MM-DD).
+    Linhas com Data vazia/NULL não entram no total.
     """
     try:
         formas = tuple(_FORMAS_VENDA)
@@ -46,9 +46,9 @@ def _total_vendas_por_created_at(conn, data_str: str) -> float:
             SELECT COALESCE(SUM(CAST(Valor AS REAL)), 0.0)
               FROM entrada
              WHERE UPPER(COALESCE(Forma_de_Pagamento,'')) IN ({placeholders})
-               AND created_at IS NOT NULL
-               AND TRIM(created_at) <> ''
-               AND DATE(SUBSTR(created_at, 1, 10)) = DATE(?)
+               AND Data IS NOT NULL
+               AND TRIM(Data) <> ''
+               AND DATE(Data) = DATE(?)
         """
         cur = conn.execute(sql, list(formas) + [data_str])
         val = cur.fetchone()[0]
@@ -63,7 +63,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
     Carrega totais e listas do dia selecionado.
 
     Agrega:
-      - total_vendas: SOMENTE created_at (dia da venda real)
+      - total_vendas: **Data** (dia da VENDA)
       - total_saidas: soma de `saida.valor` (DATE(data) = dia)
       - caixa_total/caixa2_total: **somatório acumulado** <= data (tabela `saldos_caixas`)
       - saldos_bancos: soma acumulada por banco <= data (tabela `saldos_bancos`)
@@ -89,8 +89,8 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
     with get_conn(caminho_banco) as conn:
         cur = conn.cursor()
 
-        # ===== VENDAS do dia: SOMENTE created_at =====
-        total_vendas = _total_vendas_por_created_at(conn, data_str)
+        # ===== VENDAS do dia: por Data =====
+        total_vendas = _total_vendas_por_data(conn, data_str)
 
         # ===== SAÍDAS do dia =====
         total_saidas = float(
