@@ -45,3 +45,4 @@ data/**
 # (Extra) Se houver regra global para *.db, garante o template:
 *.db
 !data/flowdash_template.db
+.streamlit/secrets.toml
