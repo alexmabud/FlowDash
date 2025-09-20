@@ -21,7 +21,7 @@ import os
 import pathlib
 import sqlite3
 import streamlit as st
-import requests  # <- adicionado para probe no expander
+import requests  # diagnóstico opcional no expander
 
 from auth.auth import (
     validar_login,
@@ -78,31 +78,36 @@ def _safe_get_secrets(section: str) -> dict:
         return {}
 
 # -----------------------------------------------------------------------------
+# Ler SECRETS/ENVs fora do cache (servem de chave para invalidar)
+# -----------------------------------------------------------------------------
+_dbx_cfg = _safe_get_secrets("dropbox")
+_ACCESS_TOKEN = (
+    (_dbx_cfg.get("access_token") or "").strip()
+    or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
+)
+_DROPBOX_PATH = (
+    (_dbx_cfg.get("file_path") or "").strip()
+    or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
+)
+_FORCE_DOWNLOAD = (
+    (str(_dbx_cfg.get("force_download", "0")).strip() == "1")
+    or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0").strip() == "1")
+)
+
+# -----------------------------------------------------------------------------
 # Banco: Dropbox TOKEN -> Local; sem template obrigatório
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
-def ensure_db_available() -> str:
+def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool) -> str:
     """
-    1) Se houver TOKEN do Dropbox (secrets/env) e file_path: baixa via API para data/flowdash_data.db.
+    1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db.
     2) Se download falhar ou não houver token/caminho: usa DB local se válido.
     3) Caso contrário: erro explícito.
+
+    OBS: receber (access_token, dropbox_path, force_download) como parâmetros garante
+    que mudanças nos Secrets invalidem o cache no Streamlit Cloud.
     """
     db_local = _db_local_path()
-
-    # 1) Secrets/env
-    dbx_cfg = _safe_get_secrets("dropbox")
-    access_token = (
-        (dbx_cfg.get("access_token") or "").strip()
-        or os.getenv("FLOWDASH_DBX_TOKEN", "").strip()
-    )
-    dropbox_path = (
-        (dbx_cfg.get("file_path") or "").strip()
-        or os.getenv("FLOWDASH_DBX_FILE", "/FlowDash/data/flowdash_data.db").strip()
-    )
-    force_download = (
-        (str(dbx_cfg.get("force_download", "0")).strip() == "1")
-        or (os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", "0").strip() == "1")
-    )
 
     if access_token and dropbox_path:
         try:
@@ -122,7 +127,6 @@ def ensure_db_available() -> str:
                 st.warning("Banco baixado via token parece inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {_debug_file_info(candidate)}")
         except Exception as e:
-            # Mostra erro completo (status/JSON) vindo do loader
             st.warning(f"Falha ao baixar via token do Dropbox: {e}")
 
     # 2) Local
@@ -142,7 +146,7 @@ def ensure_db_available() -> str:
     st.stop()
 
 # Caminho do banco (garantido ou interrompe)
-caminho_banco = ensure_db_available()
+caminho_banco = ensure_db_available(_ACCESS_TOKEN, _DROPBOX_PATH, _FORCE_DOWNLOAD)
 
 # INFO de origem do banco
 st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** → `{caminho_banco}`")
@@ -150,23 +154,22 @@ st.caption(f"🗃️ Banco em uso: **{st.session_state.get('db_source', '?')}** 
 # Painel de diagnóstico (temporário) — ajuda a debugar no Cloud
 with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=False):
     try:
-        sec = st.secrets.get("dropbox", {})
-        token = (sec.get("access_token") or os.getenv("FLOWDASH_DBX_TOKEN") or "")
-        filep = (sec.get("file_path")     or os.getenv("FLOWDASH_DBX_FILE") or "")
-        force = (str(sec.get("force_download", "")) or os.getenv("FLOWDASH_FORCE_DB_DOWNLOAD", ""))
+        token = _ACCESS_TOKEN
+        filep = _DROPBOX_PATH
+        force = "1" if _FORCE_DOWNLOAD else "0"
 
         def _mask(s: str, keep: int = 6) -> str:
             s = str(s or "")
             return (s[:keep] + "…" + s[-4:]) if len(s) > keep + 4 else s
 
-        st.write("Tem seção [dropbox] nos Secrets?", isinstance(sec, dict) and bool(sec))
+        st.write("Tem seção [dropbox] nos Secrets?", bool(_dbx_cfg))
         st.write("access_token (mascarado):", _mask(token))
         st.write("file_path:", filep)
         st.write("force_download:", force)
         st.write("Fonte atual do banco:", st.session_state.get("db_source"))
         st.write("Caminho local em uso:", caminho_banco)
 
-        # ---- PROBE: testa se o path existe no Dropbox via get_metadata ----
+        # Probe opcional: testa se o path existe no Dropbox via get_metadata
         if st.button("Testar path no Dropbox (get_metadata)"):
             try:
                 url = "https://api.dropboxapi.com/2/files/get_metadata"
@@ -204,9 +207,7 @@ def _call_page(module_path: str):
 
     def _invoke(fn):
         sig = inspect.signature(fn)
-        args = []
-        kwargs = {}
-
+        args, kwargs = [], {}
         ss = st.session_state
         usuario_logado = ss.get("usuario_logado")
         known = {
@@ -217,12 +218,8 @@ def _call_page(module_path: str):
             "ir_para_formulario": ss.get("ir_para_formulario"),
             "caminho_banco": caminho_banco,
         }
-
         for p in sig.parameters.values():
-            name = p.name
-            kind = p.kind
-            has_default = (p.default is not inspect._empty)
-
+            name, kind, has_default = p.name, p.kind, (p.default is not inspect._empty)
             if name == "caminho_banco":
                 value = caminho_banco
             elif name in known:
@@ -231,21 +228,17 @@ def _call_page(module_path: str):
                 value = ss[name]
             else:
                 value = None
-
             should_pass = (not has_default) or (value is not None)
-
             if should_pass:
                 if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
                     args.append(value)
                 else:
                     kwargs[name] = value
-
         return fn(*args, **kwargs)
 
     seg = module_path.rsplit(".", 1)[-1]
     parent = module_path.rsplit(".", 2)[-2] if "." in module_path else ""
     tail = seg.split("_", 1)[-1] if "_" in seg else seg
-
     candidates = [
         "render", "page", "main", "pagina", "show", "pagina_fechamento_caixa",
         f"render_{tail}", "render_page", f"render_{seg}", f"render_{parent}",
@@ -263,7 +256,6 @@ def _call_page(module_path: str):
             except Exception as e:
                 st.error(f"Erro ao executar {module_path}.{fn_name}: {e}")
                 return
-
     for prefix in ("pagina_", "render_"):
         for name, obj in vars(mod).items():
             if callable(obj) and name.startswith(prefix):
@@ -272,7 +264,6 @@ def _call_page(module_path: str):
                 except Exception as e:
                     st.error(f"Erro ao executar {module_path}.{name}: {e}")
                     return
-
     st.warning(f"O módulo '{module_path}' não possui função compatível (render/page/main/pagina*/show).")
 
 # -----------------------------------------------------------------------------
