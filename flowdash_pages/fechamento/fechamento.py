@@ -67,14 +67,40 @@ def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return None
 
 
-# ========= Parse de datas (determinístico) =========
+# ========= Parse de datas (sem warnings) =========
 def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
-    """Converte coluna de data tentando ISO (YYYY-MM-DD) e depois BR (dayfirst=True)."""
-    iso = pd.to_datetime(df[col], format="%Y-%m-%d", errors="coerce")
-    if iso.notna().all():
-        return iso
-    br = pd.to_datetime(df[col], dayfirst=True, errors="coerce")
-    return iso.fillna(br)
+    """
+    Converte a coluna de data lidando com:
+      1) ISO 8601 com 'T' e fuso (Z ou ±hh:mm)  -> parse com utc=True, sem dayfirst
+      2) ISO simples YYYY-MM-DD                 -> format explícito
+      3) Restante (ex. dd/mm/yyyy)              -> dayfirst=True
+    Evita .fillna em datetime para não disparar FutureWarning.
+    """
+    s = df[col].astype(str)
+    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    # 1) ISO com 'T' (e.g., 2025-09-20T12:34:56-03:00)
+    mask_iso = s.str.contains("T", na=False)
+    if mask_iso.any():
+        parsed = pd.to_datetime(s[mask_iso], utc=True, errors="coerce")
+        try:
+            parsed = parsed.dt.tz_convert("America/Sao_Paulo")
+        except Exception:
+            # se não conseguir converter o fuso, fica em UTC mesmo
+            pass
+        out.loc[mask_iso] = parsed.dt.tz_localize(None)
+
+    # 2) ISO simples YYYY-MM-DD
+    mask_ymd = (~mask_iso) & s.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
+    if mask_ymd.any():
+        out.loc[mask_ymd] = pd.to_datetime(s[mask_ymd], format="%Y-%m-%d", errors="coerce")
+
+    # 3) Restante (provável dd/mm/yyyy etc.)
+    rest = out.isna()
+    if rest.any():
+        out.loc[rest] = pd.to_datetime(s[rest], dayfirst=True, errors="coerce")
+
+    return out
 
 
 # ================== Consultas auxiliares (legado para salvar) ==================
@@ -138,7 +164,6 @@ def _dinheiro_e_pix_por_created_at(caminho_banco: str, data_sel: date) -> tuple[
         "data_hora", "datahora", "ts", "timestamp"
     ])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    # preferência: bruto; fallback: líquido
     c_val = _find_col(df, ["valor", "valor_total", "valor_liquido", "valorLiquido", "valor_liq"])
 
     if not (c_created and c_forma and c_val):
@@ -169,7 +194,6 @@ def _cartao_d1_liquido_por_data(caminho_banco: str, data_sel: date) -> float:
 
     c_data = _find_col(df, ["data", "data_liq", "data_liquidacao", "data_liquidação", "dt"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    # preferência: líquido; fallback: bruto
     c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "valor", "valor_total"])
     if not (c_data and c_forma and c_val):
         return 0.0
@@ -450,7 +474,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                         float(b1), float(b2), float(b3), float(b4),  # legado
                         float(soma_caixa_total),
                         float(soma_caixa2_total),
-                        float(entradas_total_dia),   # **agora é Dinheiro+Pix(created_at)+CartãoD-1(Data)**
+                        float(entradas_total_dia),   # Dinheiro+Pix(created_at)+Cartão D-1(Data)
                         float(saidas_total_dia),
                         float(corr_dia),
                         float(saldo_total),  # esperado
