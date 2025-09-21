@@ -37,11 +37,13 @@ import streamlit as st
 from utils.pin_utils import validar_pin
 
 # ---------------------------------------------------------------------------
-# Bootstrap do BD via Dropbox (TOKEN) — alinhado ao main.py + sync automático
+# Bootstrap do BD via Dropbox — agora com refresh token (SDK) + sync automático
 # ---------------------------------------------------------------------------
 import pathlib
 from shared.db_from_dropbox_api import ensure_local_db_api
 from shared.dropbox_config import load_dropbox_settings, mask_token
+from shared.dbx_io import enviar_db_local, baixar_db_para_local   # PUSH e bootstrap com refresh token
+from shared.dropbox_client import get_dbx, download_bytes         # PULL com refresh token (SDK)
 
 _CURR_DIR = pathlib.Path(__file__).resolve().parent
 if str(_CURR_DIR) not in sys.path:
@@ -105,7 +107,7 @@ DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
 FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
 
-# ---------- PROBES de diagnóstico (iguais ao Main) ----------
+# ---------- PROBES de diagnóstico (legado: úteis para ver token curto) ----------
 def _probe_current_account(token: str) -> str:
     if not token:
         return "Sem token carregado (secrets/env)."
@@ -127,7 +129,7 @@ def _probe_get_metadata(token: str, path: str) -> str:
     except Exception as e:
         return f"(erro: {e})"
 
-# ---------- Diagnóstico visual (com botão) ----------
+# ---------- Diagnóstico visual ----------
 if _DEBUG:
     with st.expander("🔎 Diagnóstico Dropbox (PDV)", expanded=True):
         try:
@@ -150,14 +152,14 @@ if _DEBUG:
 
             if run:
                 st.session_state["_dbg_dropbox_pdv_ran"] = True
-                st.markdown("**users/get_current_account**")
+                st.markdown("**users/get_current_account (token curto, se existir)**")
                 st.code(_probe_current_account(ACCESS_TOKEN_CFG))
-                st.markdown("**files/get_metadata**")
+                st.markdown("**files/get_metadata (token curto, se existir)**")
                 st.code(_probe_get_metadata(ACCESS_TOKEN_CFG, DROPBOX_PATH_CFG))
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox (PDV): {e}")
 
-# ------------- Dropbox helpers (metadata / download / upload) -------------
+# ------------- helpers de data/horário -------------
 def _parse_dt(dt_str: str) -> float:
     try:
         if dt_str.endswith("Z"):
@@ -166,70 +168,20 @@ def _parse_dt(dt_str: str) -> float:
     except Exception:
         return 0.0
 
-def _dropbox_get_metadata(token: str, remote_path: str) -> Optional[dict]:
-    if not token or not remote_path:
-        return None
-    try:
-        r = requests.post(
-            "https://api.dropboxapi.com/2/files/get_metadata",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"path": remote_path},
-            timeout=30,
-        )
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        return {
-            "rev": j.get("rev"),
-            "server_modified": j.get("server_modified"),
-            "server_ts": _parse_dt(j.get("server_modified", "")),
-            "size": j.get("size"),
-        }
-    except Exception:
-        return None
-
-def _dropbox_download(token: str, remote_path: str, dest_path: str) -> str:
-    headers = {"Authorization": f"Bearer {token}", "Dropbox-API-Arg": json.dumps({"path": remote_path})}
-    url = "https://content.dropboxapi.com/2/files/download"
-    tmp = dest_path + ".tmp"
-    with requests.post(url, headers=headers, stream=True, timeout=60) as r:
-        r.raise_for_status()
-        with open(tmp, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 256):
-                if chunk:
-                    f.write(chunk)
-    shutil.move(tmp, dest_path)  # swap atômico
-    return dest_path
-
-def _dropbox_upload(token: str, remote_path: str, local_path: str) -> dict:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": json.dumps(
-            {"path": remote_path, "mode": "overwrite", "autorename": False, "mute": False, "strict_conflict": False}
-        ),
-    }
-    with open(local_path, "rb") as f:
-        r = requests.post("https://content.dropboxapi.com/2/files/upload", headers=headers, data=f, timeout=60)
-    if r.status_code != 200:
-        # Erro mais claro (exibe corpo retornado pelo Dropbox)
-        raise RuntimeError(f"upload failed: HTTP {r.status_code} — {r.text}")
-    return r.json()
-
-# ------------- ensure db disponível (igual ao main, retorno determinístico) -------------
+# ------------- ensure db disponível (Dropbox -> Local) -------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
     """
-    1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db.
-    2) Se download falhar ou não houver token/caminho: usa DB local se válido.
-    3) Caso contrário: erro explícito.
+    1) Se houver access_token + file_path: baixa via API (legado) p/ data/flowdash_data.db.
+    2) Se não houver access_token, tenta bootstrap pelo refresh token (SDK) via baixar_db_para_local().
+    3) Se ainda falhar, usa DB local se válido; senão, erro claro.
 
     Retorna:
         (caminho_do_banco: str, origem: str)  # {"Dropbox", "Local"}
     """
     db_local = _db_local_path()
 
-    # 1) Dropbox
+    # 1) caminho legado (token curto)
     if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
@@ -247,12 +199,25 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate), "Dropbox"
             else:
-                st.warning("PDV: banco baixado via token parece inválido (ou sem tabela 'usuarios').")
+                st.warning("PDV: banco baixado via token (legado) parece inválido (ou sem tabela 'usuarios').")
                 st.caption(f"Debug: {_debug_file_info(candidate)}")
         except Exception as e:
-            st.warning(f"PDV: falha ao baixar via token do Dropbox: {e}")
+            st.warning(f"PDV: falha ao baixar via token (legado) do Dropbox: {e}")
 
-    # 2) Local
+    # 2) bootstrap via refresh token (SDK)
+    try:
+        candidate_path = baixar_db_para_local()
+        candidate = pathlib.Path(candidate_path)
+        if candidate.exists() and candidate.stat().st_size > 0 and _is_sqlite(candidate) and _has_table(candidate, "usuarios"):
+            st.session_state["db_mode"] = "online"
+            st.session_state["db_origem"] = "Dropbox"
+            st.session_state["db_path"] = str(candidate)
+            os.environ["FLOWDASH_DB"] = str(candidate)
+            return str(candidate), "Dropbox"
+    except Exception:
+        pass  # segue para o local
+
+    # 3) Local
     if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
         st.session_state["db_mode"] = "local"
         st.session_state["db_origem"] = "Local"
@@ -260,11 +225,11 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local), "Local"
 
-    # 3) Erro
+    # 4) Erro
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido para o PDV.\n\n"
-        "- Garanta um token **válido** (users/get_current_account = HTTP 200) em Secrets/ENVs, e `file_path` correto; ou\n"
+        "- Garanta credenciais **válidas** no Dropbox (refresh_token/app_key/app_secret) e `file_path` correto; ou\n"
         "- Coloque manualmente um SQLite válido em `data/flowdash_data.db` com a tabela 'usuarios'.\n"
         f"- Debug local: {info}"
     )
@@ -279,33 +244,53 @@ _effective_force = FORCE_DOWNLOAD_CFG
 DB_PATH, DB_ORIG = ensure_db_available(_effective_token, _effective_path, _effective_force)
 st.session_state.setdefault("caminho_banco", DB_PATH)
 
-# ---- Sync automático: PULL antes de usar; PUSH quando arquivo mudar ----
+# ---- Sync automático com refresh token ----
 def _auto_pull_if_remote_newer():
-    """Se houver versão remota mais nova no Dropbox, baixa e troca o arquivo local (last-writer-wins)."""
-    if DB_ORIG != "Dropbox" or not _effective_token:
+    """
+    Se houver versão remota mais nova no Dropbox, baixa e troca o arquivo local (last-writer-wins).
+    Usa SDK (refresh token) — sem token curto/requests.
+    """
+    if DB_ORIG != "Dropbox" or _DROPBOX_DISABLED:
         return
-    meta = _dropbox_get_metadata(_effective_token, _effective_path)
-    if not meta:
+
+    try:
+        dbx = get_dbx()
+    except Exception as e:
+        st.warning(f"PDV: não foi possível autenticar no Dropbox (refresh): {e}")
         return
-    remote_ts = float(meta.get("server_ts") or 0.0)
-    local_ts = 0.0
+
+    # metadata e comparação de timestamps
+    try:
+        meta = dbx.files_get_metadata(_effective_path)
+        remote_ts = meta.server_modified.replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return
+
     try:
         local_ts = os.path.getmtime(DB_PATH)
     except Exception:
-        pass
+        local_ts = 0.0
+
     last_pull = float(st.session_state.get("_pdv_db_last_pull_ts") or 0.0)
     if remote_ts > max(local_ts, last_pull):
         try:
-            _dropbox_download(_effective_token, _effective_path, DB_PATH)
+            data = download_bytes(dbx, _effective_path)
+            tmp = DB_PATH + ".tmp"
+            with open(tmp, "wb") as f:
+                f.write(data)
+            shutil.move(tmp, DB_PATH)
             st.session_state["_pdv_db_last_pull_ts"] = remote_ts
             st.toast("☁️ PDV: banco atualizado do Dropbox.", icon="🔄")
-            st.cache_data.clear()  # limpa caches para refletir o novo arquivo imediatamente
+            st.cache_data.clear()
         except Exception as e:
-            st.warning(f"PDV: não foi possível baixar DB remoto: {e}")
+            st.warning(f"PDV: não foi possível baixar DB remoto (refresh): {e}")
 
 def _auto_push_if_local_changed():
-    """Se o .db local mudou desde o último push, envia para o Dropbox."""
-    if DB_ORIG != "Dropbox" or not _effective_token:
+    """
+    Se o .db local mudou desde o último push, envia para o Dropbox.
+    Usa SDK (refresh token) via shared.dbx_io.enviar_db_local().
+    """
+    if DB_ORIG != "Dropbox" or _DROPBOX_DISABLED:
         return
     try:
         mtime = os.path.getmtime(DB_PATH)
@@ -314,16 +299,16 @@ def _auto_push_if_local_changed():
     last_sent = float(st.session_state.get("_pdv_db_last_push_ts") or 0.0)
     if mtime > (last_sent + 0.1):
         try:
-            _dropbox_upload(_effective_token, _effective_path, DB_PATH)
+            enviar_db_local()  # refresh token (SDK)
             st.session_state["_pdv_db_last_push_ts"] = mtime
             st.toast("☁️ PDV: banco sincronizado com o Dropbox.", icon="✅")
         except Exception as e:
-            st.warning(f"PDV: falha ao enviar DB ao Dropbox: {e}")
+            st.warning(f"PDV: falha ao enviar DB ao Dropbox (refresh): {e}")
 
 # Executa PULL antes de abrir conexões/consultas
 _auto_pull_if_remote_newer()
 
-# Badge igual ao main
+# Badge
 st.caption(f"🗃️ Banco em uso: **{DB_ORIG}**")
 
 # ---------------------------------------------------------------------------
@@ -397,8 +382,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
     today = date.today()
     try:
         with _conn() as conn:
-            if not _table_exists(conn, "entrada"):
-                return (today, today)
             row = conn.execute("SELECT MIN(date(Data)), MAX(date(Data)) FROM entrada").fetchone()
             if not row or not row[0]:
                 return (today, today)
@@ -500,52 +483,28 @@ def _metas_loja_gauges(ref_day: date) -> None:
     ym = f"{ref_day.year:04d}-{ref_day.month:02d}"
     inicio_sem = _inicio_semana(ref_day)
     inicio_mes = ref_day.replace(day=1)
-    dow_col = _col_dow(ref_day)
 
     meta_mensal = 0.0
     perc_prata = 87.5
     perc_bronze = 75.0
     perc_semanal = 25.0
-    perc_dow = None
 
     with _conn() as conn:
-        if _table_exists(conn, "metas"):
-            cols = [r[1] for r in conn.execute("PRAGMA table_info('metas')")]
-            has_mes = any(c.lower() == "mes" for c in cols)
-            sql = (
-                "SELECT meta_mensal, COALESCE(perc_prata,87.5), COALESCE(perc_bronze,75.0), "
-                "COALESCE(perc_semanal,25.0) FROM metas "
-                + ("WHERE mes=? " if has_mes else "")
-                + "ORDER BY rowid DESC LIMIT 1"
-            )
-            row = conn.execute(sql, (ym,) if has_mes else ()).fetchone()
+        # metas (se existir)
+        try:
+            row = conn.execute(
+                "SELECT meta_mensal, COALESCE(perc_prata,87.5), COALESCE(perc_bronze,75.0), COALESCE(perc_semanal,25.0) "
+                "FROM metas ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
             if row:
                 meta_mensal = float(row[0] or 0.0)
                 perc_prata = float(row[1] or 87.5)
                 perc_bronze = float(row[2] or 75.0)
                 perc_semanal = float(row[3] or 25.0)
+        except Exception:
+            pass
 
-            col_map = {
-                "segunda": "perc_segunda",
-                "terca": "perc_terca",
-                "quarta": "perc_quarta",
-                "quinta": "perc_quinta",
-                "sexta": "perc_sexta",
-                "sabado": "perc_sabado",
-                "domingo": "perc_domingo",
-            }
-            perc_col = col_map.get(dow_col, "")
-            lower_cols = [c.lower() for c in cols]
-            if perc_col and perc_col.lower() in lower_cols:
-                perc_dow = float(
-                    conn.execute(f"SELECT COALESCE({perc_col}, 0.0) FROM metas ORDER BY rowid DESC LIMIT 1").fetchone()[0]
-                    or 0.0
-                )
-
-        if not _table_exists(conn, "entrada"):
-            st.error("Tabela `entrada` não encontrada.")
-            return
-
+        # vendas
         def sum_between(d1: date, d2: date) -> float:
             return float(
                 conn.execute(
@@ -565,7 +524,7 @@ def _metas_loja_gauges(ref_day: date) -> None:
         vendido_mes = sum_between(inicio_mes, ref_day)
 
     meta_sem = meta_mensal * (perc_semanal / 100.0) if meta_mensal > 0 else 0.0
-    meta_dia = (meta_sem / 7.0) if not perc_dow or perc_dow <= 0 else (meta_sem * (perc_dow) / 100.0)
+    meta_dia = (meta_sem / 7.0)
 
     ouro_m, prata_m, bronze_m = meta_mensal, meta_mensal * (perc_prata / 100.0), meta_mensal * (perc_bronze / 100.0)
     ouro_s, prata_s, bronze_s = meta_sem, meta_sem * (perc_prata / 100.0), meta_sem * (perc_bronze / 100.0)
