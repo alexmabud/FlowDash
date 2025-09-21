@@ -5,24 +5,22 @@ FlowDash — Main App
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 
 Política do banco:
-  1) Tentar baixar via TOKEN do Dropbox (API) usando secrets/env:
-       [dropbox]
-       access_token   = "sl.ABC...SEU_TOKEN..."
-       file_path      = "/FlowDash/data/flowdash_data.db"
-       force_download = "0"
-  2) (NOVO) Se não houver access_token ou falhar, tentar **bootstrap por refresh token**
-     usando o SDK (shared.dbx_io.baixar_db_para_local()).
-  3) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
-  4) Se nada der certo, exibir erro claro.
-
-Flags úteis (produção x debug):
-  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"     -> mostra diagnóstico
-  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"  -> ignora Dropbox (força DB local)
+  1) Baixar via refresh_token (SDK) — shared.dbx_io.baixar_db_para_local()
+     (se force_download="1", baixa sempre)
+  2) (Legado opcional) Se houver access_token curto, ainda tentamos uma
+     primeira cópia com shared.db_from_dropbox_api.ensure_local_db_api()
+     — útil apenas para debug/migração.
+  3) Se falhar, usa o DB local 'data/flowdash_data.db' (com tabela 'usuarios').
+  4) Se nada der certo, erro claro.
 
 Sincronização automática
-  - Pull: antes de usar, se no Dropbox existir uma versão mais nova, baixa e troca o arquivo local (SDK com refresh).
-  - Push: ao final do ciclo, se o arquivo local mudou, envia para o Dropbox (SDK com refresh).
-  - Estratégia: last-writer-wins.
+  - Pull: antes de usar, compara com remoto (SDK). Se `force_download="1"`,
+    força o download. Estratégia last-writer-wins.
+  - Push: ao final do ciclo, se o arquivo local mudou, envia (SDK).
+
+Flags úteis:
+  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"
+  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"
 """
 from __future__ import annotations
 
@@ -31,11 +29,10 @@ import inspect
 import os
 import pathlib
 import sqlite3
-import json
 import shutil
-import requests
 from datetime import datetime, timezone
 
+import requests
 import streamlit as st
 
 from auth.auth import (
@@ -46,15 +43,15 @@ from auth.auth import (
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas
 
-# Legado: download inicial com access_token curto (se existir)
+# Legado (opcional, só para bootstrap com access_token curto)
 from shared.db_from_dropbox_api import ensure_local_db_api
 
-# Config/mascara de token
+# Config
 from shared.dropbox_config import load_dropbox_settings, mask_token
 
-# NOVO: SDK com refresh token (pull/push/boot)
+# NOVO: SDK com refresh token (pull/push)
 from shared.dbx_io import enviar_db_local, baixar_db_para_local
-from shared.dropbox_client import get_dbx, download_bytes
+from shared.dropbox_client import get_dbx  # para ler metadata (SDK)
 
 # -----------------------------------------------------------------------------
 # Config
@@ -98,7 +95,6 @@ def _db_local_path() -> pathlib.Path:
     return p
 
 def _flag_debug() -> bool:
-    # DEBUG via env ou secrets
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if str(sec.get("debug", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
@@ -108,7 +104,6 @@ def _flag_debug() -> bool:
     return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 def _flag_dropbox_disable() -> bool:
-    # OFFLINE (ignorar Dropbox) via env ou secrets
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if str(sec.get("disable", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
@@ -125,7 +120,7 @@ _cfg = load_dropbox_settings(prefer_env_first=True)
 
 ACCESS_TOKEN_CFG = _cfg.get("access_token") or ""
 DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
-FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
+FORCE_DOWNLOAD_CFG = str(_cfg.get("force_download", "0")).strip() in {"1", "true", "yes", "on"}
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
 
 if _DEBUG:
@@ -145,7 +140,7 @@ if _DEBUG:
 
             col1, col2 = st.columns(2)
             with col1:
-                if st.button("Validar token (users/get_current_account)"):
+                if st.button("Validar token (users/get_current_account) [LEGADO]"):
                     if not ACCESS_TOKEN_CFG:
                         st.error("Sem token carregado (secrets/env).")
                     else:
@@ -160,7 +155,7 @@ if _DEBUG:
                         except Exception as e:
                             st.error(f"Erro na validação: {e}")
             with col2:
-                if st.button("Testar path no Dropbox (files/get_metadata)"):
+                if st.button("Testar path (files/get_metadata) [LEGADO]"):
                     if not ACCESS_TOKEN_CFG:
                         st.error("Sem token carregado (secrets/env).")
                     else:
@@ -183,56 +178,43 @@ if _DEBUG:
             st.warning(f"Falha lendo config Dropbox: {e}")
 
 # -----------------------------------------------------------------------------
-# Helpers HTTP (legado) — mantidos apenas para debug
-# -----------------------------------------------------------------------------
-def _parse_dt(dt_str: str) -> float:
-    try:
-        if dt_str.endswith("Z"):
-            return datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()
-        return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).timestamp()
-    except Exception:
-        return 0.0
-
-def _dropbox_get_metadata(token: str, remote_path: str):
-    """LEGADO: usado só no diagnóstico; fluxo normal usa SDK com refresh."""
-    if not token or not remote_path:
-        return None
-    try:
-        r = requests.post(
-            "https://api.dropboxapi.com/2/files/get_metadata",
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={"path": remote_path},
-            timeout=30,
-        )
-        if r.status_code != 200:
-            return None
-        j = r.json()
-        return {
-            "rev": j.get("rev"),
-            "server_modified": j.get("server_modified"),
-            "server_ts": _parse_dt(j.get("server_modified", "")),
-            "size": j.get("size"),
-        }
-    except Exception:
-        return None
-
-# -----------------------------------------------------------------------------
-# Banco: Dropbox -> Local (token curto legado + bootstrap por refresh)
+# Banco: Dropbox -> Local (refresh por padrão; legado opcional)
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
     """
-    1) Se houver TOKEN do Dropbox e file_path: baixa via API para data/flowdash_data.db. (LEGADO)
-    2) Se falhar ou não houver token: tenta **bootstrap por refresh** (shared.dbx_io.baixar_db_para_local).
-    3) Se ainda falhar: usa DB local se válido.
-    4) Caso contrário: erro explícito.
-
-    Retorna:
-        (caminho_do_banco: str, origem: str)  # origem ∈ {"Dropbox", "Local"}
+    1) Tenta bootstrap por refresh (SDK): baixa para data/flowdash_data.db.
+       Se `force_download=True`, baixa sempre.
+    2) (Legado) Se houver access_token curto, tenta HTTP (útil para migração).
+    3) Se falhar, usa local se válido.
     """
     db_local = _db_local_path()
 
-    # 1) Dropbox (LEGADO — access_token curto)
+    # 1) Preferencial: SDK com refresh
+    try:
+        # Se force_download=True, baixa incondicionalmente
+        if force_download:
+            local_path = baixar_db_para_local()
+        else:
+            # Sem forçar: ainda tenta baixar; se não existir remoto, exceção cai no except
+            local_path = baixar_db_para_local()
+        candidate = pathlib.Path(local_path)
+        if (
+            candidate.exists()
+            and candidate.stat().st_size > 0
+            and _is_sqlite(candidate)
+            and _has_table(candidate, "usuarios")
+        ):
+            st.session_state["db_mode"] = "online"
+            st.session_state["db_origem"] = "Dropbox"
+            st.session_state["db_in_use_label"] = "Dropbox"
+            st.session_state["db_path"] = str(candidate)
+            os.environ["FLOWDASH_DB"] = str(candidate)
+            return str(candidate), "Dropbox"
+    except Exception:
+        pass  # cai para legado/local
+
+    # 2) Legado (só se houver access token)
     if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
@@ -255,30 +237,8 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
                 st.session_state["db_path"] = str(candidate)
                 os.environ["FLOWDASH_DB"] = str(candidate)
                 return str(candidate), "Dropbox"
-            else:
-                st.warning("Banco baixado via token (legado) parece inválido (ou sem tabela 'usuarios').")
-                st.caption(f"Debug: {_debug_file_info(candidate)}")
-        except Exception as e:
-            st.warning(f"Falha ao baixar via token (legado) do Dropbox: {e}")
-
-    # 2) NOVO: bootstrap por refresh token (SDK)
-    try:
-        candidate_path = baixar_db_para_local()  # respeita secrets['dropbox']['file_path']
-        candidate = pathlib.Path(candidate_path)
-        if (
-            candidate.exists()
-            and candidate.stat().st_size > 0
-            and _is_sqlite(candidate)
-            and _has_table(candidate, "usuarios")
-        ):
-            st.session_state["db_mode"] = "online"
-            st.session_state["db_origem"] = "Dropbox"
-            st.session_state["db_in_use_label"] = "Dropbox"
-            st.session_state["db_path"] = str(candidate)
-            os.environ["FLOWDASH_DB"] = str(candidate)
-            return str(candidate), "Dropbox"
-    except Exception:
-        pass  # segue para o local
+        except Exception:
+            pass
 
     # 3) Local
     if (
@@ -294,7 +254,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local), "Local"
 
-    # 4) Erro
+    # 4) Erro explícito
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido.\n\n"
@@ -304,7 +264,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
-# Flags efetivas: modo offline força token vazio
+# Flags efetivas
 _DROPBOX_DISABLED = _flag_dropbox_disable()
 _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
 _effective_path = DROPBOX_PATH_CFG
@@ -313,20 +273,34 @@ _effective_force = FORCE_DOWNLOAD_CFG
 # Recurso cacheado
 _caminho_banco, _db_origem = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# ---- Auto PULL (antes de usar) — agora com SDK + refresh token ----
+# ---- Auto PULL (antes de usar) — SDK + refresh (respeita force_download) ----
 def _auto_pull_if_remote_newer():
     if _db_origem != "Dropbox" or _DROPBOX_DISABLED:
         return
-    try:
-        dbx = get_dbx()
-    except Exception as e:
-        st.warning(f"Main: não foi possível autenticar no Dropbox (refresh): {e}")
+
+    # Força download se flag ligada
+    if _effective_force:
+        try:
+            baixar_db_para_local()
+            st.session_state["_main_db_last_pull_ts"] = float(datetime.now(tz=timezone.utc).timestamp())
+            st.toast("☁️ Main: banco atualizado (forçado) do Dropbox.", icon="🔄")
+            st.cache_data.clear()
+        except Exception as e:
+            st.warning(f"Main: não foi possível baixar DB remoto (forçado): {e}")
         return
 
-    # metadata (SDK) e comparação de timestamps
+    # Comparação por metadata (SDK)
     try:
+        dbx = get_dbx()
         meta = dbx.files_get_metadata(_effective_path)
-        remote_ts = meta.server_modified.replace(tzinfo=timezone.utc).timestamp()
+        remote_dt = getattr(meta, "server_modified", None)
+        if remote_dt is None:
+            return
+        # garante timestamp em UTC
+        if remote_dt.tzinfo is None:
+            remote_ts = remote_dt.replace(tzinfo=timezone.utc).timestamp()
+        else:
+            remote_ts = remote_dt.astimezone(timezone.utc).timestamp()
     except Exception:
         return
 
@@ -338,11 +312,7 @@ def _auto_pull_if_remote_newer():
 
     if remote_ts > max(local_ts, last_pull):
         try:
-            data = download_bytes(dbx, _effective_path)
-            tmp = _caminho_banco + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(data)
-            shutil.move(tmp, _caminho_banco)
+            baixar_db_para_local()
             st.session_state["_main_db_last_pull_ts"] = remote_ts
             st.toast("☁️ Main: banco atualizado do Dropbox.", icon="🔄")
             st.cache_data.clear()
