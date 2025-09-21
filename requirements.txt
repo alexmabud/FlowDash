@@ -5,3 +5,5 @@ workalendar>=17.0,<18
 matplotlib>=3.8,<3.10
 requests>=2.32,<3
 dropbox==11.36.2
+setuptools>=68
+
