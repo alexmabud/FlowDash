@@ -8,7 +8,7 @@ Política do banco:
        access_token   = "sl.ABC...SEU_TOKEN..."
        file_path      = "/FlowDash/data/flowdash_data.db"
        force_download = "0"
-  2) Se falhar, usar o DB local 'data/flowdash_data.db' (deve conter a tabela 'usuarios').
+  2) Se falhar, tentar bootstrap via refresh token (SDK) e, se ainda falhar, usar o DB local.
   3) Se nada der certo, exibir erro claro.
 
 Flags úteis (produção x debug):
@@ -37,7 +37,7 @@ import streamlit as st
 from utils.pin_utils import validar_pin
 
 # ---------------------------------------------------------------------------
-# Bootstrap do BD via Dropbox — agora com refresh token (SDK) + sync automático
+# Bootstrap do BD via Dropbox — refresh token (SDK) + caminho legado + sync automático
 # ---------------------------------------------------------------------------
 import pathlib
 from shared.db_from_dropbox_api import ensure_local_db_api
@@ -82,29 +82,32 @@ def _debug_file_info(path: pathlib.Path) -> str:
         return f"(falha ao inspecionar: {e})"
 
 # ------------- flags (debug/offline) -------------
+def _truthy(v) -> bool:
+    return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
+
 def _flag_debug() -> bool:
     try:
         sec = dict(st.secrets.get("dropbox", {}))
-        if str(sec.get("debug", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+        if _truthy(sec.get("debug", "0")):
             return True
     except Exception:
         pass
-    return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "on", "y"}
+    return _truthy(os.getenv("FLOWDASH_DEBUG", "0"))
 
 def _flag_dropbox_disable() -> bool:
     try:
         sec = dict(st.secrets.get("dropbox", {}))
-        if str(sec.get("disable", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
+        if _truthy(sec.get("disable", "0")):
             return True
     except Exception:
         pass
-    return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "on", "y"}
+    return _truthy(os.getenv("DROPBOX_DISABLE", "0"))
 
 _DEBUG = _flag_debug()
 _cfg = load_dropbox_settings(prefer_env_first=True)
 ACCESS_TOKEN_CFG = _cfg.get("access_token") or ""
 DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
-FORCE_DOWNLOAD_CFG = bool(_cfg.get("force_download", False))
+FORCE_DOWNLOAD_CFG = _truthy(_cfg.get("force_download", "0"))
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
 
 # ---------- PROBES de diagnóstico (legado: úteis para ver token curto) ----------
@@ -156,6 +159,16 @@ if _DEBUG:
                 st.code(_probe_current_account(ACCESS_TOKEN_CFG))
                 st.markdown("**files/get_metadata (token curto, se existir)**")
                 st.code(_probe_get_metadata(ACCESS_TOKEN_CFG, DROPBOX_PATH_CFG))
+
+            if st.button("⚡ Forçar PULL (SDK/refresh)"):
+                try:
+                    local_path = baixar_db_para_local()
+                    st.success(f"Baixado: {local_path}")
+                    st.session_state["_pdv_db_last_pull_ts"] = 0.0
+                    st.cache_data.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Falha no PULL forçado: {e}")
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox (PDV): {e}")
 
@@ -172,6 +185,7 @@ def _parse_dt(dt_str: str) -> float:
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
     """
+    0) Se OFFLINE: usa DB local ou erra.
     1) Se houver access_token + file_path: baixa via API (legado) p/ data/flowdash_data.db.
     2) Se não houver access_token, tenta bootstrap pelo refresh token (SDK) via baixar_db_para_local().
     3) Se ainda falhar, usa DB local se válido; senão, erro claro.
@@ -180,6 +194,17 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         (caminho_do_banco: str, origem: str)  # {"Dropbox", "Local"}
     """
     db_local = _db_local_path()
+
+    # 0) Modo OFFLINE: não tenta Dropbox
+    if _flag_dropbox_disable():
+        if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
+            st.session_state["db_mode"] = "local"
+            st.session_state["db_origem"] = "Local"
+            st.session_state["db_path"] = str(db_local)
+            os.environ["FLOWDASH_DB"] = str(db_local)
+            return str(db_local), "Local"
+        st.error("❌ Modo offline: não há DB local válido em `data/flowdash_data.db` (tabela 'usuarios').")
+        st.stop()
 
     # 1) caminho legado (token curto)
     if access_token and dropbox_path:
@@ -259,10 +284,15 @@ def _auto_pull_if_remote_newer():
         st.warning(f"PDV: não foi possível autenticar no Dropbox (refresh): {e}")
         return
 
-    # metadata e comparação de timestamps
+    # metadata e comparação de timestamps (ajuste tz seguro)
     try:
         meta = dbx.files_get_metadata(_effective_path)
-        remote_ts = meta.server_modified.replace(tzinfo=timezone.utc).timestamp()
+        dt = getattr(meta, "server_modified", None)
+        if not dt:
+            return
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        remote_ts = dt.timestamp()
     except Exception:
         return
 
