@@ -4,24 +4,36 @@ FlowDash — Main App
 ===================
 Ponto de entrada do aplicativo Streamlit do FlowDash.
 
-Política do banco:
-  1) Baixar via refresh_token (SDK) — shared.dbx_io.baixar_db_para_local()
-     (se force_download="1", baixa sempre)
-  2) (Legado opcional) Se houver access_token curto, ainda tentamos uma
-     primeira cópia com shared.db_from_dropbox_api.ensure_local_db_api()
-     — útil apenas para debug/migração.
-  3) Se falhar, usa o DB local 'data/flowdash_data.db' (com tabela 'usuarios').
-  4) Se nada der certo, erro claro.
+Resumo
+------
+App com controle de login/perfil, roteamento dinâmico de páginas e sincronização
+do banco via Dropbox (SDK com refresh_token), com fallback local/legado.
+Este arquivo foi otimizado para reduzir latência entre trocas de página.
 
-Sincronização automática
-  - Pull: antes de usar, compara com remoto (SDK). Se `force_download="1"`,
-    força o download. Estratégia last-writer-wins.
-  - Push: ao final do ciclo, se o arquivo local mudou, envia (SDK).
+Estratégia de performance
+-------------------------
+- Cache de resolução de páginas (import/lib + descoberta de função) para evitar
+  introspecção repetida a cada navegação.
+- Throttle no "auto pull" do Dropbox (no máx. 1x a cada 60s) para evitar
+  bloqueios de rede frequentes.
+- Unificação do "auto push" (envio se mtime mudou).
+- Debug lazy (importa `requests` só quando DEBUG ativo).
+- Execução de garantias/infra apenas 1x por sessão.
 
-Flags úteis:
-  - DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"
-  - OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"
+Política do banco (ordem de tentativa)
+--------------------------------------
+1) SDK (refresh) — shared.dbx_io.baixar_db_para_local() (force_download opcional)
+2) Legado (HTTP) — shared.db_from_dropbox_api.ensure_local_db_api() [opcional]
+3) Local — data/flowdash_data.db (precisa ter tabela 'usuarios')
+4) Erro claro
+
+Flags úteis
+-----------
+- DEBUG:    FLOWDASH_DEBUG=1  ou  [dropbox].debug="1"
+- OFFLINE:  DROPBOX_DISABLE=1  ou  [dropbox].disable="1"
+- force_download (secrets/env): força pull do remoto antes de usar
 """
+
 from __future__ import annotations
 
 import importlib
@@ -29,10 +41,10 @@ import inspect
 import os
 import pathlib
 import sqlite3
-import shutil
+import time
 from datetime import datetime, timezone
+from typing import Callable, Optional
 
-import requests
 import streamlit as st
 
 from auth.auth import (
@@ -49,19 +61,22 @@ from shared.db_from_dropbox_api import ensure_local_db_api
 # Config
 from shared.dropbox_config import load_dropbox_settings, mask_token
 
-# NOVO: SDK com refresh token (pull/push)
+# SDK com refresh token (pull/push)
 from shared.dbx_io import enviar_db_local, baixar_db_para_local
 from shared.dropbox_client import get_dbx  # para ler metadata (SDK)
 
+
 # -----------------------------------------------------------------------------
-# Config
+# Config inicial
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="FlowDash", layout="wide")
 
+
 # -----------------------------------------------------------------------------
-# Helpers (debug/local)
+# Helpers gerais (IO e sessão)
 # -----------------------------------------------------------------------------
 def _debug_file_info(path: pathlib.Path) -> str:
+    """Retorna resumo do arquivo (tamanho + primeiros bytes) para diagnósticos."""
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
@@ -70,14 +85,18 @@ def _debug_file_info(path: pathlib.Path) -> str:
     except Exception as e:
         return f"(falha ao inspecionar: {e})"
 
+
 def _is_sqlite(path: pathlib.Path) -> bool:
+    """Verifica se o arquivo tem header de SQLite."""
     try:
         with open(path, "rb") as f:
             return f.read(16).startswith(b"SQLite format 3")
     except Exception:
         return False
 
+
 def _has_table(path: pathlib.Path, table: str) -> bool:
+    """Checa existência de uma tabela no SQLite."""
     try:
         with sqlite3.connect(str(path)) as conn:
             cur = conn.execute(
@@ -88,13 +107,17 @@ def _has_table(path: pathlib.Path, table: str) -> bool:
     except Exception:
         return False
 
+
 def _db_local_path() -> pathlib.Path:
+    """Caminho padrão para data/flowdash_data.db (garante diretório)."""
     root = pathlib.Path(__file__).resolve().parent
     p = root / "data" / "flowdash_data.db"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
+
 def _flag_debug() -> bool:
+    """DEBUG via secrets/env."""
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if str(sec.get("debug", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
@@ -103,7 +126,9 @@ def _flag_debug() -> bool:
         pass
     return str(os.getenv("FLOWDASH_DEBUG", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
+
 def _flag_dropbox_disable() -> bool:
+    """Desabilita Dropbox via secrets/env (modo offline)."""
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if str(sec.get("disable", "")).strip().lower() in {"1", "true", "yes", "y", "on"}:
@@ -112,27 +137,50 @@ def _flag_dropbox_disable() -> bool:
         pass
     return str(os.getenv("DROPBOX_DISABLE", "")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
+
+def _now_ts() -> float:
+    """Timestamp epoch (float)."""
+    return time.time()
+
+
+def _throttle(key: str, min_seconds: int) -> bool:
+    """
+    Retorna True no máx. 1x por `min_seconds`, guardado em session_state[key].
+    Usado para evitar auto-pull muito frequente.
+    """
+    last = float(st.session_state.get(key) or 0.0)
+    now = _now_ts()
+    if (now - last) >= float(min_seconds):
+        st.session_state[key] = now
+        return True
+    return False
+
+
 # -----------------------------------------------------------------------------
-# Diagnóstico Dropbox (apenas se DEBUG ativo)
+# Diagnóstico/Config Dropbox
 # -----------------------------------------------------------------------------
 _DEBUG = _flag_debug()
 _cfg = load_dropbox_settings(prefer_env_first=True)
 
 ACCESS_TOKEN_CFG = _cfg.get("access_token") or ""
 DROPBOX_PATH_CFG = _cfg.get("file_path") or "/FlowDash/data/flowdash_data.db"
-FORCE_DOWNLOAD_CFG = str(_cfg.get("force_download", "0")).strip() in {"1", "true", "yes", "on"}
+FORCE_DOWNLOAD_CFG = str(_cfg.get("force_download", "0")).strip().lower() in {"1", "true", "yes", "on"}
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
+_DROPBOX_DISABLED = _flag_dropbox_disable()
 
 if _DEBUG:
+    # Importa requests apenas em modo debug (lazy) para reduzir overhead em prod
+    import requests  # type: ignore
+
     with st.expander("🔎 Diagnóstico Dropbox (temporário)", expanded=True):
         try:
             try:
                 st.write("st.secrets keys:", list(st.secrets.keys()))
                 st.write("Tem seção [dropbox] nos Secrets?", "dropbox" in st.secrets)
             except Exception:
-                st.write("st.secrets indisponível neste contexto (ok para CLI/local).")
+                st.write("st.secrets indisponível (ok em CLI/local).")
 
-            st.write("token_source:", TOKEN_SOURCE_CFG)  # "env", "st.secrets:/...", "none"
+            st.write("token_source:", TOKEN_SOURCE_CFG)
             st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN_CFG))
             st.write("token_length:", len(ACCESS_TOKEN_CFG))
             st.write("file_path:", DROPBOX_PATH_CFG)
@@ -177,45 +225,54 @@ if _DEBUG:
         except Exception as e:
             st.warning(f"Falha lendo config Dropbox: {e}")
 
+
 # -----------------------------------------------------------------------------
-# Banco: Dropbox -> Local (refresh por padrão; legado opcional)
+# Banco: Dropbox -> Local (SDK preferencial; legado opcional)  [Cacheado]
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
-def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool):
+def ensure_db_available(
+    access_token: str,
+    dropbox_path: str,
+    force_download: bool,
+    dropbox_disabled: bool,
+) -> tuple[str, str]:
     """
-    1) Tenta bootstrap por refresh (SDK): baixa para data/flowdash_data.db.
-       Se `force_download=True`, baixa sempre.
-    2) (Legado) Se houver access_token curto, tenta HTTP (útil para migração).
-    3) Se falhar, usa local se válido.
+    Garante um SQLite válido e retorna (caminho_local, origem_label).
+
+    Ordem:
+      1) SDK (refresh)  -> baixar_db_para_local()
+      2) Legado HTTP    -> ensure_local_db_api() [se houver token]
+      3) Local          -> data/flowdash_data.db
+      4) Erro -> st.stop()
+
+    Returns
+    -------
+    (path, origem) onde origem ∈ {"Dropbox", "Local"}.
     """
     db_local = _db_local_path()
 
-    # 1) Preferencial: SDK com refresh
-    try:
-        # Se force_download=True, baixa incondicionalmente
-        if force_download:
-            local_path = baixar_db_para_local()
-        else:
-            # Sem forçar: ainda tenta baixar; se não existir remoto, exceção cai no except
-            local_path = baixar_db_para_local()
-        candidate = pathlib.Path(local_path)
-        if (
-            candidate.exists()
-            and candidate.stat().st_size > 0
-            and _is_sqlite(candidate)
-            and _has_table(candidate, "usuarios")
-        ):
-            st.session_state["db_mode"] = "online"
-            st.session_state["db_origem"] = "Dropbox"
-            st.session_state["db_in_use_label"] = "Dropbox"
-            st.session_state["db_path"] = str(candidate)
-            os.environ["FLOWDASH_DB"] = str(candidate)
-            return str(candidate), "Dropbox"
-    except Exception:
-        pass  # cai para legado/local
+    # 1) Preferencial: SDK com refresh_token (se não estiver desabilitado)
+    if not dropbox_disabled:
+        try:
+            _ = baixar_db_para_local()
+            candidate = pathlib.Path(_)
+            if (
+                candidate.exists()
+                and candidate.stat().st_size > 0
+                and _is_sqlite(candidate)
+                and _has_table(candidate, "usuarios")
+            ):
+                st.session_state["db_mode"] = "online"
+                st.session_state["db_origem"] = "Dropbox"
+                st.session_state["db_in_use_label"] = "Dropbox"
+                st.session_state["db_path"] = str(candidate)
+                os.environ["FLOWDASH_DB"] = str(candidate)
+                return str(candidate), "Dropbox"
+        except Exception:
+            pass  # cai para legado/local
 
-    # 2) Legado (só se houver access token)
-    if access_token and dropbox_path:
+    # 2) Legado (HTTP) — útil só pra migração/debug
+    if (not dropbox_disabled) and access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
                 access_token=access_token,
@@ -264,18 +321,28 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
     )
     st.stop()
 
-# Flags efetivas
-_DROPBOX_DISABLED = _flag_dropbox_disable()
+
+# Flags efetivas (congeladas na cache_resource acima)
 _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
 _effective_path = DROPBOX_PATH_CFG
 _effective_force = FORCE_DOWNLOAD_CFG
+_caminho_banco, _db_origem = ensure_db_available(
+    _effective_token, _effective_path, _effective_force, _DROPBOX_DISABLED
+)
 
-# Recurso cacheado
-_caminho_banco, _db_origem = ensure_db_available(_effective_token, _effective_path, _effective_force)
 
-# ---- Auto PULL (antes de usar) — SDK + refresh (respeita force_download) ----
-def _auto_pull_if_remote_newer():
+# -----------------------------------------------------------------------------
+# Auto PULL com throttle (antes de usar) — SDK
+# -----------------------------------------------------------------------------
+_PULL_THROTTLE_SECONDS = 60  # mínimo entre checagens remotas
+
+def _auto_pull_if_remote_newer() -> None:
+    """Sincroniza do Dropbox para local se remoto estiver mais novo."""
     if _db_origem != "Dropbox" or _DROPBOX_DISABLED:
+        return
+
+    # throttle global
+    if not _throttle("_pull_last_check_ts", _PULL_THROTTLE_SECONDS):
         return
 
     # Força download se flag ligada
@@ -294,9 +361,9 @@ def _auto_pull_if_remote_newer():
         dbx = get_dbx()
         meta = dbx.files_get_metadata(_effective_path)
         remote_dt = getattr(meta, "server_modified", None)
-        if remote_dt is None:
+        if not remote_dt:
             return
-        # garante timestamp em UTC
+        # normaliza para UTC
         if remote_dt.tzinfo is None:
             remote_ts = remote_dt.replace(tzinfo=timezone.utc).timestamp()
         else:
@@ -319,65 +386,101 @@ def _auto_pull_if_remote_newer():
         except Exception as e:
             st.warning(f"Main: não foi possível baixar DB remoto (refresh): {e}")
 
-_auto_pull_if_remote_newer()
 
-# ---- Badge curto ----
+_auto_pull_if_remote_newer()
 st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
 
-# Garantias/infra mínimas
-try:
-    garantir_trigger_totais_saldos_caixas(_caminho_banco)
-except Exception as e:
-    st.warning(f"Trigger de totais não criada: {e}")
 
 # -----------------------------------------------------------------------------
-# Estado de sessão
+# Garantias/infra mínimas (executa só 1x por sessão)
+# -----------------------------------------------------------------------------
+if not st.session_state.get("_infra_trigger_ok"):
+    try:
+        garantir_trigger_totais_saldos_caixas(_caminho_banco)
+        st.session_state["_infra_trigger_ok"] = True
+    except Exception as e:
+        st.warning(f"Trigger de totais não criada: {e}")
+
+
+# -----------------------------------------------------------------------------
+# Auto PUSH (definido ANTES do bloco de login para evitar NameError)
+# -----------------------------------------------------------------------------
+def _auto_push_if_local_changed() -> None:
+    """Envia DB local para o Dropbox se detectado mtime maior que último push."""
+    if _db_origem != "Dropbox" or _DROPBOX_DISABLED:
+        return
+    try:
+        mtime = os.path.getmtime(_caminho_banco)
+    except Exception:
+        return
+    last_sent = float(st.session_state.get("_main_db_last_push_ts") or 0.0)
+    if mtime > (last_sent + 0.1):
+        try:
+            enviar_db_local()
+            st.session_state["_main_db_last_push_ts"] = mtime
+            st.toast("☁️ Main: banco sincronizado com o Dropbox.", icon="✅")
+        except Exception as e:
+            st.warning(f"Main: falha ao enviar DB ao Dropbox (refresh): {e}")
+
+
+# -----------------------------------------------------------------------------
+# Estado de sessão base
 # -----------------------------------------------------------------------------
 if "usuario_logado" not in st.session_state:
     st.session_state.usuario_logado = None
 if "pagina_atual" not in st.session_state:
     st.session_state.pagina_atual = "📊 Dashboard"
 
+
 # -----------------------------------------------------------------------------
-# Roteamento (import dinâmico + injeção de caminho_banco)
+# Roteamento (resolução de página com cache) 
 # -----------------------------------------------------------------------------
-def _call_page(module_path: str):
+def _inject_args(fn: Callable) -> object:
+    """
+    Injeta argumentos conhecidos na assinatura da função de página.
+    Mantém o comportamento anterior, mas sem introspecção repetida.
+    """
+    sig = inspect.signature(fn)
+    args, kwargs = [], {}
+    ss = st.session_state
+    usuario_logado = ss.get("usuario_logado")
+    known = {
+        "usuario": usuario_logado,
+        "usuario_logado": usuario_logado,
+        "perfil": (usuario_logado or {}).get("perfil") if usuario_logado else None,
+        "pagina_atual": ss.get("pagina_atual"),
+        "ir_para_formulario": ss.get("ir_para_formulario"),
+        "caminho_banco": _caminho_banco,
+    }
+    for p in sig.parameters.values():
+        name, kind, has_default = p.name, p.kind, (p.default is not inspect._empty)
+        if name == "caminho_banco":
+            value = _caminho_banco
+        elif name in known:
+            value = known[name]
+        elif name in ss:
+            value = ss[name]
+        else:
+            value = None
+        should_pass = (not has_default) or (value is not None)
+        if should_pass:
+            if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                args.append(value)
+            else:
+                kwargs[name] = value
+    return fn(*args, **kwargs)
+
+
+@st.cache_resource
+def _resolve_page_callable(module_path: str) -> Optional[Callable]:
+    """
+    Importa o módulo e resolve a função de renderização mais provável.
+    Cacheado para evitar custo em toda troca de página.
+    """
     try:
         mod = importlib.import_module(module_path)
-    except Exception as e:
-        st.error(f"Falha ao importar módulo '{module_path}': {e}")
-        return
-
-    def _invoke(fn):
-        sig = inspect.signature(fn)
-        args, kwargs = [], {}
-        ss = st.session_state
-        usuario_logado = ss.get("usuario_logado")
-        known = {
-            "usuario": usuario_logado,
-            "usuario_logado": usuario_logado,
-            "perfil": (usuario_logado or {}).get("perfil") if usuario_logado else None,
-            "pagina_atual": ss.get("pagina_atual"),
-            "ir_para_formulario": ss.get("ir_para_formulario"),
-            "caminho_banco": _caminho_banco,
-        }
-        for p in sig.parameters.values():
-            name, kind, has_default = p.name, p.kind, (p.default is not inspect._empty)
-            if name == "caminho_banco":
-                value = _caminho_banco
-            elif name in known:
-                value = known[name]
-            elif name in ss:
-                value = ss[name]
-            else:
-                value = None
-            should_pass = (not has_default) or (value is not None)
-            if should_pass:
-                if kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-                    args.append(value)
-                else:
-                    kwargs[name] = value
-        return fn(*args, **kwargs)
+    except Exception:
+        return None
 
     seg = module_path.rsplit(".", 1)[-1]
     parent = module_path.rsplit(".", 2)[-2] if "." in module_path else ""
@@ -390,24 +493,32 @@ def _call_page(module_path: str):
     tried = set()
     for fn_name in candidates:
         if fn_name in tried or not hasattr(mod, fn_name):
-            tried.add(fn_name); continue
+            tried.add(fn_name)
+            continue
         tried.add(fn_name)
         fn = getattr(mod, fn_name)
         if callable(fn):
-            try:
-                return _invoke(fn)
-            except Exception as e:
-                st.error(f"Erro ao executar {module_path}.{fn_name}: {e}")
-                return
+            return fn
+
+    # último fallback: primeira função que comece com prefixos conhecidos
     for prefix in ("pagina_", "render_"):
         for name, obj in vars(mod).items():
             if callable(obj) and name.startswith(prefix):
-                try:
-                    return _invoke(obj)
-                except Exception as e:
-                    st.error(f"Erro ao executar {module_path}.{name}: {e}")
-                    return
-    st.warning(f"O módulo '{module_path}' não possui função compatível (render/page/main/pagina*/show).")
+                return obj
+    return None
+
+
+def _call_page(module_path: str) -> None:
+    """Executa a função cacheada da página, com injeção de argumentos padrão."""
+    fn = _resolve_page_callable(module_path)
+    if not fn:
+        st.warning(f"O módulo '{module_path}' não possui função compatível (render/page/main/pagina*/show).")
+        return
+    try:
+        _inject_args(fn)
+    except Exception as e:
+        st.error(f"Erro ao executar {module_path}.{getattr(fn, '__name__', '<?>')}: {e}")
+
 
 # -----------------------------------------------------------------------------
 # Login
@@ -428,27 +539,14 @@ if not st.session_state.usuario_logado:
                 st.rerun()
             else:
                 st.error("❌ Email ou senha inválidos, ou usuário inativo.")
-    # antes de parar, empurra alterações locais (se houve cadastro)
-    def _auto_push_if_local_changed_login():
-        if _db_origem != "Dropbox" or _DROPBOX_DISABLED:
-            return
-        try:
-            mtime = os.path.getmtime(_caminho_banco)
-        except Exception:
-            return
-        last_sent = float(st.session_state.get("_main_db_last_push_ts") or 0.0)
-        if mtime > (last_sent + 0.1):
-            try:
-                enviar_db_local()  # refresh token (SDK)
-                st.session_state["_main_db_last_push_ts"] = mtime
-                st.toast("☁️ Main: banco sincronizado com o Dropbox.", icon="✅")
-            except Exception as e:
-                st.warning(f"Main: falha ao enviar DB ao Dropbox (refresh): {e}")
-    _auto_push_if_local_changed_login()
+
+    # push (se houve cadastro/alteração)
+    _auto_push_if_local_changed()
     st.stop()
 
+
 # -----------------------------------------------------------------------------
-# Sidebar
+# Sidebar / Navegação
 # -----------------------------------------------------------------------------
 usuario = st.session_state.get("usuario_logado")
 if usuario is None:
@@ -490,6 +588,7 @@ if perfil == "Administrador":
                 st.session_state.pagina_atual = title
                 st.rerun()
 
+
 # -----------------------------------------------------------------------------
 # Roteamento
 # -----------------------------------------------------------------------------
@@ -518,6 +617,7 @@ ROTAS = {
     "🏦 Cadastro de Bancos": "flowdash_pages.cadastros.pagina_bancos_cadastrados",
     "📂 Cadastro de Saídas": "flowdash_pages.cadastros.cadastro_categorias",
 }
+
 PERMISSOES = {
     "📊 Dashboard": {"Administrador", "Gerente"},
     "📉 DRE": {"Administrador", "Gerente"},
@@ -552,21 +652,8 @@ if pagina in ROTAS:
 else:
     st.warning("Página não encontrada.")
 
-# ---- Auto PUSH (depois que a página executou) — SDK + refresh ----
-def _auto_push_if_local_changed():
-    if _db_origem != "Dropbox" or _DROPBOX_DISABLED:
-        return
-    try:
-        mtime = os.path.getmtime(_caminho_banco)
-    except Exception:
-        return
-    last_sent = float(st.session_state.get("_main_db_last_push_ts") or 0.0)
-    if mtime > (last_sent + 0.1):
-        try:
-            enviar_db_local()  # refresh token (SDK)
-            st.session_state["_main_db_last_push_ts"] = mtime
-            st.toast("☁️ Main: banco sincronizado com o Dropbox.", icon="✅")
-        except Exception as e:
-            st.warning(f"Main: falha ao enviar DB ao Dropbox (refresh): {e}")
 
+# -----------------------------------------------------------------------------
+# Auto PUSH (depois da página) — SDK + refresh
+# -----------------------------------------------------------------------------
 _auto_push_if_local_changed()
