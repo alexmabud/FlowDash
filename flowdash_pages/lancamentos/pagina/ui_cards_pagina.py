@@ -5,6 +5,7 @@ Sem regras de negócio.
 
 Notas:
     - `render_card_row(...)`: renderiza um cartão com uma linha e N células.
+    - `render_card_rows(...)`: renderiza um cartão com M linhas (cada uma com N células).
     - `render_card_mercadorias(...)`: exibe mini-tabelas para compras/recebimentos.
     - `get_transferencias_bancos_lista(...)`: formata as transferências banco→banco
       do dia (pareamento por token `TX=`; fallback em `id`).
@@ -37,6 +38,8 @@ _CARD_TABLE_CSS = """
 }
 .section-header{ display:flex; align-items:center; gap:10px; font-weight:800; font-size:1.05rem; margin-bottom:8px; }
 .section-row{ display:flex; border:1px solid var(--stroke); border-radius:12px; overflow:hidden; background:var(--tile); }
+.section-row + .section-row{ margin-top:8px; } /* NOVO: espaçamento entre linhas no mesmo card */
+
 .cell{ flex:1 1 0; padding:8px 12px; display:flex; flex-direction:column; gap:6px; align-items:center; }
 .cell + .cell{ border-left:1px solid var(--stroke); }
 .cell-label{ color:#cfd3df; font-size:.85rem; font-weight:700; letter-spacing:.2px; }
@@ -147,24 +150,10 @@ def _df_to_html_table(df) -> str:
     return f"<table class='mini-table'>{thead}{tbody}</table>"
 
 
-# ===================== Cards =====================
-def render_card_row(title: str, items: list[tuple[str, object, bool]]) -> None:
-    """Renderiza um cartão com título e N colunas.
-
-    Args:
-        title: Título do cartão.
-        items: Lista de tuplas (label, valor, number_always).
-            - Se valor for list[str], mostra lista em verde.
-            - Se for pandas.DataFrame, renderiza uma tabela HTML.
-            - Se float/None: number_always=True força exibir 0,00;
-              senão mostra "Sem movimentações".
-            - Outros tipos: str via st.markdown.
-    """
-    st.markdown(_CARD_TABLE_CSS, unsafe_allow_html=True)
-    items = list(items or [])
-    cells_html = []
-
+def _build_cells_html(items: list[tuple[str, object, bool]]) -> str:
+    """Monta o HTML das células para uma linha do card."""
     is_df = (lambda v: (pd is not None and isinstance(v, pd.DataFrame)))
+    cells_html = []
 
     for label, value, number_always in items:
         if is_df(value):
@@ -184,11 +173,62 @@ def render_card_row(title: str, items: list[tuple[str, object, bool]]) -> None:
             )
 
         cells_html.append(f'<div class="cell"><div class="cell-label">{label}</div>{vhtml}</div>')
+    return ''.join(cells_html)
+
+
+# ===================== Cards =====================
+def render_card_row(title: str, items: list[tuple[str, object, bool]]) -> None:
+    """Renderiza um cartão com título e N colunas (uma única linha).
+
+    Args:
+        title: Título do cartão.
+        items: Lista de tuplas (label, valor, number_always).
+            - Se valor for list[str], mostra lista em verde.
+            - Se for pandas.DataFrame, renderiza uma tabela HTML.
+            - Se float/None: number_always=True força exibir 0,00;
+              senão mostra "Sem movimentações".
+            - Outros tipos: str via st.markdown.
+    """
+    st.markdown(_CARD_TABLE_CSS, unsafe_allow_html=True)
+    items = list(items or [])
+    row_html = _build_cells_html(items)
 
     html = f"""
       <div class="section-card">
         <div class="section-header">{title}</div>
-        <div class="section-row">{''.join(cells_html)}</div>
+        <div class="section-row">{row_html}</div>
+      </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def render_card_rows(title: str, rows: list[list[tuple[str, object, bool]]]) -> None:
+    """Renderiza um cartão com título e **múltiplas linhas**.
+
+    Use quando quiser manter todos os campos sob o mesmo bloco visual (mesmo card),
+    porém distribuídos em linhas distintas (ex.: 1ª linha: Caixa/Caixa 2; 2ª linha: Bancos).
+
+    Args:
+        title: Título do cartão.
+        rows: Lista de linhas; cada linha é uma lista de tuplas (label, valor, number_always).
+              Exemplo:
+              [
+                [("Caixa", 100.0, True), ("Caixa 2", 50.0, True)],
+                [("Inter", 20.0, True), ("InfinitePay", 30.0, True), ("Bradesco", 40.0, True)]
+              ]
+    """
+    st.markdown(_CARD_TABLE_CSS, unsafe_allow_html=True)
+    rows = rows or []
+    rows_html = []
+
+    for items in rows:
+        row_html = _build_cells_html(list(items or []))
+        rows_html.append(f"<div class='section-row'>{row_html}</div>")
+
+    html = f"""
+      <div class="section-card">
+        <div class="section-header">{title}</div>
+        {''.join(rows_html)}
       </div>
     """
     st.markdown(html, unsafe_allow_html=True)

@@ -14,16 +14,12 @@ import pandas as pd
 import streamlit as st
 
 from .actions_pagina import carregar_resumo_dia
-from .ui_cards_pagina import render_card_row, render_card_mercadorias
+from .ui_cards_pagina import render_card_row, render_card_rows, render_card_mercadorias
 
 
 # ===================== Helpers =====================
 def _get_default_data_lanc() -> Optional[str]:
-    """Obtém ou inicializa `data_lanc` no session_state como string YYYY-MM-DD.
-
-    Returns:
-        Data no formato "YYYY-MM-DD" ou None em caso de falha.
-    """
+    """Obtém ou inicializa `data_lanc` no session_state como string YYYY-MM-DD."""
     try:
         v = st.session_state.get("data_lanc")
         if not v:
@@ -35,14 +31,7 @@ def _get_default_data_lanc() -> Optional[str]:
 
 
 def _brl(v: float | int | None) -> str:
-    """Formata um número em BRL sem depender de locale.
-
-    Args:
-        v: Valor numérico.
-
-    Returns:
-        String no formato "R$ 1.234,56".
-    """
+    """Formata um número em BRL sem depender de locale."""
     try:
         n = float(v or 0.0)
     except Exception:
@@ -51,15 +40,7 @@ def _brl(v: float | int | None) -> str:
 
 
 def _safe_call(mod_path: str, func_name: str, state: Any) -> None:
-    """Importa e executa com segurança `func_name(state)` do módulo `mod_path`.
-
-    Mostra aviso/erro amigável e evita derrubar a página em caso de falha.
-
-    Args:
-        mod_path: Caminho do módulo (ex.: 'flowdash_pages.lancamentos.venda.page_venda').
-        func_name: Nome da função exportada (ex.: 'render_venda').
-        state: Objeto de estado a ser repassado para a função.
-    """
+    """Importa e executa com segurança `func_name(state)` do módulo `mod_path`."""
     try:
         mod = importlib.import_module(mod_path)
         fn: Optional[Callable[[Any], None]] = getattr(mod, func_name, None)
@@ -73,12 +54,7 @@ def _safe_call(mod_path: str, func_name: str, state: Any) -> None:
 
 # ===================== Page =====================
 def render_page(caminho_banco: str, data_default: date | None = None) -> None:
-    """Renderiza a página agregadora de Lançamentos.
-
-    Args:
-        caminho_banco: Caminho do arquivo SQLite.
-        data_default: Data inicial do input (padrão = hoje).
-    """
+    """Renderiza a página agregadora de Lançamentos."""
     # Mensagem de sucesso de operações anteriores
     if "msg_ok" in st.session_state:
         st.success(st.session_state.pop("msg_ok"))
@@ -102,21 +78,26 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
         [("Vendas", total_vendas, True), ("Saídas", total_saidas, True)],
     )
 
-    # ----- Saldos -----
+    # ----- Saldos (2 linhas no mesmo card) -----
+    # 1) Caixa e Caixa 2
+    v_caixa = float(resumo.get("caixa_total", 0.0))
+    v_caixa2 = float(resumo.get("caixa2_total", 0.0))
+
+    # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
     saldos_bancos = resumo.get("saldos_bancos") or {}
     nb = {(str(k) or "").strip().lower(): float(v or 0.0) for k, v in saldos_bancos.items()}
     inter = nb.get("inter", 0.0)
-    infinite = nb.get("infinitepay", nb.get("infinitiepay", nb.get("infinite pay", 0.0)))
+    infinite = nb.get(
+        "infinitepay",
+        nb.get("infinite pay", nb.get("infinite_pay", nb.get("infinitiepay", 0.0))),
+    )
     bradesco = nb.get("bradesco", 0.0)
 
-    render_card_row(
+    render_card_rows(
         "💵 Saldos",
         [
-            ("Caixa", resumo.get("caixa_total", 0.0), True),
-            ("Caixa 2", resumo.get("caixa2_total", 0.0), True),
-            ("Inter", inter, True),
-            ("InfinitePay", infinite, True),
-            ("Bradesco", bradesco, True),
+            [("Caixa", v_caixa, True), ("Caixa 2", v_caixa2, True)],  # linha 1 (2 colunas)
+            [("Inter", inter, True), ("InfinitePay", infinite, True), ("Bradesco", bradesco, True)],  # linha 2 (3 colunas)
         ],
     )
 
@@ -131,11 +112,30 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
 
     # 3) Transferência entre bancos — TABELA real (Valor | Saída | Entrada)
     trf_raw = resumo.get("transf_bancos_list") or []  # List[Tuple[origem, destino, valor]]
-    trf_df = pd.DataFrame(trf_raw, columns=["Saída", "Entrada", "Valor"])
-    trf_df["Saída"] = trf_df["Saída"].fillna("").str.strip().replace("", "—")
-    trf_df["Entrada"] = trf_df["Entrada"].fillna("").str.strip().replace("", "—")
-    trf_df["Valor"] = pd.to_numeric(trf_df["Valor"], errors="coerce").fillna(0.0)
-    trf_df = trf_df[["Valor", "Saída", "Entrada"]]  # ordem exata solicitada
+    if trf_raw:
+        try:
+            trf_df = pd.DataFrame(trf_raw, columns=["Saída", "Entrada", "Valor"])
+        except Exception:
+            # fallback robusto se a estrutura vier diferente
+            trf_df = pd.DataFrame(trf_raw)
+            # tenta renomear se possível
+            cols = {c.lower(): c for c in trf_df.columns}
+            if "origem" in cols:
+                trf_df.rename(columns={cols["origem"]: "Saída"}, inplace=True)
+            if "destino" in cols:
+                trf_df.rename(columns={cols["destino"]: "Entrada"}, inplace=True)
+            if "valor" in cols:
+                trf_df.rename(columns={cols["valor"]: "Valor"}, inplace=True)
+            # garante colunas finais
+            for c in ["Saída", "Entrada", "Valor"]:
+                if c not in trf_df.columns:
+                    trf_df[c] = ""
+        trf_df["Saída"] = trf_df["Saída"].fillna("").astype(str).str.strip().replace("", "—")
+        trf_df["Entrada"] = trf_df["Entrada"].fillna("").astype(str).str.strip().replace("", "—")
+        trf_df["Valor"] = pd.to_numeric(trf_df["Valor"], errors="coerce").fillna(0.0)
+        trf_df = trf_df[["Valor", "Saída", "Entrada"]]  # ordem exata solicitada
+    else:
+        trf_df = pd.DataFrame(columns=["Valor", "Saída", "Entrada"])
 
     render_card_row(
         "🔁 Transferências",
