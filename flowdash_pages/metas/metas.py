@@ -342,7 +342,6 @@ def page_metas(df_entrada: Optional[pd.DataFrame], df_metas: Optional[pd.DataFra
             return page_metas(df_e2, df_m2, perfil2, usuario2)
         st.error("Não encontrei os DataFrames de entrada/metas automaticamente."); return
 
-    st.markdown("### 🎯 Metas — Dia / Semana / Mês")
     df_e = _norm_df_entrada(df_entrada)
 
     available_dates = df_e["Data"].dt.date.dropna()

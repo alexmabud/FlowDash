@@ -28,7 +28,7 @@ def render(df_entrada: pd.DataFrame) -> None:
       - 'Valor' (float)
       - 'Usuario' (str) — opcional
     """
-    st.subheader("📥 Entradas — DataFrame")
+   
     if not isinstance(df_entrada, pd.DataFrame) or df_entrada.empty:
         st.info("Nenhuma entrada encontrada (ou DataFrame inválido/vazio).")
         return

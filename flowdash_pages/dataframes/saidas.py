@@ -28,7 +28,7 @@ def render(df_saidas: pd.DataFrame) -> None:
       - 'Valor' (float)
       - 'Usuario' (str) — opcional
     """
-    st.subheader("📤 Saídas — DataFrame")
+    
     if not isinstance(df_saidas, pd.DataFrame) or df_saidas.empty:
         st.info("Nenhuma saída encontrada (ou DataFrame inválido/vazio).")
         return

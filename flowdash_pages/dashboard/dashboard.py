@@ -7,5 +7,5 @@ def render_dashboard(caminho_banco: str):
     Args:
         caminho_banco: Caminho para o banco SQLite.
     """
-    st.subheader("📊 Dashboard")
+   
     st.info("🚧 Em desenvolvimento...")

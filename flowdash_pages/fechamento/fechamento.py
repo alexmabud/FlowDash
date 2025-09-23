@@ -362,7 +362,6 @@ def _style_moeda_seguro(df: pd.DataFrame, cols_moeda: list[str]) -> pd.io.format
 # ========================= Página (layout) =========================
 def pagina_fechamento_caixa(caminho_banco: str) -> None:
     """Renderiza a página de Fechamento de Caixa (Streamlit)."""
-    st.markdown("## 🧾 Fechamento de Caixa")
 
     data_sel = st.date_input("📅 Data do Fechamento", value=date.today())
     st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")

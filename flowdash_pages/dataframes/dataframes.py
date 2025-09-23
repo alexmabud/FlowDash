@@ -332,22 +332,22 @@ def render():
         return
 
     if "Mercadorias" in pagina:
-        st.subheader("📦 Mercadorias — DataFrame")
+        
         st.info("Visão de Mercadorias ainda não implementada aqui. (Posso habilitar no próximo passo.)")
         return
 
     if "Fatura Cartão" in pagina:
-        st.subheader("💳 Fatura Cartão de Crédito — DataFrame")
+        
         st.info("Visão de Fatura ainda não implementada aqui. (Posso habilitar no próximo passo.)")
         return
 
     if "Contas a Pagar" in pagina:
-        st.subheader("📄 Contas a Pagar — DataFrame")
+        
         st.info("Visão de Contas a Pagar ainda não implementada aqui. (Posso habilitar no próximo passo.)")
         return
 
     if "Empréstimos/Financiamentos" in pagina or "Empréstimos" in pagina:
-        st.subheader("🏦 Empréstimos/Financiamentos — DataFrame")
+        
         st.info("Visão de Empréstimos ainda não implementada aqui. (Posso habilitar no próximo passo.)")
         return
 

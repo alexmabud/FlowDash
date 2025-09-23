@@ -65,11 +65,36 @@ from shared.dropbox_config import load_dropbox_settings, mask_token
 from shared.dbx_io import enviar_db_local, baixar_db_para_local
 from shared.dropbox_client import get_dbx  # para ler metadata (SDK)
 
+from shared.branding import sidebar_brand, page_header, login_brand
+
 
 # -----------------------------------------------------------------------------
 # Config inicial
 # -----------------------------------------------------------------------------
 st.set_page_config(page_title="FlowDash", layout="wide")
+
+
+# === Logos ===
+_LOGO_LOGIN_SIDEBAR_PATH = "assets/flowdash1.png"
+_LOGO_HEADER_PATH        = "assets/flowdash2.PNG"
+
+def aplicar_branding(is_login: bool = False) -> None:
+    """
+    Aplica as logos do FlowDash em toda execução (sem flags),
+    para não sumirem ao navegar entre páginas.
+    """
+    try:
+        if is_login:
+            # Tela de login
+            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=400, show_title=False)
+            return
+
+        # Após login (sempre redesenha)
+        sidebar_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=200)
+        page_header(custom_path=_LOGO_HEADER_PATH, logo_height_px=130, show_title=False)
+
+    except Exception as e:
+        st.caption(f"[branding] aviso: {e}")
 
 
 # -----------------------------------------------------------------------------
@@ -524,6 +549,9 @@ def _call_page(module_path: str) -> None:
 # Login
 # -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
+    # ⬅️ APLICA BRANDING NA TELA DE LOGIN
+    aplicar_branding(is_login=True)
+
     st.title("🔐 Login")
     with st.form("form_login"):
         email = st.text_input("Email")
@@ -548,6 +576,9 @@ if not st.session_state.usuario_logado:
 # -----------------------------------------------------------------------------
 # Sidebar / Navegação
 # -----------------------------------------------------------------------------
+# ⬅️ APLICA BRANDING APÓS LOGIN (sidebar + header)
+aplicar_branding()
+
 usuario = st.session_state.get("usuario_logado")
 if usuario is None:
     st.warning("Faça login para continuar.")

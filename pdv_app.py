@@ -35,6 +35,28 @@ import streamlit as st
 from utils.pin_utils import validar_pin
 
 # ---------------------------------------------------------------------------
+# Branding (mesma lógica/posições do main)
+# ---------------------------------------------------------------------------
+from shared.branding import sidebar_brand, page_header, login_brand
+
+_LOGO_LOGIN_SIDEBAR_PATH = "assets/flowdash1.png"
+_LOGO_HEADER_PATH        = "assets/flowdash2.PNG"
+
+def aplicar_branding_pdv(is_login: bool = False) -> None:
+    """Aplica logos no mesmo padrão do main."""
+    try:
+        if is_login:
+            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=400, show_title=False)
+            return
+        try:
+            sidebar_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=200)
+        except Exception:
+            pass
+        page_header(custom_path=_LOGO_HEADER_PATH, logo_height_px=130, show_title=False)
+    except Exception as e:
+        st.caption(f"[branding PDV] aviso: {e}")
+
+# ---------------------------------------------------------------------------
 # Bootstrap Dropbox / IO
 # ---------------------------------------------------------------------------
 from shared.db_from_dropbox_api import ensure_local_db_api
@@ -52,11 +74,9 @@ st.set_page_config(page_title="FlowDash PDV", layout="wide")
 # Helpers de flags / util
 # ---------------------------------------------------------------------------
 def _truthy(v) -> bool:
-    """Retorna True para valores '1/true/yes/y/on' (case-insensitive)."""
     return str(v).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 def _flag_debug() -> bool:
-    """DEBUG via secrets/env."""
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if _truthy(sec.get("debug", "0")):
@@ -66,7 +86,6 @@ def _flag_debug() -> bool:
     return _truthy(os.getenv("FLOWDASH_DEBUG", "0"))
 
 def _flag_dropbox_disable() -> bool:
-    """Modo offline (desabilita Dropbox) via secrets/env."""
     try:
         sec = dict(st.secrets.get("dropbox", {}))
         if _truthy(sec.get("disable", "0")):
@@ -76,13 +95,11 @@ def _flag_dropbox_disable() -> bool:
     return _truthy(os.getenv("DROPBOX_DISABLE", "0"))
 
 def _db_local_path() -> pathlib.Path:
-    """Caminho do SQLite local (garante diretório)."""
     p = _CURR_DIR / "data" / "flowdash_data.db"
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
 
 def _is_sqlite(path: pathlib.Path) -> bool:
-    """Checa header de SQLite."""
     try:
         with open(path, "rb") as f:
             return f.read(16).startswith(b"SQLite format 3")
@@ -90,7 +107,6 @@ def _is_sqlite(path: pathlib.Path) -> bool:
         return False
 
 def _has_table(path: pathlib.Path, table: str) -> bool:
-    """Existe tabela no SQLite?"""
     try:
         with sqlite3.connect(str(path)) as conn:
             cur = conn.execute(
@@ -102,7 +118,6 @@ def _has_table(path: pathlib.Path, table: str) -> bool:
         return False
 
 def _debug_file_info(path: pathlib.Path) -> str:
-    """Resumo do arquivo (tamanho + primeiros bytes)."""
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:
@@ -111,9 +126,7 @@ def _debug_file_info(path: pathlib.Path) -> str:
     except Exception as e:
         return f"(falha ao inspecionar: {e})"
 
-# throttle simples por sessão
 def _throttle(key: str, min_seconds: int) -> bool:
-    """Permite executar no máx. 1x por min_seconds; guarda timestamp em session_state[key]."""
     import time
     last = float(st.session_state.get(key) or 0.0)
     now = time.time()
@@ -133,7 +146,6 @@ FORCE_DOWNLOAD_CFG = _truthy(_cfg.get("force_download", "0"))
 TOKEN_SOURCE_CFG = _cfg.get("token_source", "none")
 _DROPBOX_DISABLED = _flag_dropbox_disable()
 
-# Importa requests só em DEBUG (reduz overhead em produção)
 if _DEBUG:
     import requests  # type: ignore
 
@@ -141,7 +153,6 @@ if _DEBUG:
 # Diagnóstico visual (opcional)
 # ---------------------------------------------------------------------------
 def _probe_current_account(token: str) -> str:
-    """Diagnóstico: users/get_current_account com token curto (legado)."""
     if not token:
         return "Sem token carregado (secrets/env)."
     try:
@@ -152,7 +163,6 @@ def _probe_current_account(token: str) -> str:
         return f"(erro: {e})"
 
 def _probe_get_metadata(token: str, path: str) -> str:
-    """Diagnóstico: files/get_metadata com token curto (legado)."""
     if not token:
         return "Sem token carregado (secrets/env)."
     try:
@@ -185,7 +195,7 @@ if _DEBUG:
                 st.markdown("**files/get_metadata (token curto, se existir)**")
                 st.code(_probe_get_metadata(ACCESS_TOKEN_CFG, DROPBOX_PATH_CFG))
 
-            if st.button("⚡ Forçar PULL (SDK/refresh)"):
+            if st.button("⚡ Forçar PULL (SDK/refresh)") and not _DROPBOX_DISABLED:
                 try:
                     local_path = baixar_db_para_local()
                     st.success(f"Baixado: {local_path}")
@@ -202,18 +212,8 @@ if _DEBUG:
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner=True)
 def ensure_db_available(access_token: str, dropbox_path: str, force_download: bool) -> tuple[str, str]:
-    """
-    Retorna (caminho_local, origem), onde origem ∈ {'Dropbox','Local'}.
-    Ordem:
-      0) OFFLINE -> local
-      1) Legado HTTP (token curto)
-      2) SDK/refresh
-      3) Local
-      4) st.stop() com erro
-    """
     db_local = _db_local_path()
 
-    # 0) OFFLINE
     if _DROPBOX_DISABLED:
         if db_local.exists() and db_local.stat().st_size > 0 and _is_sqlite(db_local) and _has_table(db_local, "usuarios"):
             st.session_state["db_mode"] = "local"
@@ -224,7 +224,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         st.error("❌ Modo offline: não há DB local válido em `data/flowdash_data.db` (tabela 'usuarios').")
         st.stop()
 
-    # 1) Legado HTTP
+    # 1) Legado (token curto)
     if access_token and dropbox_path:
         try:
             candidate_path = ensure_local_db_api(
@@ -247,7 +247,7 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         except Exception as e:
             st.warning(f"PDV: falha ao baixar via token (legado) do Dropbox: {e}")
 
-    # 2) SDK/refresh
+    # 2) SDK (refresh)
     try:
         candidate_path = baixar_db_para_local()
         candidate = pathlib.Path(candidate_path)
@@ -268,7 +268,6 @@ def ensure_db_available(access_token: str, dropbox_path: str, force_download: bo
         os.environ["FLOWDASH_DB"] = str(db_local)
         return str(db_local), "Local"
 
-    # 4) Erro
     info = _debug_file_info(db_local) if db_local.exists() else "(arquivo não existe)"
     st.error(
         "❌ Não foi possível obter um banco de dados válido para o PDV.\n\n"
@@ -290,12 +289,10 @@ st.session_state.setdefault("caminho_banco", DB_PATH)
 _PULL_THROTTLE_SECONDS = 45  # reduz chamadas remotas
 
 def _auto_pull_if_remote_newer() -> None:
-    """Sincroniza do Dropbox para local se remoto estiver mais novo (com throttle)."""
     if DB_ORIG != "Dropbox" or _DROPBOX_DISABLED:
         return
     if not _throttle("_pdv_pull_check", _PULL_THROTTLE_SECONDS):
         return
-
     try:
         dbx = get_dbx()
         meta = dbx.files_get_metadata(_effective_path)
@@ -328,7 +325,6 @@ def _auto_pull_if_remote_newer() -> None:
             st.warning(f"PDV: não foi possível baixar DB remoto (refresh): {e}")
 
 def _auto_push_if_local_changed() -> None:
-    """Envia DB local para Dropbox se mtime local aumentou."""
     if DB_ORIG != "Dropbox" or _DROPBOX_DISABLED:
         return
     try:
@@ -347,17 +343,28 @@ def _auto_push_if_local_changed() -> None:
 # Executa PULL antes de abrir conexões/consultas
 _auto_pull_if_remote_newer()
 
-# Badge
-st.caption(f"🗃️ Banco em uso: **{DB_ORIG}**")
-
 # ---------------------------------------------------------------------------
-# Estilo base
+# Estilo base (agora sem limitar a largura; igual ao main em 'wide')
 # ---------------------------------------------------------------------------
 st.markdown(
     """
     <style>
     [data-testid="stSidebar"] { display: none !important; }
-    .block-container {padding-top: 2rem; padding-bottom: 2rem; max-width: 1200px;}
+
+    /* Usa toda a largura, sem 'max-width' fixo, e com respiro no topo para a badge */
+    .block-container {
+        padding-top: 3.2rem;
+        padding-bottom: 2rem;
+        width: 100% !important;
+        max-width: none !important;
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
+        box-sizing: border-box;
+    }
+
+    /* Badge do banco (antes da logo) */
+    .db-badge { display:block; margin: 6px 0 12px; font-size: 0.86rem; color: #9AA0A6; }
+
     button[data-testid="baseButton-secondary"]{
         background: transparent !important; border: none !important; color: #64B5F6 !important;
         padding: 0 !important; box-shadow: none !important; min-width: auto !important;
@@ -373,7 +380,6 @@ st.markdown(
 # DB helpers
 # ---------------------------------------------------------------------------
 def _conn() -> sqlite3.Connection:
-    """Abre conexão SQLite usando DB_PATH."""
     db = DB_PATH
     if not db or not os.path.exists(db):
         st.error(f"❌ Banco de dados não encontrado em: `{db or '(vazio)'}`")
@@ -383,7 +389,6 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    """Existe tabela no DB aberto?"""
     return (
         conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND lower(name)=lower(?) LIMIT 1;", (name,)
@@ -393,7 +398,6 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
-    """Lista (id, nome, perfil) de usuários ativos que não são PDV."""
     with _conn() as conn:
         rows = conn.execute(
             "SELECT id, nome, perfil FROM usuarios "
@@ -404,7 +408,6 @@ def _listar_usuarios_ativos_sem_pdv() -> List[Tuple[int, str, str]]:
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _entrada_date_bounds() -> Tuple[date, date]:
-    """Retorna (min_data, max_data) da tabela 'entrada'."""
     today = date.today()
     try:
         with _conn() as conn:
@@ -420,7 +423,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
 
 @st.cache_data(show_spinner=False, ttl=20)
 def _metas_cfg() -> Tuple[float, float, float, float]:
-    """Lê configurações de metas: (meta_mensal, perc_prata, perc_bronze, perc_semanal)."""
     meta_mensal, perc_prata, perc_bronze, perc_semanal = 0.0, 87.5, 75.0, 25.0
     try:
         with _conn() as conn:
@@ -441,7 +443,6 @@ def _metas_cfg() -> Tuple[float, float, float, float]:
 # Metas / visualizações
 # ---------------------------------------------------------------------------
 def _fmt_moeda(v: float) -> str:
-    """Formata número em R$ com separadores pt-BR."""
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def _gauge_percentual_zonas(
@@ -453,7 +454,6 @@ def _gauge_percentual_zonas(
     bar_color_rgba: str = "rgba(76,175,80,0.85)",
     valor_label: Optional[str] = None,
 ) -> go.Figure:
-    """Gauge com zonas Bronze/Prata/Ouro + número."""
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata = max(bronze, min(100.0, float(prata_pct)))
     max_axis = max(100.0, float(axis_max))
@@ -490,7 +490,6 @@ def _gauge_percentual_zonas(
     return fig
 
 def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, acumulado: float) -> str:
-    """Card HTML de metas por período com 'falta' até o alvo."""
     def _linha(nivel: str, meta: float) -> str:
         falta = max(float(meta) - float(acumulado), 0.0)
         falta_txt = f"<span style='color:#00C853'>✅ {_fmt_moeda(0)}</span>" if falta <= 1e-5 else _fmt_moeda(falta)
@@ -522,11 +521,9 @@ def _card_periodo_html(titulo: str, ouro: float, prata: float, bronze: float, ac
     """
 
 def _inicio_semana(dt: date) -> date:
-    """Retorna a segunda-feira da semana de dt."""
     return dt - timedelta(days=dt.weekday())
 
 def _metas_loja_gauges(ref_day: date) -> None:
-    """Renderiza 3 gauges (Dia/Semana/Mês) + cards de metas/faltas da LOJA."""
     ym = f"{ref_day.year:04d}-{ref_day.month:02d}"
     inicio_sem = _inicio_semana(ref_day)
     inicio_mes = ref_day.replace(day=1)
@@ -594,7 +591,6 @@ def _metas_loja_gauges(ref_day: date) -> None:
 # ---------------------------------------------------------------------------
 @st.cache_resource
 def _resolve_render_venda() -> Callable[[SimpleNamespace], None] | None:
-    """Importa e retorna a função render_venda(state) do módulo de venda."""
     try:
         mod = importlib.import_module("flowdash_pages.lancamentos.venda.page_venda")
         fn = getattr(mod, "render_venda", None)
@@ -603,14 +599,12 @@ def _resolve_render_venda() -> Callable[[SimpleNamespace], None] | None:
         return None
 
 def _render_form_venda(vendedor: Dict[str, object]) -> None:
-    """Renderiza o formulário de venda para o vendedor selecionado."""
     st.markdown("## 🧾 Nova Venda")
     os.environ["FLOWDASH_DB"] = DB_PATH
     if not os.path.exists(DB_PATH):
         st.error(f"❌ DB não existe no caminho esperado:\n`{DB_PATH}`")
         st.stop()
 
-    # preserva usuário original; troca contexto para o vendedor
     if "pdv_original_user" not in st.session_state and "usuario_logado" in st.session_state:
         st.session_state["pdv_original_user"] = st.session_state["usuario_logado"]
         st.session_state["pdv_header_user"] = st.session_state["pdv_original_user"]
@@ -647,7 +641,6 @@ except Exception:
         from auth.auth import validar_login as auth_validar_login  # type: ignore
     except Exception:
         def auth_validar_login(email: str, senha: str, caminho_banco: Optional[str] = None) -> Optional[dict]:
-            """Fallback simples de login (hash no utils.utils)."""
             from utils.utils import gerar_hash_senha
             senha_hash = gerar_hash_senha(senha)
             caminho_banco = caminho_banco or DB_PATH
@@ -659,9 +652,8 @@ except Exception:
             return {"id": row[0], "nome": row[1], "email": row[2], "perfil": row[3]} if row else None
 
 def _login_box() -> bool:
-    """Form de login do PDV. Retorna True se logado."""
-    st.markdown("### 🔐 Login do PDV")
-    with st.form("form_login_pdv", clear_on_submit=False):
+    # Formulário com o MESMO id e campos do main (mesma dimensão e comportamento)
+    with st.form("form_login", clear_on_submit=False):
         email = st.text_input("Email", max_chars=100)
         senha = st.text_input("Senha", type="password", max_chars=50)
         ok = st.form_submit_button("Entrar")
@@ -676,26 +668,22 @@ def _login_box() -> bool:
     return bool(st.session_state.get("usuario_logado"))
 
 def _buscar_pin_usuario(usuario_id: int) -> Optional[str]:
-    """Obtém PIN do usuário ativo."""
     with _conn() as conn:
         row = conn.execute("SELECT pin FROM usuarios WHERE id = ? AND ativo = 1", (usuario_id,)).fetchone()
     return None if not row else row["pin"]
 
 def _inc_tentativa(usuario_id: int) -> int:
-    """Incrementa contador de tentativas de PIN para o usuário."""
     key = "pdv_pin_tentativas"
     st.session_state.setdefault(key, {})
     st.session_state[key][usuario_id] = st.session_state[key].get(usuario_id, 0) + 1
     return st.session_state[key][usuario_id]
 
 def _reset_tentativas(usuario_id: int) -> None:
-    """Zera tentativas de PIN."""
     key = "pdv_pin_tentativas"
     if key in st.session_state and usuario_id in st.session_state[key]:
         st.session_state[key][usuario_id] = 0
 
 def _selecionar_vendedor_e_validar_pin() -> Optional[Dict]:
-    """Fluxo de seleção de vendedor + validação de PIN."""
     st.markdown("#### 👤 Vendedor da Venda")
     usuarios = _listar_usuarios_ativos_sem_pdv()
     if not usuarios:
@@ -760,12 +748,21 @@ def main() -> None:
     if _flash:
         st.success(_flash)
 
-    st.markdown("# 🧾 FlowDash — PDV")
+    # === Badge ANTES da logo (com margem dedicada) ===
+    st.markdown(f"<span class='db-badge'>🗃️ Banco em uso: <strong>{DB_ORIG}</strong></span>", unsafe_allow_html=True)
+
+    # Branding conforme estado de login — igual ao main (logo depois da badge)
+    if not st.session_state.get("usuario_logado"):
+        aplicar_branding_pdv(is_login=True)
+        st.title("🔐 Login")  # mesmo título do main
+    else:
+        aplicar_branding_pdv(is_login=False)
+        st.markdown("# 🧾 FlowDash — PDV")
 
     # login
     if not st.session_state.get("usuario_logado"):
-        if not _login_box():
-            _auto_push_if_local_changed()  # se houve cadastros antes do login efetivo
+        if not _login_box():  # mesmo form id do main => mesmas dimensões
+            _auto_push_if_local_changed()
             return
     else:
         header_user = st.session_state.get("pdv_header_user", st.session_state["usuario_logado"])
@@ -799,62 +796,64 @@ def main() -> None:
                 if st.button("Sair", key="btn_logout", type="secondary"):
                     if "pdv_original_user" in st.session_state:
                         st.session_state["usuario_logado"] = st.session_state.pop("pdv_original_user")
+                    else:
+                        st.session_state.pop("usuario_logado", None)
                     st.session_state.pop("pdv_header_user", None)
                     for k in ("pdv_mostrar_form", "pdv_vendedor_venda", "pdv_context"):
                         st.session_state.pop(k, None)
+                    st.session_state["pdv_flash_ok"] = "Sessão encerrada."
                     st.rerun()
 
-    # metas + gauges
-    ref_day = st.session_state.get("pdv_ref_date", date.today())
-    st.markdown(f"**Metas do dia — {ref_day:%Y-%m-%d}**")
-    _metas_loja_gauges(ref_day)
-    st.divider()
+        # metas + gauges
+        ref_day = st.session_state.get("pdv_ref_date", date.today())
+        st.markdown(f"**Metas do dia — {ref_day:%Y-%m-%d}**")
+        _metas_loja_gauges(ref_day)
+        st.divider()
 
-    # CTA "Nova Venda"
-    if not st.session_state.get("pdv_mostrar_form"):
-        st.markdown('<div class="nv-wrap">', unsafe_allow_html=True)
-        if st.button("➕ Nova Venda", key="btn_nova_venda", use_container_width=True):
-            st.session_state["pdv_mostrar_form"] = True
-            st.session_state.pop("pdv_vendedor_venda", None)
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-        _auto_push_if_local_changed()
-        return
-
-    # Seleção de vendedor + PIN
-    vendedor = st.session_state.get("pdv_vendedor_venda")
-    if not vendedor:
-        vendedor = _selecionar_vendedor_e_validar_pin()
-        if vendedor:
-            st.session_state["pdv_vendedor_venda"] = vendedor
-            st.session_state["pdv_flash_ok"] = f"Vendedor **{vendedor['nome']}** identificado para a venda."
-            st.rerun()
-        else:
+        # CTA "Nova Venda"
+        if not st.session_state.get("pdv_mostrar_form"):
+            st.markdown('<div class="nv-wrap">', unsafe_allow_html=True)
+            if st.button("➕ Nova Venda", key="btn_nova_venda", use_container_width=True):
+                st.session_state["pdv_mostrar_form"] = True
+                st.session_state.pop("pdv_vendedor_venda", None)
+                st.rerun()
+            st.markdown("</div>", unsafe_allow_html=True)
             _auto_push_if_local_changed()
             return
 
-    # Formulário de venda
-    _render_form_venda(vendedor)
+        # Seleção de vendedor + PIN
+        vendedor = st.session_state.get("pdv_vendedor_venda")
+        if not vendedor:
+            vendedor = _selecionar_vendedor_e_validar_pin()
+            if vendedor:
+                st.session_state["pdv_vendedor_venda"] = vendedor
+                st.session_state["pdv_flash_ok"] = f"Vendedor **{vendedor['nome']}** identificado para a venda."
+                st.rerun()
+            else:
+                _auto_push_if_local_changed()
+                return
 
-    # Ações de rodapé (troca/cancelar)
-    col_a, col_b = st.columns([1, 1])
-    with col_a:
-        if st.button("🔁 Trocar vendedor desta venda", key="btn_trocar_vend", use_container_width=True):
-            if "pdv_original_user" in st.session_state:
-                st.session_state["usuario_logado"] = st.session_state["pdv_original_user"]
-            st.session_state.pop("pdv_vendedor_venda", None)
-            st.rerun()
-    with col_b:
-        if st.button("❌ Cancelar venda", key="btn_cancelar_venda", use_container_width=True):
-            if "pdv_original_user" in st.session_state:
-                st.session_state["usuario_logado"] = st.session_state.pop("pdv_original_user")
-            st.session_state.pop("pdv_header_user", None)
-            for k in ("pdv_mostrar_form", "pdv_vendedor_venda", "pdv_context"):
-                st.session_state.pop(k, None)
-            st.session_state["pdv_flash_ok"] = "Venda cancelada."
-            st.rerun()
+        # Formulário de venda
+        _render_form_venda(vendedor)
 
-    # push no final do ciclo
+        # Ações de rodapé (troca/cancelar)
+        col_a, col_b = st.columns([1, 1])
+        with col_a:
+            if st.button("🔁 Trocar vendedor desta venda", key="btn_trocar_vend", use_container_width=True):
+                if "pdv_original_user" in st.session_state:
+                    st.session_state["usuario_logado"] = st.session_state["pdv_original_user"]
+                st.session_state.pop("pdv_vendedor_venda", None)
+                st.rerun()
+        with col_b:
+            if st.button("❌ Cancelar venda", key="btn_cancelar_venda", use_container_width=True):
+                if "pdv_original_user" in st.session_state:
+                    st.session_state["usuario_logado"] = st.session_state.pop("pdv_original_user")
+                st.session_state.pop("pdv_header_user", None)
+                for k in ("pdv_mostrar_form", "pdv_vendedor_venda", "pdv_context"):
+                    st.session_state.pop(k, None)
+                st.session_state["pdv_flash_ok"] = "Venda cancelada."
+                st.rerun()
+
     _auto_push_if_local_changed()
 
 if __name__ == "__main__":
