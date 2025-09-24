@@ -8,11 +8,11 @@ diário em `saldos_caixas` e registra 1 (uma) linha no livro
 
 Decisões/Convenções
 -------------------
-- Abatimento prioritário do saldo: primeiro `caixa`, depois `caixa_vendas`.
+- Abatimento prioritário do saldo: **primeiro `caixa_vendas`**, depois `caixa`.
 - Snapshot único por dia em `saldos_caixas`:
     - caixa        ← prev.caixa
-    - caixa_vendas ← prev.caixa_vendas
-    - caixa_total  ← prev.caixa_total
+    - caixa_vendas ← 0.0  (vendas do dia começam zeradas)
+    - caixa_total  ← caixa  (sempre = caixa + caixa_vendas)
     - caixa_2      ← prev.caixa2_total (saldo base do dia)
     - caixa2_dia   ← 0.0 (novo dia começa zerado)
     - caixa2_total ← prev.caixa2_total
@@ -81,7 +81,7 @@ def transferir_para_caixa2(
     Processo:
       1. Garante snapshot do dia (herdando do último dia anterior, se preciso).
       2. Valida saldo disponível (caixa + caixa_vendas).
-      3. Abate primeiro de `caixa`, depois de `caixa_vendas`.
+      3. Abate **primeiro `caixa_vendas`**, depois `caixa`.
       4. Faz UPSERT do snapshot do dia.
       5. Registra 1 linha de ENTRADA em `movimentacoes_bancarias`.
 
@@ -139,25 +139,27 @@ def transferir_para_caixa2(
             ).fetchone()
             snap_id        = None
             base_caixa     = _r2(prev[1]) if prev else 0.0
-            base_caixa2    = _r2(prev[2]) if prev else 0.0
-            base_vendas    = _r2(prev[3]) if prev else 0.0
+            base_caixa2    = _r2(prev[6]) if prev else 0.0  # abertura do dia é o total do caixa 2 de ontem
+            base_vendas    = 0.0  # vendas do novo dia começam em zero
             base_caixa2dia = 0.0  # novo dia
 
         # Valida disponibilidade (somente caixa + vendas)
         base_total_dinheiro = _r2(base_caixa + base_vendas)
         if valor_f > base_total_dinheiro:
             raise ValueError(
-                f"Valor indisponível. Caixa Total atual é {fmt_brl_md(base_total_dinheiro)}."
+                f"Valor indisponível. Dinheiro disponível (caixa + vendas) é {fmt_brl_md(base_total_dinheiro)}."
             )
 
-        # Abatimento
-        usar_caixa  = _r2(min(valor_f, base_caixa))
-        usar_vendas = _r2(valor_f - usar_caixa)
+        # Abatimento (PRIORIDADE: VENDAS → CAIXA)
+        usar_vendas = _r2(min(valor_f, base_vendas))
+        restante    = _r2(valor_f - usar_vendas)
+        usar_caixa  = _r2(min(restante, base_caixa))
 
-        novo_caixa       = max(0.0, _r2(base_caixa - usar_caixa))
-        novo_vendas      = max(0.0, _r2(base_vendas - usar_vendas))
-        novo_caixa2_dia  = max(0.0, _r2(base_caixa2dia + valor_f))
+        novo_vendas      = _r2(max(0.0, base_vendas - usar_vendas))
+        novo_caixa       = _r2(max(0.0, base_caixa - usar_caixa))
         novo_caixa_total = _r2(novo_caixa + novo_vendas)
+
+        novo_caixa2_dia  = _r2(base_caixa2dia + valor_f)
         novo_caixa2_tot  = _r2(base_caixa2 + novo_caixa2_dia)
 
         # UPSERT snapshot
@@ -224,10 +226,10 @@ def _ensure_snapshot_herdado(conn: sqlite3.Connection, data_str: str) -> None:
     """
     Garante snapshot do dia herdando do último anterior.
 
-    Herdado:
+    Herdado (correto para o novo dia):
       - caixa        ← prev.caixa
-      - caixa_vendas ← prev.caixa_vendas
-      - caixa_total  ← prev.caixa_total
+      - caixa_vendas ← 0.0
+      - caixa_total  ← caixa  (sempre = caixa + caixa_vendas)
       - caixa_2      ← prev.caixa2_total
       - caixa2_dia   ← 0.0
       - caixa2_total ← prev.caixa2_total
@@ -236,13 +238,11 @@ def _ensure_snapshot_herdado(conn: sqlite3.Connection, data_str: str) -> None:
     """
     data_str = str(data_str)
 
-    # Inserir se não existir
+    # Inserir se não existir (herdando corretamente)
     sql_insert = """
     WITH prev AS (
         SELECT
             COALESCE(caixa, 0.0)        AS c,
-            COALESCE(caixa_vendas, 0.0) AS cv,
-            COALESCE(caixa_total, 0.0)  AS ct,
             COALESCE(caixa2_total, 0.0) AS c2t
         FROM saldos_caixas
         WHERE DATE(data) = (
@@ -255,26 +255,23 @@ def _ensure_snapshot_herdado(conn: sqlite3.Connection, data_str: str) -> None:
     INSERT INTO saldos_caixas
         (data, caixa, caixa_2, caixa_vendas, caixa_total, caixa2_dia, caixa2_total)
     SELECT DATE(:data),
-           COALESCE(c,0.0),
-           COALESCE(c2t,0.0),
-           COALESCE(cv,0.0),
-           COALESCE(ct,0.0),
-           0.0,
-           COALESCE(c2t,0.0)
-    FROM prev
+           COALESCE(c,0.0),              -- caixa (abertura do dia)
+           COALESCE(c2t,0.0),            -- caixa_2 (abertura do dia)
+           0.0,                          -- caixa_vendas zera no dia
+           COALESCE(c,0.0) + 0.0,        -- caixa_total = caixa + caixa_vendas
+           0.0,                          -- caixa2_dia zera no dia
+           COALESCE(c2t,0.0)             -- caixa2_total começa igual à abertura
     WHERE NOT EXISTS (
         SELECT 1 FROM saldos_caixas WHERE DATE(data)=DATE(:data)
     );
     """
     conn.execute(sql_insert, {"data": data_str})
 
-    # Atualizar se já existe e está zerado
+    # Atualizar se já existe e está zerado (alinhar para o estado correto)
     sql_update = """
     WITH prev AS (
         SELECT
             COALESCE(caixa, 0.0)        AS c,
-            COALESCE(caixa_vendas, 0.0) AS cv,
-            COALESCE(caixa_total, 0.0)  AS ct,
             COALESCE(caixa2_total, 0.0) AS c2t
         FROM saldos_caixas
         WHERE DATE(data) = (
@@ -287,8 +284,8 @@ def _ensure_snapshot_herdado(conn: sqlite3.Connection, data_str: str) -> None:
     UPDATE saldos_caixas
        SET caixa        = COALESCE((SELECT c   FROM prev), 0.0),
            caixa_2      = COALESCE((SELECT c2t FROM prev), 0.0),
-           caixa_vendas = COALESCE((SELECT cv  FROM prev), 0.0),
-           caixa_total  = COALESCE((SELECT ct  FROM prev), 0.0),
+           caixa_vendas = 0.0,
+           caixa_total  = COALESCE((SELECT c   FROM prev), 0.0),
            caixa2_dia   = 0.0,
            caixa2_total = COALESCE((SELECT c2t FROM prev), 0.0)
      WHERE DATE(data) = DATE(:data)
