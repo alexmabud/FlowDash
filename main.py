@@ -53,7 +53,7 @@ from auth.auth import (
     exibir_usuario_logado,
     limpar_todas_as_paginas,
 )
-from utils.utils import garantir_trigger_totais_saldos_caixas
+from utils.utils import garantir_trigger_totais_saldos_caixas  # (import mantido; chamada desativada)
 
 # Legado (opcional, só para bootstrap com access_token curto)
 from shared.db_from_dropbox_api import ensure_local_db_api
@@ -417,14 +417,19 @@ st.caption(f"🗃️ Banco em uso: **{_db_origem}**")
 
 
 # -----------------------------------------------------------------------------
-# Garantias/infra mínimas (executa só 1x por sessão)
+# Garantias/infra mínimas — DESATIVADO no boot
 # -----------------------------------------------------------------------------
-if not st.session_state.get("_infra_trigger_ok"):
-    try:
-        garantir_trigger_totais_saldos_caixas(_caminho_banco)
-        st.session_state["_infra_trigger_ok"] = True
-    except Exception as e:
-        st.warning(f"Trigger de totais não criada: {e}")
+# ⚠️ Importante: esta chamada estava causando INSERT em `saldos_caixas`
+# já na tela de login. A criação/alteração de linha deve ocorrer APENAS
+# nas actions (salvar operação). Se precisar reativar futuramente,
+# torne a função "pura" (apenas DDL das triggers) e chame após login.
+#
+# if not st.session_state.get("_infra_trigger_ok"):
+#     try:
+#         garantir_trigger_totais_saldos_caixas(_caminho_banco)
+#         st.session_state["_infra_trigger_ok"] = True
+#     except Exception as e:
+#         st.warning(f"Trigger de totais não criada: {e}")
 
 
 # -----------------------------------------------------------------------------

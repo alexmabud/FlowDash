@@ -2,12 +2,13 @@
 """
 Página principal do Depósito – monta layout e chama forms/actions.
 
-Comportamento alinhado à Transferência:
-- Toggle do formulário
-- Confirmação obrigatória
-- Botão salvar desabilitado até confirmar
-- Mensagens de sucesso/erro
-- st.rerun() após sucesso
+Comportamento esperado:
+- O baseline diário (snapshot da véspera) é garantido DENTRO da ação de depósito,
+  e não na renderização da página, para evitar a criação de linhas vazias.
+- Toggle do formulário.
+- Confirmação obrigatória para habilitar o botão Salvar.
+- Mensagens de sucesso/erro.
+- st.rerun() após sucesso.
 """
 
 from __future__ import annotations
@@ -21,22 +22,14 @@ from utils.utils import coerce_data  # normaliza para datetime.date
 from .actions_deposito import carregar_nomes_bancos, registrar_deposito
 from .state_deposito import form_visivel, invalidate_confirm, toggle_form
 from .ui_forms_deposito import render_form_deposito
+# A importação de _ensure_snapshot_do_dia não é mais necessária aqui
+# from ..caixa2.actions_caixa2 import _ensure_snapshot_do_dia
+from shared.db import get_conn
 
 
 # --- helpers (mesmo estilo da Transferência) ---
 def _norm_date(d: Any) -> _dt.date:
-    """
-    Converte a entrada em uma data (`datetime.date`).
-
-    Args:
-        d (Any): Data em vários formatos aceitos (date/datetime/str/None).
-
-    Returns:
-        datetime.date: Data normalizada.
-
-    Raises:
-        ValueError: Se a data não puder ser normalizada.
-    """
+    """Converte a entrada em uma data (datetime.date)."""
     return coerce_data(d)
 
 
@@ -45,20 +38,7 @@ def _coalesce_state(
     caminho_banco: Optional[str],
     data_lanc: Optional[Any],
 ) -> Tuple[str, _dt.date]:
-    """
-    Extrai `(db_path, data_lanc)` a partir do `state` com fallback para os argumentos diretos.
-
-    Args:
-        state (Any): Objeto de estado com possíveis atributos (`db_path`, `caminho_banco`, `data_lanc`, etc.).
-        caminho_banco (Optional[str]): Caminho do SQLite (fallback).
-        data_lanc (Optional[Any]): Data do lançamento (fallback).
-
-    Returns:
-        tuple[str, datetime.date]: Caminho do banco e a data de lançamento normalizada.
-
-    Raises:
-        ValueError: Se o caminho do banco não for informado.
-    """
+    """Extrai (db_path, data_lanc) a partir do state/args."""
     db = None
     dt = None
     if state is not None:
@@ -76,36 +56,40 @@ def _coalesce_state(
 
 
 def _resolve_usuario(state: Any = None) -> str:
-    """
-    Obtém o usuário logado de `st.session_state` e, se não encontrado, do `state`.
-
-    Busca nas chaves/atributos: 'usuario_logado', 'usuario', 'user_name', 'username',
-    'nome_usuario', 'user', 'current_user', 'email'. Se vier dict, tenta subchaves
-    ('nome', 'name', 'login', 'email').
-
-    Args:
-        state (Any, optional): Objeto de estado com possíveis atributos de usuário.
-
-    Returns:
-        str: Nome do usuário, ou string vazia se não encontrado.
-    """
-    # session_state
-    for key in ["usuario_logado", "usuario", "user_name", "username", "nome_usuario", "user", "current_user"]:
-        val = st.session_state.get(key)
-        if isinstance(val, str) and val.strip():
-            return val.strip()
-        if isinstance(val, dict):
-            for subk in ("nome", "name", "login", "email"):
-                v2 = val.get(subk)
-                if isinstance(v2, str) and v2.strip():
-                    return v2.strip()
-    # state (atributos)
+    """Obtém o usuário logado de session_state/state."""
+    for k in ("usuario_logado", "usuario", "user_name", "username", "nome_usuario", "user", "current_user", "email"):
+        v = st.session_state.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+        if isinstance(v, dict):
+            for kk in ("nome", "name", "login", "email"):
+                if isinstance(v.get(kk), str) and v[kk].strip():
+                    return v[kk].strip()
     if state is not None:
-        for attr in ["usuario_logado", "usuario", "user_name", "username", "nome_usuario", "user", "current_user", "email"]:
-            v = getattr(state, attr, None)
+        for k in ("usuario_logado", "usuario", "user_name", "username", "nome_usuario", "user", "current_user", "email"):
+            v = getattr(state, k, None)
             if isinstance(v, str) and v.strip():
                 return v.strip()
-    return ""
+    return "sistema"
+
+
+def _parse_valor_br(raw: Any) -> float:
+    """Converte '60', '60,00', '1.234,56', 'R$ 1.234,56' em float. Retorna 0.0 se falhar."""
+    try:
+        s = str(raw or "").strip()
+        if not s:
+            return 0.0
+        s = s.replace("R$", "").replace(" ", "")
+        if "," in s and "." in s and s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        try:
+            return float(raw or 0)
+        except Exception:
+            return 0.0
 
 
 def render_deposito(
@@ -116,16 +100,8 @@ def render_deposito(
     """
     Renderiza a página de Depósito. Preferencialmente chame com `render_deposito(state)`;
     é compatível com a chamada via argumentos diretos.
-
-    Args:
-        state (Any, optional): Objeto de estado com configurações e dados do contexto.
-        caminho_banco (Optional[str], optional): Caminho do banco de dados SQLite.
-        data_lanc (Optional[Any], optional): Data do lançamento (formatos aceitos por `coerce_data`).
-
-    Returns:
-        None
     """
-    # Resolver entradas (mesma ideia da Transferência)
+    # Resolver entradas
     try:
         _db_path, _data_lanc = _coalesce_state(state, caminho_banco, data_lanc)
     except Exception as e:
@@ -148,8 +124,8 @@ def render_deposito(
 
     form = render_form_deposito(_data_lanc, nomes_bancos, invalidate_confirm)
 
-    # Confirmação obrigatória (lado servidor)
-    confirmada = bool(st.session_state.get("deposito_confirmado", False))
+    # Confirmação vinda do form (fallback para session_state)
+    confirmada = bool(form.get("confirmado", st.session_state.get("deposito_confirmado", False)))
 
     # Botão de salvar: desabilitado até confirmar
     save_clicked = st.button(
@@ -159,19 +135,14 @@ def render_deposito(
         disabled=not confirmada,
     )
 
-    # Mensagem de instrução SEMPRE visível abaixo do botão
     st.info("Confirme os dados para habilitar o botão de salvar.")
 
-    # Só continua se clicou em salvar **e** já está confirmado
     if not (confirmada and save_clicked):
         return
 
     # ===================== Validações =====================
     banco_dest = (form.get("banco_destino") or "").strip()
-    try:
-        valor = float(form.get("valor", 0) or 0)
-    except Exception:
-        valor = 0.0
+    valor = _parse_valor_br(form.get("valor", 0))
 
     if not banco_dest:
         st.info("Informe o banco de destino.")
@@ -190,7 +161,6 @@ def render_deposito(
             banco_in=banco_dest,
             usuario=usuario_atual,
         )
-        # Banner de sucesso padrão (página principal lê msg_ok)
         st.session_state["msg_ok"] = res.get("msg", "Depósito registrado.")
         st.session_state.form_deposito = False
         st.success(res.get("msg", "Depósito registrado com sucesso."))

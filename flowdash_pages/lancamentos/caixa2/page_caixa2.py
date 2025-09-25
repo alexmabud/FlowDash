@@ -10,16 +10,13 @@ Fluxo:
     1) Resolve inputs (caminho do banco e data).
     2) Toggle do formulário via botão.
     3) Renderiza UI do form (data + valor) e aguarda confirmação.
-    4) Valida o valor ( > 0 ).
+    4) Valida o valor (> 0).
     5) Chama a action `transferir_para_caixa2`, fecha o form e informa sucesso.
 
-Entrada:
-    - state (opcional): objeto com possíveis atributos (db_path/caminho_banco, data_lanc/...).
-    - caminho_banco (opcional): caminho do SQLite (fallback).
-    - data_lanc (opcional): date ou 'YYYY-MM-DD' (fallback).
-
-Saída:
-    - Nenhuma. Renderiza componentes Streamlit e mensagens de status.
+Observação importante:
+    NÃO cria linha automática na tabela `saldos_caixas` ao renderizar a página.
+    A eventual criação/replicação de linha ocorre SOMENTE dentro da action,
+    quando há uma operação confirmada.
 """
 
 from __future__ import annotations
@@ -31,7 +28,7 @@ import streamlit as st
 
 from .state_caixa2 import toggle_form, form_visivel, close_form
 from .ui_forms_caixa2 import render_form
-from .actions_caixa2 import transferir_para_caixa2
+from .actions_caixa2 import transferir_para_caixa2  # <- sem _ensure_snapshot_do_dia
 
 __all__ = ["render_caixa2"]
 
@@ -75,6 +72,30 @@ def _coalesce_state(
     return str(db), dt_str
 
 
+def _parse_valor_br(raw: Any) -> float:
+    """
+    Converte entradas tipo '60', '60,00', '1.234,56', 'R$ 1.234,56' em float.
+    Retorna 0.0 se não for possível converter.
+    """
+    try:
+        s = str(raw or "").strip()
+        if not s:
+            return 0.0
+        s = s.replace("R$", "").replace(" ", "")
+        # Caso '1.234,56' (ponto milhar + vírgula decimal)
+        if "," in s and "." in s and s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            # Caso '60,00' ou só '60'
+            s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        try:
+            return float(raw or 0)
+        except Exception:
+            return 0.0
+
+
 def render_caixa2(
     state: Any = None,
     caminho_banco: Optional[str] = None,
@@ -100,11 +121,8 @@ def render_caixa2(
     if not form.get("submit"):
         return
 
-    # 4) Validação do valor
-    try:
-        v = float(form.get("valor", 0) or 0)
-    except Exception:
-        v = 0.0
+    # 4) Validação do valor (tolerante a formatos BRL)
+    v = _parse_valor_br(form.get("valor", 0))
     if v <= 0:
         st.warning("⚠️ Valor inválido.")
         return
@@ -126,7 +144,7 @@ def render_caixa2(
             or "sistema"
         )
 
-    # 6) Executa a ação
+    # 6) Executa a ação (só aqui pode criar linha do dia e aplicar a movimentação)
     try:
         res = transferir_para_caixa2(
             caminho_banco=_db_path,

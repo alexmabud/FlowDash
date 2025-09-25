@@ -1,19 +1,22 @@
-# ===================== Actions: Página de Lançamentos =====================
+# -*- coding: utf-8 -*-
 """
+Actions: Página de Lançamentos (READ-ONLY)
+=========================================
+
 Resumo
 ------
-Consulta o SQLite e calcula os dados do resumo do dia (vendas, saídas, saldos,
-transferências e mercadorias).
+Consulta o SQLite e calcula os dados do resumo do dia **sem efeitos colaterais**.
+Trocar a data no calendário NÃO cria linha em `saldos_caixas`.
 
-Regra de VENDAS (atualizado):
-- Soma SOMENTE vendas cujo **DATE(Data)** = dia selecionado (data da VENDA).
-- Não usa created_at para o card Vendas.
-- Formas consideradas "venda": DINHEIRO, PIX, DÉBITO, CRÉDITO, LINK_PAGAMENTO (e variações).
-
-Demais cartões permanecem como antes:
-- Saídas do dia por DATE(data)
-- Caixas e bancos: somatório acumulado <= data
-- Depósitos/transferências/mercadorias: lógica inalterada
+Regras
+------
+- Vendas: soma SOMENTE vendas cujo DATE(Data) = dia selecionado.
+- Formas tratadas como "venda": DINHEIRO, PIX, DÉBITO/DEBITO, CRÉDITO/CREDITO,
+  LINK_PAGAMENTO (variações).
+- Caixas: usa os totais **da linha da data** em `saldos_caixas` (sem somatórios).
+- Saídas do dia: por DATE(data).
+- Saldos de bancos: acumulado <= data.
+- Nenhum INSERT/UPDATE aqui. Apenas SELECT.
 """
 
 from __future__ import annotations
@@ -21,9 +24,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 
 import pandas as pd
-
 from shared.db import get_conn
-
 
 # --------------------- Formas de pagamento tratadas como "venda" ---------------------
 _FORMAS_VENDA = {
@@ -32,7 +33,6 @@ _FORMAS_VENDA = {
     "CRÉDITO", "CREDITO",
     "LINK_PAGAMENTO", "LINK PAGAMENTO", "LINK-DE-PAGAMENTO", "LINK DE PAGAMENTO",
 }
-
 
 def _total_vendas_por_data(conn, data_str: str) -> float:
     """
@@ -56,18 +56,18 @@ def _total_vendas_por_data(conn, data_str: str) -> float:
     except Exception:
         return 0.0
 
-
 # ===================== API =====================
 def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
     """
-    Carrega totais e listas do dia selecionado.
+    Carrega totais e listas do dia selecionado **sem criar/alterar** registros.
 
     Agrega:
       - total_vendas: **Data** (dia da VENDA)
       - total_saidas: soma de `saida.valor` (DATE(data) = dia)
-      - caixa_total/caixa2_total: **somatório acumulado** <= data (tabela `saldos_caixas`)
+      - caixa_total/caixa2_total: **valores da linha da data** (tabela `saldos_caixas`)
       - saldos_bancos: soma acumulada por banco <= data (tabela `saldos_bancos`)
       - listas do dia: depósitos, transferências, mercadorias (compras/recebimentos)
+      - tem_snapshot: bool indicando se existe linha em `saldos_caixas` no dia
     """
     total_vendas, total_saidas = 0.0, 0.0
     caixa_total = 0.0
@@ -78,8 +78,9 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
     compras_list: List[Tuple[str, str, float]] = []
     receb_list: List[Tuple[str, str, float]] = []
     saldos_bancos: Dict[str, float] = {}
+    tem_snapshot = False
 
-    # Normaliza a data
+    # Normaliza a data (string)
     data_str = str(data_lanc)
     try:
         data_ref_date = pd.to_datetime(data_str, errors="coerce").date()
@@ -87,6 +88,13 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
         data_ref_date = None
 
     with get_conn(caminho_banco) as conn:
+        # 🚫 Blindagem extra: impede qualquer escrita por engano nesta conexão
+        try:
+            conn.execute("PRAGMA query_only = ON;")
+        except Exception:
+            # Ignora se a versão do SQLite não suportar; as consultas abaixo são só SELECT.
+            pass
+
         cur = conn.cursor()
 
         # ===== VENDAS do dia: por Data =====
@@ -104,23 +112,22 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
             ).fetchone()[0] or 0.0
         )
 
-        # ===== Caixas: SOMATÓRIO acumulado <= data =====
-        try:
-            row = cur.execute(
-                """
-                SELECT 
-                    COALESCE(SUM(COALESCE(caixa_total, 0.0)), 0.0)  AS cx_total,
-                    COALESCE(SUM(COALESCE(caixa2_total, 0.0)), 0.0) AS cx2_total
-                FROM saldos_caixas
-                WHERE DATE(data) <= DATE(?)
-                """,
-                (data_str,),
-            ).fetchone()
-            if row:
-                caixa_total = float(row[0] or 0.0)
-                caixa2_total = float(row[1] or 0.0)
-        except Exception:
-            pass
+        # ===== Caixas: TOTAIS DA LINHA DA DATA (sem somatórios) =====
+        row = cur.execute(
+            """
+            SELECT 
+                COALESCE(caixa_total, 0.0)  AS cx_total,
+                COALESCE(caixa2_total, 0.0) AS cx2_total
+              FROM saldos_caixas
+             WHERE DATE(data) = DATE(?)
+             LIMIT 1
+            """,
+            (data_str,),
+        ).fetchone()
+        if row:
+            caixa_total = float(row[0] or 0.0)
+            caixa2_total = float(row[1] or 0.0)
+            tem_snapshot = True
 
         # ===== Transferência p/ Caixa 2 (dia) — dedupe por trans_uid/id =====
         transf_caixa2_total = float(
@@ -141,7 +148,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
         )
 
         # ===== Depósitos do dia — dedupe por trans_uid/id =====
-        depositos_list = cur.execute(
+        depo_rows = cur.execute(
             """
             SELECT m.banco, m.valor
               FROM movimentacoes_bancarias m
@@ -156,6 +163,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
             """,
             (data_str,),
         ).fetchall()
+        depositos_list = [(str(r[0] or ""), float(r[1] or 0.0)) for r in depo_rows]
 
         # ===== Transferências banco→banco do dia (pareadas) =====
         pares = listar_transferencias_bancos_do_dia(caminho_banco, data_str)
@@ -177,7 +185,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
             cols = {c.lower(): c for c in df_compras.columns}
             col_col = cols.get("colecao") or cols.get("coleção")
             col_forn = cols.get("fornecedor")
-            col_val = cols.get("valor_mercadoria")
+            col_val = cols.get("valor_mercadoria") or cols.get("valor da mercadoria")
             for _, r in df_compras.iterrows():
                 compras_list.append(
                     (
@@ -207,7 +215,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
             col_col = cols.get("colecao") or cols.get("coleção")
             col_forn = cols.get("fornecedor")
             col_vr = cols.get("valor_recebido")
-            col_vm = cols.get("valor_mercadoria")
+            col_vm = cols.get("valor_mercadoria") or cols.get("valor da mercadoria")
             for _, r in df_receb.iterrows():
                 valor = (
                     float(r.get(col_vr))
@@ -256,6 +264,7 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
         "compras_list": compras_list,
         "receb_list": receb_list,
         "saldos_bancos": saldos_bancos,
+        "tem_snapshot": tem_snapshot,  # <- útil para a UI avisar "sem abertura neste dia"
     }
 
 
@@ -318,6 +327,10 @@ def listar_transferencias_bancos_do_dia(caminho_banco: str, data_ref) -> List[Di
     """
 
     with get_conn(caminho_banco) as conn:
+        try:
+            conn.execute("PRAGMA query_only = ON;")
+        except Exception:
+            pass
         df = pd.read_sql(sql, conn, params=(data_str,))
 
     if df is None or df.empty:
