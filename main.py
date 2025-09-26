@@ -86,7 +86,7 @@ def aplicar_branding(is_login: bool = False) -> None:
     try:
         if is_login:
             # Tela de login
-            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=300, show_title=False)
+            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=250, show_title=False)
             return
 
         # Após login (sempre redesenha)
