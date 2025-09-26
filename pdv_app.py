@@ -46,7 +46,7 @@ def aplicar_branding_pdv(is_login: bool = False) -> None:
     """Aplica logos no mesmo padrão do main."""
     try:
         if is_login:
-            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=400, show_title=False)
+            login_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=300, show_title=False)
             return
         try:
             sidebar_brand(custom_path=_LOGO_LOGIN_SIDEBAR_PATH, height_px=200)
