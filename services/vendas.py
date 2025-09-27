@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Módulo VendasService
 ====================
@@ -34,37 +35,27 @@ __all__ = ["VendasService"]
 # -----------------------------------------------------------------------------#
 def _is_working_day(d: date) -> bool:
     """Usa Workalendar BR-DF se disponível; senão Brasil; senão seg-sex."""
-    # 1) tentar calendário específico do DF (feriados locais)
     try:
         from workalendar.registry import registry
         cal_cls = registry.get("BR-DF")
         if cal_cls:
-            cal = cal_cls()
-            return bool(cal.is_working_day(d))
+            return bool(cal_cls().is_working_day(d))
     except Exception:
         pass
-    # 2) tentar Brasil geral
     try:
         from workalendar.america import Brazil
-        cal = Brazil()
-        return bool(cal.is_working_day(d))
+        return bool(Brazil().is_working_day(d))
     except Exception:
         pass
-    # 3) fallback simples: seg-sex
-    return d.weekday() < 5  # 0..4
+    return d.weekday() < 5  # seg(0)..sex(4)
 
 def _proximo_dia_util(d: date) -> date:
-    """Retorna o próprio dia se for útil; do contrário, avança até ser útil."""
     while not _is_working_day(d):
         d += timedelta(days=1)
     return d
 
 def _liq_para_forma(data_venda_str: str, forma_upper: str) -> str:
-    """
-    Calcula a data de liquidação para a forma de pagamento.
-    - Dinheiro/PIX: mesmo dia da venda
-    - Crédito/Débito/Link: D+1 útil
-    """
+    """Calcula data de liquidação por forma."""
     dv = pd.to_datetime(data_venda_str).date()
     if forma_upper in ("DINHEIRO", "PIX"):
         data_liq = dv
@@ -73,7 +64,32 @@ def _liq_para_forma(data_venda_str: str, forma_upper: str) -> str:
     return data_liq.isoformat()
 
 # -----------------------------------------------------------------------------#
-# Helper de taxa (consulta a tabela de taxas da maquineta)
+# Seeds de caixa inicial (opcional)
+# -----------------------------------------------------------------------------#
+def _ler_iniciais_cadastro(conn: sqlite3.Connection) -> tuple[float, float]:
+    """Lê (caixa_inicial, caixa2_inicial) se existirem; fallback (0.0, 0.0)."""
+    candidatos = [
+        ("cadastro_caixas", "caixa_inicial", "caixa2_inicial"),
+        ("cadastro_financeiro", "caixa_inicial", "caixa2_inicial"),
+        ("cadastro", "valor_inicial_caixa", "valor_inicial_caixa2"),
+        ("parametros", "caixa_inicial", "caixa2_inicial"),
+    ]
+    cur = conn.cursor()
+    for tabela, c1, c2 in candidatos:
+        try:
+            row = cur.execute(
+                f"SELECT {c1}, {c2} FROM {tabela} ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+            if row:
+                cxa = float(row[0] or 0.0)
+                cx2 = float(row[1] or 0.0)
+                return round(cxa, 2), round(cx2, 2)
+        except Exception:
+            pass
+    return 0.0, 0.0
+
+# -----------------------------------------------------------------------------#
+# Taxa das maquinetas
 # -----------------------------------------------------------------------------#
 def _resolver_taxa_percentual(
     conn: sqlite3.Connection,
@@ -83,10 +99,7 @@ def _resolver_taxa_percentual(
     parcelas: int,
     maquineta: Optional[str],
 ) -> float:
-    """
-    Busca na tabela `taxas_maquinas` uma taxa compatível; retorna 0.0 se não encontrar.
-    Tolera tanto coluna `forma_pagamento` quanto `forma`.
-    """
+    """Busca taxa na `taxas_maquinas`; retorna 0.0 se não encontrar."""
     forma_u = (forma or "").upper()
     params = [forma_u, bandeira, int(parcelas or 1), maquineta]
     try:
@@ -110,38 +123,125 @@ def _resolver_taxa_percentual(
     except Exception:
         return 0.0
 
+# -----------------------------------------------------------------------------#
+# Serviço
+# -----------------------------------------------------------------------------#
 class VendasService:
     """Regras de negócio para registro de vendas."""
 
-    # ------------------------------------------------------------------ #
-    # Setup
-    # ------------------------------------------------------------------ #
     def __init__(self, db_path_like: object) -> None:
-        """
-        Args:
-            db_path_like: Caminho do SQLite (str/Path) ou objeto com attr caminho (ex.: SimpleNamespace).
-        """
         self.db_path_like = db_path_like
 
-    # =============================
-    # Infraestrutura interna
-    # =============================
+    # ============================= Infraestrutura interna =============================
     def _garantir_linha_saldos_caixas(self, conn: sqlite3.Connection, data: str) -> None:
-        cur = conn.execute("SELECT 1 FROM saldos_caixas WHERE data = ? LIMIT 1", (data,))
-        if not cur.fetchone():
-            conn.execute(
+        """
+        Garante a linha do dia em `saldos_caixas` com baseline correto.
+
+        Regras:
+          - Se NÃO existir linha:
+              • Se houver véspera:
+                    caixa       = caixa_total (ontem)
+                    caixa_2     = caixa2_total (ontem)
+                    caixa_vendas = 0
+                    caixa2_dia   = 0
+              • Senão (1º dia): seeds de cadastro para caixa/caixa_2; campos do dia = 0.
+              • Totais: caixa_total = caixa + caixa_vendas; caixa2_total = caixa_2 + caixa2_dia.
+          - Se JÁ existir linha:
+              • Se a linha estiver “vazia” (caixa==0, caixa_vendas==0, caixa_2==0, caixa2_dia==0)
+                **e** houver véspera, realinha os baselines com os totais da véspera.
+              • Em qualquer caso, normaliza os totais por linha.
+        """
+        cur = conn.cursor()
+
+        # Linha do dia (se já existir)
+        dia = cur.execute(
+            """
+            SELECT id, caixa, caixa_2, caixa_vendas, caixa2_dia
+              FROM saldos_caixas
+             WHERE DATE(data)=DATE(?)
+             ORDER BY id DESC
+             LIMIT 1
+            """,
+            (data,),
+        ).fetchone()
+
+        # Totais da véspera
+        prev = cur.execute(
+            """
+            SELECT caixa_total, caixa2_total
+              FROM saldos_caixas
+             WHERE DATE(data) = (
+                SELECT MAX(DATE(data)) FROM saldos_caixas WHERE DATE(data) < DATE(?)
+             )
+             LIMIT 1
+            """,
+            (data,),
+        ).fetchone()
+
+        if not dia:
+            # Criar do zero com baseline herdado (ou seeds)
+            if prev:
+                prev_cx_total, prev_cx2_total = float(prev[0] or 0.0), float(prev[1] or 0.0)
+                caixa, caixa_2 = round(prev_cx_total, 2), round(prev_cx2_total, 2)
+            else:
+                try:
+                    seed_cx, seed_cx2 = _ler_iniciais_cadastro(conn)
+                except NameError:
+                    seed_cx, seed_cx2 = 0.0, 0.0
+                caixa, caixa_2 = float(seed_cx or 0.0), float(seed_cx2 or 0.0)
+
+            caixa_vendas, caixa2_dia = 0.0, 0.0
+            caixa_total  = round(caixa   + caixa_vendas, 2)
+            caixa2_total = round(caixa_2 + caixa2_dia,   2)
+
+            cur.execute(
                 """
                 INSERT INTO saldos_caixas
                     (data, caixa, caixa_2, caixa_vendas, caixa2_dia, caixa_total, caixa2_total)
-                VALUES (?, 0, 0, 0, 0, 0, 0)
+                VALUES (DATE(?), ?, ?, ?, ?, ?, ?)
                 """,
-                (data,),
+                (data, caixa, caixa_2, caixa_vendas, caixa2_dia, caixa_total, caixa2_total),
+            )
+            return
+
+        # Linha já existe → pode ter sido criada "zerada" por outro fluxo
+        dia_id, d_cx, d_cx2, d_v, d_cx2_dia = dia
+        d_cx      = float(d_cx or 0.0)
+        d_cx2     = float(d_cx2 or 0.0)
+        d_v       = float(d_v or 0.0)
+        d_cx2_dia = float(d_cx2_dia or 0.0)
+
+        if prev and d_cx == 0.0 and d_v == 0.0 and d_cx2 == 0.0 and d_cx2_dia == 0.0:
+            prev_cx_total, prev_cx2_total = float(prev[0] or 0.0), float(prev[1] or 0.0)
+            d_cx   = round(prev_cx_total, 2)
+            d_cx2  = round(prev_cx2_total, 2)
+            d_v    = 0.0
+            d_cx2_dia = 0.0
+            cur.execute(
+                """
+                UPDATE saldos_caixas
+                   SET caixa=?, caixa_2=?, caixa_vendas=?, caixa2_dia=?
+                 WHERE id=?
+                """,
+                (d_cx, d_cx2, d_v, d_cx2_dia, dia_id),
             )
 
+        # Normaliza os totais por linha (sempre)
+        caixa_total  = round(d_cx  + d_v,       2)
+        caixa2_total = round(d_cx2 + d_cx2_dia, 2)
+        cur.execute(
+            """
+            UPDATE saldos_caixas
+               SET caixa_total=?, caixa2_total=?
+             WHERE id=?
+            """,
+            (caixa_total, caixa2_total, dia_id),
+        )
+
     def _garantir_linha_saldos_bancos(self, conn: sqlite3.Connection, data: str) -> None:
-        cur = conn.execute("SELECT 1 FROM saldos_bancos WHERE data = ? LIMIT 1", (data,))
+        cur = conn.execute("SELECT 1 FROM saldos_bancos WHERE DATE(data)=DATE(?) LIMIT 1", (data,))
         if not cur.fetchone():
-            conn.execute("INSERT OR IGNORE INTO saldos_bancos (data) VALUES (?)", (data,))
+            conn.execute("INSERT OR IGNORE INTO saldos_bancos (data) VALUES (DATE(?))", (data,))
 
     _COL_RE = re.compile(r"^[A-Za-z0-9_ ]{1,64}$")
 
@@ -151,22 +251,18 @@ class VendasService:
             raise ValueError(f"Nome de banco/coluna inválido: {banco_col!r}")
         return banco_col
 
-    def _ajustar_banco_dynamic(
-        self, conn: sqlite3.Connection, banco_col: str, delta: float, data: str
-    ) -> None:
+    def _ajustar_banco_dynamic(self, conn: sqlite3.Connection, banco_col: str, delta: float, data: str) -> None:
         banco_col = self._validar_nome_coluna_banco(banco_col)
         cols = pd.read_sql("PRAGMA table_info(saldos_bancos);", conn)["name"].tolist()
         if banco_col not in cols:
             conn.execute(f'ALTER TABLE saldos_bancos ADD COLUMN "{banco_col}" REAL DEFAULT 0.0;')
         self._garantir_linha_saldos_bancos(conn, data)
         conn.execute(
-            f'UPDATE saldos_bancos SET "{banco_col}" = COALESCE("{banco_col}", 0) + ? WHERE data = ?',
+            f'UPDATE saldos_bancos SET "{banco_col}" = COALESCE("{banco_col}", 0) + ? WHERE DATE(data)=DATE(?)',
             (float(delta), data),
         )
 
-    # =============================
-    # Insert em `entrada`
-    # =============================
+    # ============================= Insert em `entrada` =============================
     def _insert_entrada(
         self,
         conn: sqlite3.Connection,
@@ -183,17 +279,11 @@ class VendasService:
         taxa_percentual: Optional[float],
         usuario: str,
     ) -> int:
-        """
-        Insere a venda na tabela `entrada`.
-
-        - **Data**       = **data da venda (data_referencia)** escolhida no formulário.
-        - **Data_Liq**   = **data de liquidação** (quando o dinheiro cai).
-        - **created_at** = data/hora da venda em America/Sao_Paulo.
-        """
+        """Insere venda na tabela `entrada` (compatível com colunas opcionais)."""
         cols_df = pd.read_sql("PRAGMA table_info(entrada);", conn)
         colnames = set(cols_df["name"].astype(str).tolist())
 
-        # garantir colunas que usamos
+        # colunas opcionais
         if "Usuario" not in colnames:
             conn.execute('ALTER TABLE entrada ADD COLUMN "Usuario" TEXT;'); colnames.add("Usuario")
         if "valor_liquido" not in colnames:
@@ -205,7 +295,6 @@ class VendasService:
         if "Data_Liq" not in colnames:
             conn.execute('ALTER TABLE entrada ADD COLUMN "Data_Liq" TEXT;'); colnames.add("Data_Liq")
 
-        # timestamp Brasília
         try:
             created_at_value = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
         except Exception:
@@ -214,31 +303,24 @@ class VendasService:
         forma_upper = (forma or "").upper()
         parcelas = int(parcelas or 1)
 
-        # decidir taxa efetiva
+        # taxa efetiva
         if forma_upper == "DINHEIRO":
             taxa_eff, maq_eff = 0.0, None
         elif forma_upper == "PIX" and not (maquineta and maquineta.strip()):
             taxa_eff, maq_eff = 0.0, None  # PIX direto
         else:
-            if taxa_percentual is None:
-                taxa_eff = _resolver_taxa_percentual(
-                    conn, forma=forma_upper, bandeira=bandeira,
-                    parcelas=parcelas, maquineta=maquineta
-                )
-            else:
-                taxa_eff = float(taxa_percentual)
+            taxa_eff = float(taxa_percentual) if taxa_percentual is not None else _resolver_taxa_percentual(
+                conn, forma=forma_upper, bandeira=bandeira, parcelas=parcelas, maquineta=maquineta
+            )
             maq_eff = maquineta
 
-        # calcular líquido
-        if valor_liquido is None:
-            liquido = float(valor_bruto) if taxa_eff == 0.0 else round(float(valor_bruto) * (1 - taxa_eff / 100.0), 2)
-        else:
+        liquido = float(valor_bruto) if float(taxa_eff) == 0.0 else round(float(valor_bruto) * (1 - float(taxa_eff) / 100.0), 2)
+        if valor_liquido is not None:
             liquido = float(valor_liquido)
 
-        # Montar INSERT
         to_insert = {
-            "Data": data_venda,                  # <<< muda para data da venda (referência)
-            "Data_Liq": data_liq,               # dia que cai
+            "Data": data_venda,
+            "Data_Liq": data_liq,
             "Valor": float(valor_bruto),
             "valor_liquido": liquido,
             "Forma_de_Pagamento": forma_upper,
@@ -247,38 +329,29 @@ class VendasService:
             "maquineta": maq_eff,
             "Banco_Destino": banco_destino or None,
             "Usuario": usuario,
-            "created_at": created_at_value,     # horário BR
+            "created_at": created_at_value,
         }
 
-        # Se existir a coluna opcional Data_Venda, preenche também (compat)
         if "Data_Venda" in colnames:
             to_insert["Data_Venda"] = data_venda
-
         if "Taxa_percentual" in colnames:
             to_insert["Taxa_percentual"] = float(taxa_eff)
         elif "Taxa_Percentual" in colnames:
             to_insert["Taxa_Percentual"] = float(taxa_eff)
 
-        names, values = [], []
-        for k, v in to_insert.items():
-            if k in colnames and v is not None:
-                names.append(f'"{k}"'); values.append(v)
-
+        names, values = zip(*[(f'"{k}"', v) for k, v in to_insert.items() if k in colnames and v is not None])
         placeholders = ", ".join("?" for _ in names)
         cols_sql = ", ".join(names)
-        conn.execute(f"INSERT INTO entrada ({cols_sql}) VALUES ({placeholders})", values)
+        conn.execute(f"INSERT INTO entrada ({cols_sql}) VALUES ({placeholders})", list(values))
         return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
-    # =============================
-    # Regra principal (compat wrapper)
-    # =============================
+    # ============================= Regra principal (compat wrapper) =============================
     def registrar_venda(self, *args, **kwargs) -> Tuple[int, int]:
         """
-        Wrapper de compatibilidade:
-        - Se 'data_liq' NÃO for informado, calcula automaticamente conforme a forma:
+        Se 'data_liq' não informado, calcula:
           • DINHEIRO/PIX => data_liq = data_venda
-          • CRÉDITO/DÉBITO/LINK_PAGAMENTO => data_liq = próximo dia útil (D+1 útil)
-        - Aceita 'caminho_banco' (legado) como db_path_like.
+          • CRÉDITO/DÉBITO/LINK_PAGAMENTO => data_liq = próximo dia útil
+        Aceita 'caminho_banco' (legado) como db_path_like.
         """
         if "caminho_banco" in kwargs and kwargs["caminho_banco"]:
             self.db_path_like = kwargs.pop("caminho_banco")
@@ -294,7 +367,8 @@ class VendasService:
         taxa_percentual = kwargs.pop("taxa_percentual", kwargs.pop("taxa", 0.0))
         usuario = kwargs.pop("usuario", "Sistema")
 
-        # Se não veio data_liq -> calcula
+        if not data_venda:
+            raise ValueError("data_venda é obrigatória.")
         forma_u = (forma or "").upper()
         if not data_liq or str(data_liq).strip() == "":
             data_liq = _liq_para_forma(str(data_venda), forma_u)
@@ -312,9 +386,7 @@ class VendasService:
             usuario=usuario,
         )
 
-    # =============================
-    # Regra principal (implementação real)
-    # =============================
+    # ============================= Regra principal (implementação real) =============================
     def _registrar_venda_impl(
         self,
         data_venda: str,            # YYYY-MM-DD
@@ -329,7 +401,7 @@ class VendasService:
         usuario: str,
     ) -> Tuple[int, int]:
         """Registra a venda, aplica a liquidação e grava log idempotente."""
-        # Validações básicas
+        # Validações
         try:
             pd.to_datetime(data_venda)
             pd.to_datetime(data_liq)
@@ -354,7 +426,7 @@ class VendasService:
         usuario = sanitize(usuario)
 
         with get_conn(self.db_path_like) as conn:
-            # decidir taxa efetiva
+            # taxa efetiva
             if forma_u == "DINHEIRO" or (forma_u == "PIX" and not (maquineta and maquineta.strip())):
                 taxa_eff = 0.0
             else:
@@ -366,17 +438,12 @@ class VendasService:
 
             valor_liquido = round(float(valor_bruto) * (1.0 - float(taxa_eff) / 100.0), 2)
 
-            # Idempotência — um único log por liquidação
+            # Idempotência — único log por liquidação
             trans_uid = uid_venda_liquidacao(
                 data_venda, data_liq, float(valor_bruto), forma_u, int(parcelas),
                 bandeira, maquineta, banco_destino, float(taxa_eff), usuario,
             )
-
-            row = conn.execute(
-                "SELECT id FROM movimentacoes_bancarias WHERE trans_uid=? LIMIT 1;",
-                (trans_uid,),
-            ).fetchone()
-            if row:
+            if conn.execute("SELECT id FROM movimentacoes_bancarias WHERE trans_uid=? LIMIT 1;", (trans_uid,)).fetchone():
                 return (-1, -1)
 
             cur = conn.cursor()
@@ -397,17 +464,29 @@ class VendasService:
                 usuario=usuario,
             )
 
-            # 2) Atualiza saldos na data de liquidação
+            # 2) Atualiza saldos no dia de liquidação
             if forma_u == "DINHEIRO":
                 self._garantir_linha_saldos_caixas(conn, data_liq)
                 cur.execute(
-                    "UPDATE saldos_caixas SET caixa_vendas = COALESCE(caixa_vendas,0) + ? WHERE data = ?",
+                    """
+                    UPDATE saldos_caixas
+                       SET caixa_vendas = COALESCE(caixa_vendas,0) + ?
+                     WHERE DATE(data)=DATE(?)
+                    """,
                     (float(valor_liquido), data_liq),
+                )
+                cur.execute(
+                    """
+                    UPDATE saldos_caixas
+                       SET caixa_total = COALESCE(caixa,0) + COALESCE(caixa_vendas,0)
+                     WHERE DATE(data)=DATE(?)
+                    """,
+                    (data_liq,),
                 )
                 banco_label = "Caixa_Vendas"
             else:
                 if not banco_destino:
-                    raise ValueError("banco_destino é obrigatório para formas não-DINHEIRO.")
+                    raise ValueError("banco_destino é obrigatório para formas não-DINHEIRO (inclui PIX via banco).")
                 self._garantir_linha_saldos_bancos(conn, data_liq)
                 self._ajustar_banco_dynamic(conn, banco_col=banco_destino, delta=float(valor_liquido), data=data_liq)
                 banco_label = banco_destino
@@ -441,7 +520,6 @@ class VendasService:
                 "trans_uid": trans_uid,
             }
             if "data_hora" in cols_exist:
-                # horário BR para log também
                 try:
                     payload["data_hora"] = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
                 except Exception:
@@ -452,7 +530,6 @@ class VendasService:
             cols_sql = ", ".join(f'"{k}"' for k in payload.keys())
             ph_sql   = ", ".join("?" for _ in payload)
             vals     = list(payload.values())
-
             cur.execute(f"INSERT INTO movimentacoes_bancarias ({cols_sql}) VALUES ({ph_sql})", vals)
             mov_id = int(cur.lastrowid)
 

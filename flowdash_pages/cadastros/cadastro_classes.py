@@ -114,48 +114,84 @@ class CaixaRepository:
 
     def buscar_saldo_por_data(self, data: str):
         with sqlite3.connect(self.caminho_banco) as conn:
-            cursor = conn.execute("SELECT caixa, caixa_2 FROM saldos_caixas WHERE data = ?", (data,))
+            cursor = conn.execute(
+                "SELECT caixa, caixa_2 FROM saldos_caixas WHERE DATE(data)=DATE(?) LIMIT 1",
+                (data,),
+            )
             return cursor.fetchone()
 
     def salvar_saldo(self, data: str, caixa: float, caixa_2: float, atualizar: bool = False) -> int:
-        import sqlite3
         with sqlite3.connect(self.caminho_banco) as conn:
             cur = conn.cursor()
+
             if atualizar:
+                # Atualiza saldos base
                 cur.execute(
                     """
                     UPDATE saldos_caixas
-                    SET caixa = ?, caixa_2 = ?
-                    WHERE data = ?
+                       SET caixa   = ?,
+                           caixa_2 = ?
+                     WHERE DATE(data)=DATE(?)
                     """,
-                    (float(caixa), float(caixa_2), data)
+                    (float(caixa), float(caixa_2), data),
                 )
-                # Pega o id do registro existente; funciona mesmo se não houver coluna 'id' (usa rowid)
+                # Recalcula totais por linha
+                cur.execute(
+                    """
+                    UPDATE saldos_caixas
+                       SET caixa_total  = COALESCE(caixa,0)   + COALESCE(caixa_vendas,0),
+                           caixa2_total = COALESCE(caixa_2,0) + COALESCE(caixa2_dia,0)
+                     WHERE DATE(data)=DATE(?)
+                    """,
+                    (data,),
+                )
                 row = cur.execute(
-                    "SELECT COALESCE(id, rowid) AS id FROM saldos_caixas WHERE data = ? LIMIT 1",
-                    (data,)
+                    "SELECT COALESCE(id, rowid) AS id FROM saldos_caixas WHERE DATE(data)=DATE(?) LIMIT 1",
+                    (data,),
                 ).fetchone()
                 saldo_id = int(row[0]) if row and row[0] is not None else -1
             else:
+                # Primeiro cadastro do dia → zera campos diários e calcula totais
                 cur.execute(
                     """
-                    INSERT INTO saldos_caixas (data, caixa, caixa_2)
-                    VALUES (?, ?, ?)
+                    INSERT INTO saldos_caixas
+                        (data, caixa, caixa_2, caixa_vendas, caixa2_dia, caixa_total, caixa2_total)
+                    VALUES (DATE(?), ?, ?, 0.0, 0.0, ?, ?)
                     """,
-                    (data, float(caixa), float(caixa_2))
+                    (
+                        data,
+                        float(caixa),
+                        float(caixa_2),
+                        float(caixa) + 0.0,      # caixa_total = caixa + caixa_vendas(0)
+                        float(caixa_2) + 0.0,    # caixa2_total = caixa_2 + caixa2_dia(0)
+                    ),
                 )
                 saldo_id = int(cur.lastrowid)
+
             conn.commit()
             return saldo_id
 
     def listar_ultimos_saldos(self, limite=15):
         with sqlite3.connect(self.caminho_banco) as conn:
-            return pd.read_sql(f"""
-                SELECT data, caixa, caixa_2 
-                FROM saldos_caixas 
-                ORDER BY data DESC 
-                LIMIT {limite}
-            """, conn)
+            # Monta SELECT somente com colunas existentes
+            cols_df = pd.read_sql("PRAGMA table_info(saldos_caixas);", conn)
+            cols = set(cols_df["name"].astype(str).tolist())
+
+            base = ["data", "caixa", "caixa_2"]
+            extras = [c for c in ["caixa_vendas", "caixa_total", "caixa2_dia", "caixa2_total"] if c in cols]
+            sel_cols = base + extras
+
+            cols_sql = ", ".join(sel_cols)
+            return pd.read_sql(
+                f"""
+                SELECT {cols_sql}
+                  FROM saldos_caixas
+              ORDER BY DATE(data) DESC
+                 LIMIT {int(limite)}
+                """,
+                conn,
+            )
+
         
 
 # === Classe CorrecaoCaixaRepository ============================================================================

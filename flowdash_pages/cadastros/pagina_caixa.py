@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Página: Cadastro de Caixa
 =========================
@@ -19,13 +20,77 @@ Principais comportamentos
 """
 
 import re
-import streamlit as st
 from datetime import date, datetime
-import pandas as pd
 
+import pandas as pd
+import streamlit as st
+
+from repository.movimentacoes_repository import MovimentacoesRepository
+from shared.db import get_conn
 from utils.utils import formatar_valor
 from .cadastro_classes import CaixaRepository
-from repository.movimentacoes_repository import MovimentacoesRepository
+
+
+# -------------------- Normalização do snapshot do dia --------------------
+def _normalizar_snapshot_saldos_caixas(caminho_banco: str, data_iso: str, atualizar: bool) -> None:
+    """
+    Garante que a linha do dia em `saldos_caixas` siga a regra acordada:
+
+    - Se atualizar=False (primeiro cadastro do dia):
+        • caixa_vendas ← 0.0
+        • caixa2_dia   ← 0.0
+    - Sempre:
+        • caixa_total  ← caixa + caixa_vendas
+        • caixa2_total ← caixa_2 + caixa2_dia
+    """
+    with get_conn(caminho_banco) as conn:
+        cur = conn.cursor()
+        row = cur.execute(
+            """
+            SELECT id,
+                   COALESCE(caixa,0)       AS cx,
+                   COALESCE(caixa_2,0)     AS cx2,
+                   COALESCE(caixa_vendas,0) AS cv,
+                   COALESCE(caixa2_dia,0)   AS c2d
+              FROM saldos_caixas
+             WHERE DATE(data)=DATE(?)
+             LIMIT 1
+            """,
+            (data_iso,),
+        ).fetchone()
+
+        if not row:
+            return  # repo.salvar_saldo deveria ter inserido; se não, não forçamos aqui
+
+        snap_id, cx, cx2, cv, c2d = row
+
+        if not atualizar:
+            # Primeiro cadastro do dia: zera campos de movimento do dia
+            cv = 0.0
+            c2d = 0.0
+            cur.execute(
+                """
+                UPDATE saldos_caixas
+                   SET caixa_vendas = 0.0,
+                       caixa2_dia   = 0.0
+                 WHERE id = ?
+                """,
+                (snap_id,),
+            )
+
+        cx_total = float(cx) + float(cv)
+        cx2_total = float(cx2) + float(c2d)
+
+        cur.execute(
+            """
+            UPDATE saldos_caixas
+               SET caixa_total  = ?,
+                   caixa2_total = ?
+             WHERE id = ?
+            """,
+            (cx_total, cx2_total, snap_id),
+        )
+        conn.commit()
 
 
 def pagina_caixa(caminho_banco: str) -> None:
@@ -202,6 +267,9 @@ def pagina_caixa(caminho_banco: str) -> None:
             # salva/atualiza e CAPTURA o id/rowid do registro em saldos_caixas
             saldo_id = repo.salvar_saldo(data_caixa_str, valor_final_caixa, valor_final_caixa_2, atualizar)
 
+            # >>> Normaliza snapshot conforme regra (zera campos do dia no 1º cadastro e recalcula totais)
+            _normalizar_snapshot_saldos_caixas(caminho_banco, data_caixa_str, atualizar)
+
             # lançamentos em movimentacoes_bancarias via repositório (entrada), amarrando referência
             origem = "saldos_caixas"
             referencia_tabela = "saldos_caixas"
@@ -258,7 +326,9 @@ def pagina_caixa(caminho_banco: str) -> None:
         df_caixa = repo.listar_ultimos_saldos()
         if not df_caixa.empty:
             # detectar coluna de vendas, se existir
-            col_vendas = "caixa_vendas" if "caixa_vendas" in df_caixa.columns else ("caixa_venda" if "caixa_venda" in df_caixa.columns else None)
+            col_vendas = "caixa_vendas" if "caixa_vendas" in df_caixa.columns else (
+                "caixa_venda" if "caixa_venda" in df_caixa.columns else None
+            )
 
             df_caixa["data"] = pd.to_datetime(df_caixa["data"]).dt.strftime("%d/%m/%Y")
 

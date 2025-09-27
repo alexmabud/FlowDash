@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 # ===================== Actions: Caixa 2 =====================
 """
 Resumo
@@ -5,15 +6,18 @@ Resumo
 Executa a transferência (Caixa/Caixa Vendas → Caixa 2), atualiza a linha do dia
 em `saldos_caixas` e registra 1 (uma) linha no livro `movimentacoes_bancarias`.
 
-Nova Lógica (2025-09)
----------------------
+Regras (alinhadas ao combinado):
 - Cada linha de `saldos_caixas` representa UMA data.
 - Ao criar uma nova data:
-    • Replica os campos da véspera (caixa, caixa_2, caixa_vendas, caixa2_dia).
-    • Recalcula SEMPRE os totais por linha:
-      - caixa_total  = caixa + caixa_vendas
-      - caixa2_total = caixa_2 + caixa2_dia
-    • Se não houver véspera, usa seeds (caixa/caixa_2) e zera os campos do dia.
+    • Baseline do dia = totais da véspera:
+         caixa     = caixa_total (ontem)
+         caixa_2   = caixa2_total (ontem)
+         caixa_vendas = 0
+         caixa2_dia   = 0
+    • Totais por linha:
+         caixa_total  = caixa + caixa_vendas
+         caixa2_total = caixa_2 + caixa2_dia
+    • Se não houver véspera, usa seeds (caixa/caixa_2) e zera campos do dia.
 - Se a linha do dia JÁ existir:
     • Não realinha baselines; apenas recalcula:
       caixa_total = caixa + caixa_vendas; caixa2_total = caixa_2 + caixa2_dia.
@@ -37,7 +41,11 @@ from typing import TypedDict, Any, Optional, Tuple
 from shared.db import get_conn
 from services.ledger.service_ledger_infra import log_mov_bancaria, _resolve_usuario
 
-__all__ = ["transferir_para_caixa2", "_ensure_snapshot_do_dia", "_ensure_snapshot_herdado"]
+__all__ = [
+    "transferir_para_caixa2",
+    "_ensure_snapshot_do_dia",
+    "_ensure_snapshot_herdado",  # compat p/ páginas antigas
+]
 
 
 # ===================== Tipos =====================
@@ -108,7 +116,7 @@ def transferir_para_caixa2(
     Transfere recursos de `caixa`/`caixa_vendas` para o `caixa_2`.
 
     Processo:
-      1. Garante linha do dia (replica a véspera se não existir; seeds se for 1º dia).
+      1. Garante linha do dia (baseline correto).
       2. Carrega a linha do dia e valida (caixa + caixa_vendas).
       3. Abate **primeiro `caixa_vendas`**, depois `caixa`.
       4. Atualiza campos e recalcula **totais por linha**.
@@ -226,21 +234,24 @@ def _ensure_snapshot_do_dia(conn: sqlite3.Connection, data_str: str) -> None:
     """
     Garante a existência e o baseline correto da data `data_str` em `saldos_caixas`.
 
-    Regras:
+    Regras (idênticas ao VendasService):
       - Se NÃO existir linha para a data:
-          a) Se houver véspera, REPLICA os campos da véspera (caixa, caixa_2, caixa_vendas, caixa2_dia)
-             e recalcula os **totais por linha**:
-                caixa_total = caixa + caixa_vendas
+          a) Se houver véspera, usa:
+                caixa       = caixa_total (véspera)
+                caixa_2     = caixa2_total (véspera)
+                caixa_vendas = 0
+                caixa2_dia   = 0
+             e recalcula:
+                caixa_total  = caixa + caixa_vendas
                 caixa2_total = caixa_2 + caixa2_dia
-          b) Senão, usa seeds do Cadastro (caixa/caixa_2) com campos do dia zerados e
-             recalcula os **totais por linha**.
-      - Se JÁ existir linha para a data:
-          • Não realinha baselines; apenas recalcula **totais por linha**.
+          b) Se não houver véspera: usa seeds (caixa/caixa_2) e zera campos do dia.
+      - Se JÁ existir linha:
+          • Apenas recalcula os totais por linha.
     """
     data_str = str(data_str)
     cur = conn.cursor()
 
-    # Linha do dia (se existir)
+    # Existe linha do dia?
     dia = cur.execute(
         """
         SELECT id, caixa, caixa_2, caixa_vendas, caixa_total, caixa2_dia, caixa2_total
@@ -252,37 +263,35 @@ def _ensure_snapshot_do_dia(conn: sqlite3.Connection, data_str: str) -> None:
         (data_str,),
     ).fetchone()
 
-    # Linha anterior (TODOS os campos necessários)
-    prev = cur.execute(
-        """
-        SELECT caixa, caixa_2, caixa_vendas, caixa_total, caixa2_dia, caixa2_total
-          FROM saldos_caixas
-         WHERE DATE(data) = (
-            SELECT MAX(DATE(data))
-              FROM saldos_caixas
-             WHERE DATE(data) < DATE(?)
-         )
-         ORDER BY id DESC
-         LIMIT 1
-        """,
-        (data_str,),
-    ).fetchone()
-
     if not dia:
-        # Criar a linha do dia replicando a véspera e normalizando totais por linha
-        if prev:
-            p_cx, p_cx2, p_v, _prev_ct, p_cx2_dia, _prev_c2t = map(_r2, prev)
-            caixa = p_cx
-            caixa_2 = p_cx2
-            caixa_vendas = p_v
-            caixa2_dia = p_cx2_dia
+        # Buscar totais da véspera
+        prev_totais = cur.execute(
+            """
+            SELECT caixa_total, caixa2_total
+              FROM saldos_caixas
+             WHERE DATE(data) = (
+                SELECT MAX(DATE(data)) FROM saldos_caixas WHERE DATE(data) < DATE(?)
+             )
+             LIMIT 1
+            """,
+            (data_str,),
+        ).fetchone()
+
+        if prev_totais:
+            prev_cx_total = float(prev_totais[0] or 0.0)
+            prev_cx2_total = float(prev_totais[1] or 0.0)
+            caixa = _r2(prev_cx_total)
+            caixa_2 = _r2(prev_cx2_total)
         else:
             seed_caixa, seed_caixa2 = _ler_iniciais_cadastro(conn)
             caixa = _r2(seed_caixa)
             caixa_2 = _r2(seed_caixa2)
-            caixa_vendas = 0.0
-            caixa2_dia = 0.0
 
+        # Campos do dia começam zerados
+        caixa_vendas = 0.0
+        caixa2_dia = 0.0
+
+        # Totais por linha
         caixa_total = _r2(caixa + caixa_vendas)
         caixa2_total = _r2(caixa_2 + caixa2_dia)
 
@@ -297,7 +306,7 @@ def _ensure_snapshot_do_dia(conn: sqlite3.Connection, data_str: str) -> None:
         return
 
     # Já existe linha do dia → apenas normaliza **totais por linha**
-    dia_id, d_cx, d_cx2, d_v, _, d_cx2_dia, _ = dia
+    dia_id, d_cx, d_cx2, d_v, _prev_ct, d_cx2_dia, _prev_c2t = dia
     d_cx = _r2(d_cx)
     d_cx2 = _r2(d_cx2)
     d_v = _r2(d_v)
@@ -319,5 +328,5 @@ def _ensure_snapshot_do_dia(conn: sqlite3.Connection, data_str: str) -> None:
 
 # ========= Compatibilidade retroativa (alias) =========
 def _ensure_snapshot_herdado(conn: sqlite3.Connection, data_str: str) -> None:
-    """Alias antigo → chama a função nova."""
+    """Mantido por compatibilidade com páginas antigas; delega para a função nova."""
     _ensure_snapshot_do_dia(conn, data_str)

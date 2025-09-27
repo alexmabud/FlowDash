@@ -102,19 +102,33 @@ def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
     return out
 
 
+# ============= Fechamento existente (para travar o botão) =============
+def _fechamento_existe(caminho_banco: str, data_str: str) -> bool:
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            r = conn.execute(
+                "SELECT 1 FROM fechamento_caixa WHERE DATE(data)=DATE(?) LIMIT 1",
+                (data_str,),
+            ).fetchone()
+            return bool(r)
+    except Exception:
+        return False
+
+
 # ================== Consultas auxiliares (legado para salvar) ==================
 def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, float, float, float]:
-    """Retorna o último registro (<= data) de saldos_bancos mapeado em 4 colunas (legado)."""
+    """
+    Retorna os saldos ACUMULADOS (<= data_ref) para 4 bancos legados (banco_1..banco_4).
+    Funciona mesmo quando a tabela `saldos_bancos` é alimentada por deltas diários
+    (somamos todas as linhas até a data, por coluna).
+    """
     try:
         with sqlite3.connect(caminho_banco) as conn:
             df = _read_sql(
                 conn,
                 """
-                SELECT *
-                FROM saldos_bancos
-                WHERE data <= ?
-                ORDER BY data DESC
-                LIMIT 1
+                SELECT * FROM saldos_bancos
+                 WHERE DATE(data) <= DATE(?)
                 """,
                 (data_ref,),
             )
@@ -124,28 +138,38 @@ def _get_saldos_bancos_ate(caminho_banco: str, data_ref: str) -> tuple[float, fl
     if df.empty:
         return (0.0, 0.0, 0.0, 0.0)
 
+    c_data = _find_col(df, ["data", "dt"])
+    if c_data:
+        df[c_data] = _parse_date_col(df, c_data)
+
     cols = df.columns.tolist()
 
-    def _by_hint(hints: list[str]) -> str | None:
+    def _pick(hints: list[str]) -> str | None:
         for h in hints:
             for c in cols:
                 if _norm(c) == _norm(h) or _norm(h) in _norm(c):
                     return c
         return None
 
-    b1 = _by_hint(["banco_1", "banco1", "inter"])
-    b2 = _by_hint(["banco_2", "banco2", "bradesco"])
-    b3 = _by_hint(["banco_3", "banco3", "infinitepay"])
-    b4 = _by_hint(["banco_4", "banco4", "outros", "outros_bancos"])
-    row = df.iloc[0]
+    c_b1 = _pick(["banco_1", "banco1", "inter"])
+    c_b2 = _pick(["banco_2", "banco2", "bradesco"])
+    c_b3 = _pick(["banco_3", "banco3", "infinitepay"])
+    c_b4 = _pick(["banco_4", "banco4", "outros", "outros_bancos", "outros bancos"])
 
-    def _get(c: str | None) -> float:
+    def _sum_col(col: str | None) -> float:
+        if not col or col not in df.columns:
+            return 0.0
         try:
-            return float(pd.to_numeric(row[c], errors="coerce") or 0.0) if c in df.columns else 0.0
+            return float(pd.to_numeric(df[col], errors="coerce").fillna(0.0).sum())
         except Exception:
             return 0.0
 
-    return (_get(b1), _get(b2), _get(b3), _get(b4))
+    b1 = _sum_col(c_b1)
+    b2 = _sum_col(c_b2)
+    b3 = _sum_col(c_b3)
+    b4 = _sum_col(c_b4)
+
+    return (round(b1, 2), round(b2, 2), round(b3, 2), round(b4, 2))
 
 
 # ================== Cálculos dos cartões do topo ==================
@@ -158,12 +182,10 @@ def _dinheiro_e_pix_por_data(caminho_banco: str, data_sel: date) -> tuple[float,
     if df.empty:
         return 0.0, 0.0
 
-    # Data da VENDA (não Data_Liq, não created_at)
     c_data = _find_col(df, [
         "Data", "data", "data_venda", "dataVenda", "data_lanc", "dataLanc", "data_emissao", "dataEmissao"
     ])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
-    # Preferir líquido quando existir (não afeta DINHEIRO/PIX direto; cobre PIX via maquineta)
     c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "Valor", "valor", "valor_total"])
 
     if not (c_data and c_forma and c_val):
@@ -192,7 +214,6 @@ def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_sel: date) -> float
     if df.empty:
         return 0.0
 
-    # Aqui precisamos EXPLICITAMENTE da coluna de liquidação
     c_data_liq = _find_col(df, ["Data_Liq", "data_liq", "data_liquidacao", "data_liquidação", "dt_liq", "data_liquid"])
     c_forma = _find_col(df, ["Forma_de_Pagamento", "forma_de_pagamento", "forma_pagamento", "forma"])
     c_val = _find_col(df, ["valor_liquido", "valorLiquido", "valor_liq", "Valor", "valor_total", "valor"])
@@ -211,26 +232,44 @@ def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_sel: date) -> float
     return float(vals[is_cartao].sum())
 
 
-# ============== Somatórios até a data selecionada ==============
-def _somar_caixas_totais(caminho_banco: str, data_sel: date) -> tuple[float, float]:
-    """Soma (<= data_sel) de caixa_total e caixa2_total da tabela saldos_caixas."""
-    df = _carregar_tabela(caminho_banco, "saldos_caixas")
+# ============== Saldo em Caixa do DIA (novo comportamento) ==============
+def _caixas_totais_no_dia(caminho_banco: str, data_sel: date) -> tuple[float, float]:
+    """
+    Lê **apenas** o valor do dia em `saldos_caixas`:
+      - caixa_total
+      - caixa2_total
+    para a `data_sel`. Sem somatórios, sem acumular períodos.
+    """
+    with sqlite3.connect(caminho_banco) as conn:
+        try:
+            df = _read_sql(
+                conn,
+                """
+                SELECT caixa_total, caixa2_total
+                  FROM saldos_caixas
+                 WHERE DATE(data) = DATE(?)
+                 LIMIT 1
+                """,
+                (str(data_sel),),
+            )
+        except Exception:
+            return (0.0, 0.0)
+
     if df.empty:
-        return 0.0, 0.0
+        return (0.0, 0.0)
 
-    c_data = _find_col(df, ["data", "dt"])
-    c_caixa = _find_col(df, ["caixa_total", "total_caixa", "caixa", "caixa_total_dia"])
-    c_cx2 = _find_col(df, ["caixa2_total", "caixa_2_total", "total_caixa2", "caixa2", "caixa_2", "caixa2_total_dia"])
-
-    if c_data:
-        df[c_data] = _parse_date_col(df, c_data)
-        df = df[df[c_data].dt.date <= data_sel].copy()
-
-    soma_caixa = float(pd.to_numeric(df[c_caixa], errors="coerce").sum()) if c_caixa else 0.0
-    soma_caixa2 = float(pd.to_numeric(df[c_cx2], errors="coerce").sum()) if c_cx2 else 0.0
-    return soma_caixa, soma_caixa2
+    try:
+        cx  = float(pd.to_numeric(df.iloc[0]["caixa_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx = 0.0
+    try:
+        cx2 = float(pd.to_numeric(df.iloc[0]["caixa2_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx2 = 0.0
+    return (round(cx, 2), round(cx2, 2))
 
 
+# ============== Somatórios até a data (mantidos para bancos/relatório) ==============
 def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]:
     """Soma (<= data_sel) por coluna/banco em saldos_bancos."""
     df = _carregar_tabela(caminho_banco, "saldos_bancos")
@@ -267,7 +306,7 @@ def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]
     return dict(sorted(pretty.items(), key=lambda x: x[0]))
 
 
-# ============== Saídas do dia ==============
+# ============== Saídas e Correções ==============
 def _saidas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
     """Soma, no dia, os valores da tabela `saida` (coluna 'valor')."""
     df = _carregar_tabela(caminho_banco, "saida")
@@ -367,16 +406,22 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")
     data_ref = str(data_sel)
 
+    # Flag: já fechado?
+    ja_fechado = _fechamento_existe(caminho_banco, data_ref)
+    if ja_fechado:
+        st.success("✅ Este dia já foi fechado. O botão de salvar está desativado para evitar duplicidade.")
+    else:
+        st.info("ℹ️ Este dia ainda não foi fechado.")
+
     # --- Cartões do topo ---
-    # Dinheiro/PIX (por entrada.Data) — valores que entraram hoje (venda do dia)
     valor_dinheiro, valor_pix = _dinheiro_e_pix_por_data(caminho_banco, data_sel)
-    # Cartão D-1 (por entrada.Data_Liq) — liquidações que caíram hoje
     total_cartao_liquido = _cartao_d1_liquido_por_data_liq(caminho_banco, data_sel)
-    # Entradas do dia (consolidadas)
     entradas_total_dia = float(valor_dinheiro + valor_pix + total_cartao_liquido)
 
-    # Caixa e Bancos (somatórios até a data)
-    soma_caixa_total, soma_caixa2_total = _somar_caixas_totais(caminho_banco, data_sel)
+    # Caixa do DIA (sem somatórios)
+    caixa_total_dia, caixa2_total_dia = _caixas_totais_no_dia(caminho_banco, data_sel)
+
+    # Bancos (acumulado <= data)
     bancos_totais = _somar_bancos_totais(caminho_banco, data_sel)
     total_bancos = float(sum(bancos_totais.values())) if bancos_totais else 0.0
 
@@ -385,8 +430,8 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     corr_dia = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
 
-    # Total consolidado (até a data)
-    saldo_total = float(soma_caixa_total + soma_caixa2_total + total_bancos + corr_acum)
+    # Total consolidado (até a data) – usando caixa do dia
+    saldo_total = float(caixa_total_dia + caixa2_total_dia + total_bancos + corr_acum)
 
     # CSS para mini-tabela compacta
     st.markdown(
@@ -424,11 +469,12 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
         ],
     )
 
+    # >>> Aqui passa a exibir APENAS o valor do dia para caixa e caixa 2 <<<
     render_card_row(
         "🧾 Saldo em Caixa",
         [
-            ("Caixa (loja)", soma_caixa_total, True),
-            ("Caixa 2 (casa)", soma_caixa2_total, True),
+            ("Caixa (loja)", caixa_total_dia, True),
+            ("Caixa 2 (casa)", caixa2_total_dia, True),
         ],
     )
 
@@ -442,11 +488,14 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
 
     render_card_row("💰 Saldo Total", [("Total consolidado", saldo_total, True)])
 
-    # ======= Salvar fechamento (schema legado) =======
-    confirmar = st.checkbox("Confirmo que o saldo está correto.")
-    salvar = st.button("Salvar fechamento")
+    # ======= Salvar fechamento =======
+    confirmar = st.checkbox("Confirmo que o saldo está correto.", disabled=ja_fechado)
+    salvar = st.button("Salvar fechamento", disabled=ja_fechado)
 
     if salvar:
+        if ja_fechado:
+            st.warning("⚠️ Já existe um fechamento salvo para esta data.")
+            return
         if not confirmar:
             st.warning("⚠️ Você precisa confirmar que o saldo está correto antes de salvar.")
             return
@@ -455,7 +504,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
         try:
             with sqlite3.connect(caminho_banco) as conn:
                 existe = conn.execute(
-                    "SELECT 1 FROM fechamento_caixa WHERE data = ? LIMIT 1",
+                    "SELECT 1 FROM fechamento_caixa WHERE DATE(data)=DATE(?) LIMIT 1",
                     (str(data_sel),),
                 ).fetchone()
                 if existe:
@@ -472,10 +521,10 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                     """,
                     (
                         str(data_sel),
-                        float(b1), float(b2), float(b3), float(b4),  # legado
-                        float(soma_caixa_total),
-                        float(soma_caixa2_total),
-                        float(entradas_total_dia),   # Dinheiro+Pix(Data) + Cartão D-1(Data_Liq)
+                        float(b1), float(b2), float(b3), float(b4),  # acumulados bancos
+                        float(caixa_total_dia),                      # caixa do dia
+                        float(caixa2_total_dia),                     # caixa 2 do dia
+                        float(entradas_total_dia),                   # Dinheiro+Pix(Data) + Cartão D-1(Data_Liq)
                         float(saidas_total_dia),
                         float(corr_dia),
                         float(saldo_total),  # esperado
