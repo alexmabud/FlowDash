@@ -553,15 +553,45 @@ def _call_page(module_path: str) -> None:
 # -----------------------------------------------------------------------------
 # Login
 # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Login (visual igual ao PDV: título centralizado + formulário estreito)
+# -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
-    # ⬅️ APLICA BRANDING NA TELA DE LOGIN
     aplicar_branding(is_login=True)
 
-    st.title("🔐 Login")
-    with st.form("form_login"):
-        email = st.text_input("Email")
-        senha = st.text_input("Senha", type="password")
-        if st.form_submit_button("Entrar"):
+    # Coluna central para título + formulário
+    left, center, right = st.columns([1, 1.15, 1])
+    with center:
+        # Título centralizado
+        st.markdown("<h1 style='text-align:center; margin:0 0 .5rem;'>🔐 Login</h1>", unsafe_allow_html=True)
+
+        # Cartão do formulário com largura fixa/ideal
+        st.markdown(
+            """
+            <style>
+            /* Cartão fixo do formulário de login */
+            div[data-testid="stForm"]{
+                max-width: 420px;
+                width: 100%;
+                margin: 12px auto 24px;
+                padding: 16px;
+                border: 1px solid #333;
+                border-radius: 12px;
+                background: #111;
+            }
+            /* Botão ocupa toda a largura do cartão */
+            div[data-testid="stForm"] .stButton > button { width: 100%; }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.form("form_login"):
+            email = st.text_input("Email")
+            senha = st.text_input("Senha", type="password")
+            entrar = st.form_submit_button("Entrar")
+
+        if entrar:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
                 st.session_state.usuario_logado = usuario
@@ -573,9 +603,9 @@ if not st.session_state.usuario_logado:
             else:
                 st.error("❌ Email ou senha inválidos, ou usuário inativo.")
 
-    # push (se houve cadastro/alteração)
     _auto_push_if_local_changed()
     st.stop()
+
 
 
 # -----------------------------------------------------------------------------

@@ -24,7 +24,7 @@ import pandas as pd
 from utils.pin_utils import validar_pin
 from shared.branding import sidebar_brand, page_header, login_brand
 from shared.db_from_dropbox_api import ensure_local_db_api
-from shared.dropbox_config import load_dropbox_settings, mask_token  # noqa: F401 (mask_token pode ser útil em logs)
+from shared.dropbox_config import load_dropbox_settings, mask_token  # noqa: F401
 from shared.dbx_io import enviar_db_local, baixar_db_para_local
 from shared.dropbox_client import get_dbx, download_bytes
 
@@ -334,9 +334,11 @@ def _metas_loja_gauges(ref_day: date) -> None:
     with _conn() as conn:
         val_dia, val_sem, val_mes = _valores_loja(conn, ref_day)
         meta_dia, meta_sem, meta_mes, ouro, prata, bronze = _metas_loja_vigente(conn, ref_day)
+
     p_dia = _calcular_percentual(val_dia, meta_dia)
     p_sem = _calcular_percentual(val_sem, meta_sem)
     p_mes = _calcular_percentual(val_mes, meta_mes)
+
     bronze_pct = 75.0 if ouro <= 0 else round(100.0 * (bronze / max(ouro, 1e-9)), 1)
     prata_pct  = 87.5 if ouro <= 0 else round(100.0 * (prata  / max(ouro, 1e-9)), 1)
 
@@ -350,7 +352,7 @@ def _metas_loja_gauges(ref_day: date) -> None:
                     use_container_width=True, key=f"pdv_g_loja_mes_{ref_day}")
 
     t1, t2, t3 = st.columns(3)
-    prata_pct_calc = 87.5 if ouro<=0 else 100.0*(prata/max(ouro,1e-9))
+    prata_pct_calc  = 87.5 if ouro<=0 else 100.0*(prata/max(ouro,1e-9))
     bronze_pct_calc = 75.0 if ouro<=0 else 100.0*(bronze/max(ouro,1e-9))
     prata_d, bronze_d = meta_dia*(prata_pct_calc/100.0), meta_dia*(bronze_pct_calc/100.0)
     prata_s, bronze_s = meta_sem*(prata_pct_calc/100.0), meta_sem*(bronze_pct_calc/100.0)
@@ -461,14 +463,37 @@ def main() -> None:
                 _do_logout()
             st.markdown("</div>", unsafe_allow_html=True)
 
-    # >>> Branding AGORA (para a faixa acima aparecer antes da logo) <<<
+    # Branding
     aplicar_branding_pdv(is_login=not logged)
 
     # login
     if not logged:
-        st.title("🔐 Login")
-        if not _login_box():
-            _auto_push_if_local_changed(); return
+        # --- Centraliza TÍTULO + FORM em uma coluna estreita ---
+        left, center, right = st.columns([1, 1.15, 1])
+        with center:
+            # título centralizado
+            st.markdown("<h1 style='text-align:center; margin: 0 0 0.5rem;'>🔐 Login PDV</h1>", unsafe_allow_html=True)
+
+            # form estreito/fixo
+            st.markdown("""
+            <style>
+            /* Cartão fixo do formulário de login */
+            div[data-testid="stForm"]{
+                max-width: 420px;
+                width: 100%;
+                margin: 12px auto 24px;
+                padding: 16px;
+                border: 1px solid #333;
+                border-radius: 12px;
+                background: #111;
+            }
+            /* Botão ocupa toda a largura do cartão */
+            div[data-testid="stForm"] .stButton > button { width: 100%; }
+            </style>
+            """, unsafe_allow_html=True)
+
+            if not _login_box():
+                _auto_push_if_local_changed(); return
     else:
         dmin, dmax = _entrada_date_bounds(); today = date.today(); dmax = max(dmax, today)
 
@@ -476,8 +501,6 @@ def main() -> None:
         hdr_l, hdr_r = st.columns([0.7, 0.3])
         with hdr_l:
             st.markdown("# 🧾 FlowDash — PDV")
-
-            # Info do usuário logo abaixo do título
             header_user = st.session_state.get("pdv_header_user", st.session_state.get("usuario_logado"))
             if header_user:
                 st.markdown(
@@ -486,7 +509,6 @@ def main() -> None:
                     f"</div>",
                     unsafe_allow_html=True,
                 )
-
         with hdr_r:
             st.date_input(
                 "📅 Data de referência",
@@ -495,7 +517,7 @@ def main() -> None:
                 key="pdv_ref_date",
             )
 
-        # ======= Linha 3: NOVA VENDA (topo) + fluxo de venda IMEDIATAMENTE abaixo =======
+        # ======= Linha 3: NOVA VENDA (topo) + fluxo =======
         st.markdown('<div class="nv-wrap">', unsafe_allow_html=True)
         if not st.session_state.get("pdv_mostrar_form"):
             if st.button("➕ Nova Venda", key="btn_nova_venda_top", use_container_width=True):
@@ -504,11 +526,9 @@ def main() -> None:
                 st.rerun()
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # >>> Se o fluxo foi acionado, renderiza aqui (no topo), ANTES dos gráficos <<<
         if st.session_state.get("pdv_mostrar_form"):
             vendedor = st.session_state.get("pdv_vendedor_venda")
             if not vendedor:
-                # Seleção de vendedor + PIN
                 vend = _selecionar_vendedor_e_validar_pin()
                 if vend:
                     st.session_state["pdv_vendedor_venda"] = vend
@@ -532,7 +552,7 @@ def main() -> None:
                         st.session_state["pdv_flash_ok"] = "Venda cancelada."
                         st.rerun()
 
-        # ==================== METAS LOJA (ficam abaixo do fluxo) ====================
+        # ======= Metas LOJA =======
         ref_day = st.session_state.get("pdv_ref_date", today)
         st.markdown(f"**Metas do dia — {ref_day:%Y-%m-%d}**")
         _metas_loja_gauges(ref_day)
