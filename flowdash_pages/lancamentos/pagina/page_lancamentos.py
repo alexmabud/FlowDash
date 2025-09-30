@@ -5,10 +5,11 @@ Página agregadora de **Lançamentos**: exibe o resumo do dia e renderiza as sub
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 import importlib
 from typing import Any, Callable, Optional
+import sqlite3
 
 import pandas as pd
 import streamlit as st
@@ -52,6 +53,54 @@ def _safe_call(mod_path: str, func_name: str, state: Any) -> None:
         st.error(f"❌ Falha ao renderizar '{mod_path}.{func_name}': {e}")
 
 
+def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame:
+    return pd.read_sql(query, conn, params=params or ())
+
+
+def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float, date | None]:
+    """
+    Retorna o **último** (mais recente) caixa_total e caixa2_total com DATE(data) <= data_sel
+    a partir da tabela `saldos_caixas`. Uso EXCLUSIVO para EXIBIÇÃO nos cards.
+
+    Não altera nenhuma lógica de cálculo/salvamento.
+    """
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            df = _read_sql(
+                conn,
+                """
+                SELECT DATE(data) AS d, caixa_total, caixa2_total
+                  FROM saldos_caixas
+                 WHERE DATE(data) <= DATE(?)
+                 ORDER BY DATE(data) DESC, ROWID DESC
+                 LIMIT 1
+                """,
+                (str(data_sel),),
+            )
+    except Exception:
+        return (0.0, 0.0, None)
+
+    if df.empty:
+        return (0.0, 0.0, None)
+
+    try:
+        cx = float(pd.to_numeric(df.iloc[0]["caixa_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx = 0.0
+
+    try:
+        cx2 = float(pd.to_numeric(df.iloc[0]["caixa2_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx2 = 0.0
+
+    try:
+        dref = datetime.strptime(str(df.iloc[0]["d"]), "%Y-%m-%d").date()
+    except Exception:
+        dref = None
+
+    return (round(cx, 2), round(cx2, 2), dref)
+
+
 # ===================== Page =====================
 def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     """Renderiza a página agregadora de Lançamentos."""
@@ -79,9 +128,8 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     )
 
     # ----- Saldos (2 linhas no mesmo card) -----
-    # 1) Caixa e Caixa 2
-    v_caixa = float(resumo.get("caixa_total", 0.0))
-    v_caixa2 = float(resumo.get("caixa2_total", 0.0))
+    # 1) Caixa e Caixa 2 — EXIBIÇÃO com "último saldo salvo até a data"
+    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
 
     # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
     saldos_bancos = resumo.get("saldos_bancos") or {}
@@ -96,10 +144,12 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     render_card_rows(
         "💵 Saldos",
         [
-            [("Caixa", v_caixa, True), ("Caixa 2", v_caixa2, True)],  # linha 1 (2 colunas)
+            [("Caixa", disp_caixa, True), ("Caixa 2", disp_caixa2, True)],  # linha 1 (2 colunas)
             [("Inter", inter, True), ("InfinitePay", infinite, True), ("Bradesco", bradesco, True)],  # linha 2 (3 colunas)
         ],
     )
+    if disp_ref and disp_ref != data_lanc:
+        st.caption(f"Mostrando último saldo salvo em **{disp_ref}** (sem movimento em {data_lanc}).")
 
     # ----- Transferências (card com 3 colunas) -----
     # 1) P/ Caixa 2 (número)

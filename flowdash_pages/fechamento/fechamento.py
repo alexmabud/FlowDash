@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 import pandas as pd
 import streamlit as st
@@ -232,7 +232,7 @@ def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_sel: date) -> float
     return float(vals[is_cartao].sum())
 
 
-# ============== Saldo em Caixa do DIA (novo comportamento) ==============
+# ============== Saldo em Caixa do DIA (sem somatórios; mantém lógica) ==============
 def _caixas_totais_no_dia(caminho_banco: str, data_sel: date) -> tuple[float, float]:
     """
     Lê **apenas** o valor do dia em `saldos_caixas`:
@@ -267,6 +267,48 @@ def _caixas_totais_no_dia(caminho_banco: str, data_sel: date) -> tuple[float, fl
     except Exception:
         cx2 = 0.0
     return (round(cx, 2), round(cx2, 2))
+
+
+# ============== NOVO: Último saldo salvo ATÉ a data (para EXIBIÇÃO) ==============
+def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float, date | None]:
+    """
+    Retorna o **último** (mais recente) caixa_total e caixa2_total com DATE(data) <= data_sel.
+    Uso EXCLUSIVO para EXIBIÇÃO dos cards, sem alterar a lógica de cálculos/salvamento.
+    """
+    with sqlite3.connect(caminho_banco) as conn:
+        try:
+            df = _read_sql(
+                conn,
+                """
+                SELECT DATE(data) AS d, caixa_total, caixa2_total
+                  FROM saldos_caixas
+                 WHERE DATE(data) <= DATE(?)
+                 ORDER BY DATE(data) DESC, ROWID DESC
+                 LIMIT 1
+                """,
+                (str(data_sel),),
+            )
+        except Exception:
+            return (0.0, 0.0, None)
+
+    if df.empty:
+        return (0.0, 0.0, None)
+
+    try:
+        cx  = float(pd.to_numeric(df.iloc[0]["caixa_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx = 0.0
+    try:
+        cx2 = float(pd.to_numeric(df.iloc[0]["caixa2_total"], errors="coerce") or 0.0)
+    except Exception:
+        cx2 = 0.0
+
+    try:
+        dref = datetime.strptime(str(df.iloc[0]["d"]), "%Y-%m-%d").date()
+    except Exception:
+        dref = None
+
+    return (round(cx, 2), round(cx2, 2), dref)
 
 
 # ============== Somatórios até a data (mantidos para bancos/relatório) ==============
@@ -418,8 +460,11 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     total_cartao_liquido = _cartao_d1_liquido_por_data_liq(caminho_banco, data_sel)
     entradas_total_dia = float(valor_dinheiro + valor_pix + total_cartao_liquido)
 
-    # Caixa do DIA (sem somatórios)
+    # Caixa do DIA (mantém lógica original para cálculos/salvamento)
     caixa_total_dia, caixa2_total_dia = _caixas_totais_no_dia(caminho_banco, data_sel)
+
+    # >>> NOVO: valores somente para EXIBIÇÃO (último saldo salvo até a data) <<<
+    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_sel)
 
     # Bancos (acumulado <= data)
     bancos_totais = _somar_bancos_totais(caminho_banco, data_sel)
@@ -430,8 +475,9 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     corr_dia = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
 
-    # Total consolidado (até a data) – usando caixa do dia
-    saldo_total = float(caixa_total_dia + caixa2_total_dia + total_bancos + corr_acum)
+    # Total consolidado (até a data) – continua usando os valores do DIA (sem alteração de lógica)
+    saldo_total = float(caixa_total_dia + caixa2_total_dia + total_bancos)
+
 
     # CSS para mini-tabela compacta
     st.markdown(
@@ -469,14 +515,16 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
         ],
     )
 
-    # >>> Aqui passa a exibir APENAS o valor do dia para caixa e caixa 2 <<<
+    # >>> EXIBIÇÃO com último saldo salvo (sem mudar lógica de cálculo) <<<
     render_card_row(
         "🧾 Saldo em Caixa",
         [
-            ("Caixa (loja)", caixa_total_dia, True),
-            ("Caixa 2 (casa)", caixa2_total_dia, True),
+            ("Caixa (loja)", disp_caixa, True),
+            ("Caixa 2 (casa)", disp_caixa2, True),
         ],
     )
+    if disp_ref and disp_ref != data_sel:
+        st.caption(f"Mostrando último saldo salvo em **{disp_ref}** (sem movimento em {data_sel}).")
 
     if bancos_totais:
         render_card_row(
@@ -522,8 +570,8 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                     (
                         str(data_sel),
                         float(b1), float(b2), float(b3), float(b4),  # acumulados bancos
-                        float(caixa_total_dia),                      # caixa do dia
-                        float(caixa2_total_dia),                     # caixa 2 do dia
+                        float(caixa_total_dia),                      # caixa do dia (mantido)
+                        float(caixa2_total_dia),                     # caixa 2 do dia (mantido)
                         float(entradas_total_dia),                   # Dinheiro+Pix(Data) + Cartão D-1(Data_Liq)
                         float(saidas_total_dia),
                         float(corr_dia),
