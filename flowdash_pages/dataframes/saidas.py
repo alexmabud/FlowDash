@@ -142,7 +142,7 @@ def render(df_saidas: pd.DataFrame) -> None:
 
     # 4) Tabela completa do mês (TODAS AS COLUNAS)
     st.divider()
-    st.markdown("**Saídas do mês selecionado — Tabela completa (todas as colunas)**")
+    st.markdown("**Saídas do mês selecionado — Tabela completa**")
 
     if mes is None or df_mes.empty:
         st.info("Selecione um mês para visualizar a tabela completa.")
