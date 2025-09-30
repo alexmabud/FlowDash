@@ -29,6 +29,19 @@ def _fmt_moeda_str(v) -> str:
     except Exception:
         return str(v)
 
+def _fmt_int_str(v) -> str:
+    """Formata como inteiro (sem vírgula). Em branco para valores nulos/invalidos."""
+    try:
+        if pd.isna(v):
+            return ""
+        return str(int(float(v)))
+    except Exception:
+        # Se vier string já inteira, retorna como está
+        try:
+            return str(int(str(v).strip()))
+        except Exception:
+            return str(v)
+
 def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> pd.io.formats.style.Styler:
     """
     Aplica zebra linha a linha (apenas background) sem alterar fontes/cores de texto.
@@ -243,6 +256,12 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
     for key in ("valor_liquido", "valorliquido", "valor_liq", "valorliq"):
         if key in cmap:
             fmt_map[cmap[key]] = _fmt_moeda_str
+            break
+
+    # >>> AJUSTE PEDIDO: coluna parcela (inteiro sem vírgula)
+    for key in ("parcela", "parcelas", "num_parcelas"):
+        if key in cmap:
+            fmt_map[cmap[key]] = _fmt_int_str
             break
 
     styled_full = _zebra(df_full).format(fmt_map) if fmt_map else _zebra(df_full)
