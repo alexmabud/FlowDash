@@ -3,21 +3,16 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Iterable as _Iterable
 
 import pandas as pd
+import numpy as np
 import streamlit as st
 
-# Helpers (ainda úteis para futuras páginas; usados nos módulos splitados)
-from flowdash_pages.dataframes.filtros import (
-    selecionar_ano,
-    selecionar_mes,
-    resumo_por_mes,
-)
-
-# Delegação para páginas específicas
+# Páginas específicas
 from flowdash_pages.dataframes import entradas as page_entradas
 from flowdash_pages.dataframes import saidas as page_saidas
+from flowdash_pages.dataframes import mercadorias as page_mercadorias
 
 
 # ============================ Descoberta do DB ============================
@@ -28,7 +23,7 @@ def _get_db_path() -> Optional[str]:
     if isinstance(cand, str) and os.path.exists(cand):
         return cand
 
-    # 2) shared.db
+    # 2) shared.db (se existir)
     try:
         from shared import db as sdb  # type: ignore
         for name in ("get_db_path", "db_path", "DB_PATH"):
@@ -40,9 +35,9 @@ def _get_db_path() -> Optional[str]:
     except Exception:
         pass
 
-    # 3) defaults (inclui seu legado `data/entrada.db`)
+    # 3) defaults
     for p in (
-        os.path.join("data", "entrada.db"),         # legado
+        os.path.join("data", "entrada.db"),
         os.path.join("data", "flowdash_data.db"),
         os.path.join("data", "dashboard_rc.db"),
         "dashboard_rc.db",
@@ -100,12 +95,55 @@ def _pick_cols(conn: sqlite3.Connection, table: str) -> Optional[Tuple[Optional[
     return (u, d, v)
 
 
-def _to_datetime(s: pd.Series) -> pd.Series:
-    return pd.to_datetime(s, errors="coerce")
+# ============================ Normalização/Utilidades ============================
+
+def _ensure_listlike(x):
+    """
+    Garante lista quando a chamada espera 1-D (ex.: .isin(), seleção de colunas).
+    Mantém estruturas já iteráveis. Evita o erro: 'arg must be a list/tuple/1-d array/Series'.
+    """
+    if x is None:
+        return []
+    if isinstance(x, (str, bytes)):
+        return [x]
+    if isinstance(x, (pd.Series, pd.Index, np.ndarray, set, tuple, list)):
+        return list(x)
+    if isinstance(x, _Iterable):
+        try:
+            return list(x)  # type: ignore[arg-type]
+        except Exception:
+            return [x]
+    return [x]
 
 
-def _to_numeric(s: pd.Series) -> pd.Series:
-    return pd.to_numeric(s, errors="coerce").fillna(0.0)
+def _to_series1d(x) -> pd.Series:
+    """Garante que a entrada vire uma Series 1-D (evita 'arg must be ...')."""
+    if isinstance(x, pd.Series):
+        return x
+    if isinstance(x, pd.DataFrame):
+        # se tiver 1 coluna, espreme; se tiver mais, pega a primeira por segurança
+        if x.shape[1] == 1:
+            return x.iloc[:, 0]
+        squeezed = x.squeeze("columns")
+        return squeezed if isinstance(squeezed, pd.Series) else x.iloc[:, 0]
+    # list/tuple/ndarray/escalar/dict
+    try:
+        return pd.Series(x)
+    except Exception:
+        # último recurso: embrulha como lista
+        return pd.Series([x])
+
+
+def _to_datetime(s) -> pd.Series:
+    s1 = _to_series1d(s)
+    return pd.to_datetime(s1, errors="coerce")
+
+
+def _to_numeric(s) -> pd.Series:
+    s1 = _to_series1d(s)
+    out = pd.to_numeric(s1, errors="coerce")
+    # garante float para evitar 'object' em NaN
+    return out.astype(float).fillna(0.0)
 
 
 def _fmt_moeda(v) -> str:
@@ -118,58 +156,76 @@ def _fmt_moeda(v) -> str:
 # ============================ Loaders públicos ============================
 
 def carregar_df_entrada() -> pd.DataFrame:
-    """
-    Padroniza: Usuario, Data (datetime64), Valor (float).
-    Compatível com seus scripts: lê `entradas` em `data/entrada.db` (coluna `data` minúscula).
-    """
     conn = _connect()
     if not conn:
         return pd.DataFrame(columns=["Usuario", "Data", "Valor"])
     try:
-        # ordem priorizando seu legado
         for tb in ["entradas", "entrada", "lancamentos_entrada", "vendas", "venda"]:
             if _table_exists(conn, tb):
                 picked = _pick_cols(conn, tb)
                 if not picked:
                     continue
                 user_col, date_col, valu_col = picked
+
                 if user_col:
                     sql = f'SELECT "{user_col}" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
                 else:
-                    # sem coluna de usuário -> força LOJA (permite a página de Metas funcionar para LOJA)
+                    # força coluna Usuario para padronização
                     sql = f'SELECT "LOJA" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
+
                 df = pd.read_sql(sql, conn)
+
+                # Normalizações fortes
                 df["Data"] = _to_datetime(df["Data"])
                 df["Valor"] = _to_numeric(df["Valor"])
-                df["Usuario"] = df["Usuario"].astype(str).fillna("LOJA")
-                return df
+
+                # Evita 'nan' string
+                df["Usuario"] = df["Usuario"].where(df["Usuario"].notna(), "LOJA")
+                df["Usuario"] = df["Usuario"].astype(str)
+
+                # Ordem de colunas padrão
+                return df[["Usuario", "Data", "Valor"]].copy()
+
         return pd.DataFrame(columns=["Usuario", "Data", "Valor"])
     finally:
         conn.close()
 
 
 def carregar_df_saidas() -> pd.DataFrame:
-    """
-    Padroniza Saídas para: Data (datetime64), Valor (float), mantendo demais colunas originais.
-    Compatível com seus scripts: lê `saidas` em `data/entrada.db` (coluna `data` minúscula).
-    """
     conn = _connect()
     if not conn:
         return pd.DataFrame(columns=["Data", "Valor"])
     try:
         for tb in ["saidas", "saida", "lancamentos_saida", "pagamentos_saida", "pagamentos"]:
-            if _table_exists(conn, tb):
-                picked = _pick_cols(conn, tb)
-                if not picked:
-                    continue
-                user_col, date_col, valu_col = picked
+            if not _table_exists(conn, tb):
+                continue
 
-                df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
-                df_all["Data"] = _to_datetime(df_all[date_col])
-                df_all["Valor"] = _to_numeric(df_all[valu_col])
-                if user_col and user_col in df_all.columns:
-                    df_all["Usuario"] = df_all[user_col].astype(str)
-                return df_all
+            picked = _pick_cols(conn, tb)
+            if not picked:
+                continue
+
+            user_col, date_col, valu_col = picked
+
+            df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
+
+            # Se as colunas esperadas não existirem por renomeações, aborta esta tabela e tenta a próxima
+            cols_lower = {c.lower(): c for c in df_all.columns}
+            if date_col not in df_all.columns and date_col.lower() in cols_lower:
+                date_col = cols_lower[date_col.lower()]
+            if valu_col not in df_all.columns and valu_col.lower() in cols_lower:
+                valu_col = cols_lower[valu_col.lower()]
+
+            if date_col not in df_all.columns or valu_col not in df_all.columns:
+                continue
+
+            df_all["Data"] = _to_datetime(df_all[date_col])
+            df_all["Valor"] = _to_numeric(df_all[valu_col])
+
+            if user_col and user_col in df_all.columns:
+                df_all["Usuario"] = df_all[user_col].astype(str)
+
+            keep_cols = ["Data", "Valor"] + (["Usuario"] if "Usuario" in df_all.columns else [])
+            return df_all[keep_cols].copy()
 
         return pd.DataFrame(columns=["Data", "Valor"])
     finally:
@@ -177,13 +233,6 @@ def carregar_df_saidas() -> pd.DataFrame:
 
 
 def carregar_df_mercadorias() -> pd.DataFrame:
-    """
-    Detecta tabela de mercadorias/estoque e padroniza:
-      - Data (datetime64)
-      - Valor (float) -> tenta 'valor' ou 'preco_total' ou 'preco*quantidade'
-      - Usuario (se houver)
-    Tabelas candidatas: mercadorias, estoque, produtos_mov, produtos, compras, itens_venda.
-    """
     conn = _connect()
     if not conn:
         return pd.DataFrame(columns=["Data", "Valor"])
@@ -193,6 +242,9 @@ def carregar_df_mercadorias() -> pd.DataFrame:
                 continue
 
             df = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
+            if df.empty:
+                continue
+
             cols_lower = {c.lower(): c for c in df.columns}
 
             # Data
@@ -202,7 +254,7 @@ def carregar_df_mercadorias() -> pd.DataFrame:
                     date_col = cols_lower[c.lower()]
                     break
             if date_col is None:
-                continue  # sem data, segue tentando outra tabela
+                continue
 
             # Valor
             value_col = None
@@ -211,10 +263,11 @@ def carregar_df_mercadorias() -> pd.DataFrame:
                     value_col = cols_lower[c.lower()]
                     break
 
-            df["Data"] = _to_datetime(df[date_col])
+            out = pd.DataFrame()
+            out["Data"] = _to_datetime(df[date_col])
 
             if value_col is not None:
-                df["Valor"] = _to_numeric(df[value_col])
+                out["Valor"] = _to_numeric(df[value_col])
             else:
                 # tenta preco*quantidade
                 preco_col = None
@@ -228,158 +281,76 @@ def carregar_df_mercadorias() -> pd.DataFrame:
                         qtd_col = cols_lower[name]
                         break
                 if preco_col and qtd_col:
-                    df["Valor"] = _to_numeric(df[preco_col]) * _to_numeric(df[qtd_col])
+                    out["Valor"] = _to_numeric(df[preco_col]) * _to_numeric(df[qtd_col])
                 else:
-                    df["Valor"] = 0.0  # fallback
+                    out["Valor"] = 0.0
 
             # Usuario (opcional)
             for c in _USER_COLS:
                 if c.lower() in cols_lower:
-                    df["Usuario"] = df[cols_lower[c.lower()]].astype(str)
+                    out["Usuario"] = df[cols_lower[c.lower()]].astype(str)
                     break
 
-            return df
+            keep_cols = ["Data", "Valor"] + (["Usuario"] if "Usuario" in out.columns else [])
+            return out[keep_cols].copy()
 
         return pd.DataFrame(columns=["Data", "Valor"])
     finally:
         conn.close()
 
 
-def carregar_df_metas() -> pd.DataFrame:
-    """
-    Padroniza: vendedor, mensal, semanal, segunda..domingo, meta_ouro/prata/bronze.
-    Se não existir tabela `metas`, devolve DF vazio com colunas esperadas.
-    """
-    conn = _connect()
-    if not conn:
-        return pd.DataFrame(columns=[
-            "vendedor", "mensal", "semanal",
-            "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
-            "meta_ouro", "meta_prata", "meta_bronze",
-        ])
-    try:
-        if not _table_exists(conn, "metas"):
-            return pd.DataFrame(columns=[
-                "vendedor", "mensal", "semanal",
-                "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
-                "meta_ouro", "meta_prata", "meta_bronze",
-            ])
-        df = pd.read_sql(
-            """
-            SELECT
-                COALESCE(vendedor, 'LOJA')               AS vendedor,
-                COALESCE(mensal, 0)                      AS mensal,
-                COALESCE(semanal, 0)                     AS semanal,
-                COALESCE(segunda, 0)                     AS segunda,
-                COALESCE(terca, 0)                       AS terca,
-                COALESCE(quarta, 0)                      AS quarta,
-                COALESCE(quinta, 0)                      AS quinta,
-                COALESCE(sexta, 0)                       AS sexta,
-                COALESCE(sabado, 0)                      AS sabado,
-                COALESCE(domingo, 0)                     AS domingo,
-                COALESCE(meta_ouro, 16000)               AS meta_ouro,
-                COALESCE(meta_prata, 14000)              AS meta_prata,
-                COALESCE(meta_bronze, 12000)             AS meta_bronze
-            FROM metas;
-            """,
-            conn,
-        )
-        for c in [
-            "mensal", "semanal", "segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo",
-            "meta_ouro", "meta_prata", "meta_bronze",
-        ]:
-            df[c] = _to_numeric(df[c])
-        df["vendedor"] = df["vendedor"].astype(str)
-        return df
-    finally:
-        conn.close()
-
-
 def publicar_dfs_na_session() -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Conveniência: carrega e publica na session para outras páginas consumirem (ex.: Metas)."""
+    """Conveniência: carrega e publica na session (ex.: Metas usa df_entrada)."""
     df_e = carregar_df_entrada()
-    df_m = carregar_df_metas()
+    df_m = pd.DataFrame()  # mantido por compat
     st.session_state["df_entrada"] = df_e
     st.session_state["df_metas"]   = df_m
     return df_e, df_m
 
 
-# ============================ Renderizador (roteador local) ============================
-
-def _resumo_df(df: pd.DataFrame, valor_col: str = "Valor") -> str:
-    linhas = len(df)
-    total = df[valor_col].sum() if valor_col in df.columns else None
-    if total is None:
-        return f"{linhas} linha(s)."
-    return f"{linhas} linha(s) • Total: {_fmt_moeda(total)}"
-
+# ============================ Renderizador (roteador simples) ============================
 
 def render():
     """
-    Chamado pelo _call_page() do main.py.
-    Decide a visão com base em st.session_state['pagina_atual'].
+    Shim de roteamento: mantém compatibilidade com main.py chamando esta função.
+    - Não usa helpers de filtros (evita erros de assinatura).
+    - Apenas carrega o DF e delega para a página correspondente.
     """
     pagina = st.session_state.get("pagina_atual", "")
+    # Normaliza para string (evita casos onde vem lista/objeto)
+    try:
+        pagina_str = " ".join(_ensure_listlike(pagina)).strip()
+    except Exception:
+        pagina_str = str(pagina)
 
-    if "Entradas" in pagina:
+    db_path = _get_db_path()
+
+    if "Entradas" in pagina_str or "entrada" in pagina_str.lower():
         df_e = carregar_df_entrada()
-        page_entradas.render(df_e)     # delega para o módulo de Entradas
+        page_entradas.render(df_e, caminho_banco=db_path)
         return
 
-    if "Saídas" in pagina:
+    if "Saídas" in pagina_str or "saidas" in pagina_str.lower() or "saida" in pagina_str.lower():
         df_s = carregar_df_saidas()
-        page_saidas.render(df_s)       # delega para o módulo de Saídas
+        page_saidas.render(df_s)
         return
 
-    if "Mercadorias" in pagina:
-        
-        st.info("Visão de Mercadorias ainda não implementada aqui. (Posso habilitar no próximo passo.)")
-        return
-
-    if "Fatura Cartão" in pagina:
-        
-        st.info("Visão de Fatura ainda não implementada aqui. (Posso habilitar no próximo passo.)")
-        return
-
-    if "Contas a Pagar" in pagina:
-        
-        st.info("Visão de Contas a Pagar ainda não implementada aqui. (Posso habilitar no próximo passo.)")
-        return
-
-    if "Empréstimos/Financiamentos" in pagina or "Empréstimos" in pagina:
-        
-        st.info("Visão de Empréstimos ainda não implementada aqui. (Posso habilitar no próximo passo.)")
+    if "Mercadorias" in pagina_str or "mercadorias" in pagina_str.lower() or "estoque" in pagina_str.lower():
+        df_m = carregar_df_mercadorias()
+        page_mercadorias.render(df_m)
         return
 
     st.info("Selecione uma opção no menu de DataFrames.")
 
 
-# ============================ Retrocompatibilidade ============================
-# Algumas páginas antigas importam `get_dataframe` deste módulo.
-# Mantemos um shim aceitando vários apelidos para não quebrar nada.
+# ============================ Retrocompat (get_dataframe) ============================
 
 def get_dataframe(name: Optional[str] = None) -> pd.DataFrame:
-    """
-    Compat: retorna um DataFrame conforme o nome pedido.
-    Aceita variações/aliases sem acento e case-insensitive.
-    """
     key = (name or "").strip().lower()
-
-    # Entradas
     if key in {"entradas", "entrada", "df_entrada", "vendas", "lancamentos_entrada"}:
         return carregar_df_entrada()
-
-    # Saídas
     if key in {"saidas", "saida", "df_saidas", "pagamentos_saida", "pagamentos"}:
         return carregar_df_saidas()
-
-    # Mercadorias / Estoque
     if key in {"mercadorias", "estoque", "produtos", "compras", "itens_venda", "df_mercadorias"}:
         return carregar_df_mercadorias()
-
-    # Metas
-    if key in {"metas", "df_metas"}:
-        return carregar_df_metas()
-
-    # Desconhecido -> DF vazio
     return pd.DataFrame()
