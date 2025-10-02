@@ -4,6 +4,7 @@ import os
 import sqlite3
 import pandas as pd
 import streamlit as st
+from datetime import date  # << adicionado
 
 from flowdash_pages.dataframes.filtros import (
     selecionar_ano,
@@ -36,23 +37,16 @@ def _fmt_int_str(v) -> str:
             return ""
         return str(int(float(v)))
     except Exception:
-        # Se vier string já inteira, retorna como está
         try:
             return str(int(str(v).strip()))
         except Exception:
             return str(v)
 
 def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> pd.io.formats.style.Styler:
-    """
-    Aplica zebra linha a linha (apenas background) sem alterar fontes/cores de texto.
-    Mantém o uso de st.dataframe.
-    """
     ncols = df.shape[1]
-
     def _row_style(row: pd.Series):
         bg = light if (row.name % 2) else dark
         return [f"background-color: {bg}"] * ncols
-
     return df.style.apply(_row_style, axis=1)
 
 def _discover_db_path(user_path: str | None = None) -> str | None:
@@ -78,7 +72,6 @@ def _discover_db_path(user_path: str | None = None) -> str | None:
     return None
 
 def _detect_entrada_table_name(con: sqlite3.Connection) -> str:
-    """Tenta localizar a tabela de entradas (preferência 'entrada')."""
     cur = con.cursor()
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     names = {row[0].lower(): row[0] for row in cur.fetchall()}
@@ -91,7 +84,6 @@ def _detect_entrada_table_name(con: sqlite3.Connection) -> str:
     raise RuntimeError("Tabela de entradas não encontrada (ex.: 'entrada' ou 'entradas').")
 
 def _reorder_cols(df: pd.DataFrame, before_col_ci: str, target_before_ci: str) -> pd.DataFrame:
-    """Move a coluna `before_col_ci` para ficar imediatamente antes de `target_before_ci` (case-insensitive)."""
     cols_map = {c.lower(): c for c in df.columns}
     if before_col_ci.lower() not in cols_map or target_before_ci.lower() not in cols_map:
         return df
@@ -104,6 +96,12 @@ def _reorder_cols(df: pd.DataFrame, before_col_ci: str, target_before_ci: str) -
     cols.insert(cols.index(target), before)
     return df[cols]
 
+# Mapeamento p/ títulos
+_MESES_PT_ABREV = {
+    1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
+    7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
+}
+
 # ---------------- Página ----------------
 def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
     """
@@ -112,8 +110,6 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
       - 1ª tabela (Faturamento por mês) SEM SCROLL (todas as linhas).
       - 2ª tabela com a MESMA ALTURA da 1ª (usa scroll quando precisar).
       - Tabela completa do mês lida via SELECT * (todas as colunas).
-      - Data (apenas data), Valor/valor_liquido em R$, oculta Data_Liq, 'maquineta' antes de 'Usuario'.
-      - Zebra (linha escura/clara) em todas.
     """
     if not isinstance(df_entrada, pd.DataFrame) or df_entrada.empty:
         st.info("Nenhuma entrada encontrada (ou DataFrame inválido/vazio).")
@@ -125,14 +121,13 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
         st.warning("Não há dados para o ano selecionado.")
         return
 
-    # Cabeçalho com total do ano — maior, negrito e valor em verde
+    # Cabeçalho com total do ano
     total_ano = float(pd.to_numeric(df_ano["Valor"], errors="coerce").sum())
-    total_fmt = _fmt_moeda_str(total_ano)
     st.markdown(
         f"""
         <div style="font-size:1.25rem;font-weight:700;margin:6px 0 10px;">
             Ano selecionado: {ano} • Total no ano:
-            <span style="color:#00C853;">{total_fmt}</span>
+            <span style="color:#00C853;">{_fmt_moeda_str(total_ano)}</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -141,30 +136,58 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
     # 2) Meses
     mes, df_mes = selecionar_mes(df_ano, key="entradas", label="Escolha um mês")
 
+    # Auto-seleção mês atual (se houver dados); senão 1º mês com dados
+    if ("Data" in df_ano.columns) and (mes is None or df_mes.empty):
+        dt_all = _safe_to_datetime(df_ano["Data"])
+        meses_com_dado = sorted(dt_all.dt.month.dropna().unique().tolist())
+        hoje = date.today()
+        mes_pref = None
+        try:
+            ano_int = int(ano)
+        except Exception:
+            ano_int = hoje.year
+        if ano_int == hoje.year and hoje.month in meses_com_dado:
+            mes_pref = hoje.month
+        elif meses_com_dado:
+            mes_pref = int(meses_com_dado[0])
+        if mes_pref is not None:
+            mes = mes_pref
+            df_mes = df_ano[dt_all.dt.month == mes].copy()
+
+    # Para títulos
+    mes_nome = _MESES_PT_ABREV.get(int(mes), "—") if mes is not None else "—"
+    total_mes = float(pd.to_numeric(df_mes.get("Valor", 0), errors="coerce").sum()) if mes is not None else 0.0
+
     # 3) Duas colunas
     col_esq, col_dir = st.columns(2)
 
     # 3.1) ESQUERDA — Faturamento por mês (SEM SCROLL)
     with col_esq:
-        st.markdown("**Faturamento por mês (ano selecionado)**")
+        st.markdown(
+            f"**Faturamento por mês no ano** "
+            f"<span style='color:#60a5fa;'>{ano}</span>",
+            unsafe_allow_html=True,
+        )
         resumo = resumo_por_mes(df_ano, valor_col="Valor")  # Mes, MesNome, Total
         tabela_mes = resumo[["MesNome", "Total"]].rename(columns={"MesNome": "Mês"})
         tabela_mes["Total"] = pd.to_numeric(tabela_mes["Total"], errors="coerce").fillna(0.0)
 
-        # Altura calculada para caber TODAS as linhas sem scroll
         altura_esq = _auto_df_height(tabela_mes, row_px=34, header_px=44, pad_px=14, max_px=10_000)
-
-        styled_esq = _zebra(tabela_mes).format({"Total": _fmt_moeda_str})
         st.dataframe(
-            styled_esq,
+            _zebra(tabela_mes).format({"Total": _fmt_moeda_str}),
             use_container_width=True,
             hide_index=True,
-            height=altura_esq,  # sem scroll
+            height=altura_esq,
         )
 
     # 3.2) DIREITA — Detalhe diário do mês (MESMA ALTURA DA 1ª)
     with col_dir:
-        st.markdown("**Detalhe diário do mês**")
+        st.markdown(
+            f"**Detalhe diário do mês** "
+            f"<span style='color:#60a5fa;'>{mes_nome}</span> "
+            f"— Total: <span style='color:#00C853;'>{_fmt_moeda_str(total_mes)}</span>",
+            unsafe_allow_html=True,
+        )
         if mes is None or df_mes.empty:
             detalhado = pd.DataFrame(columns=["Dia", "Total"])
         else:
@@ -181,12 +204,11 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
             )
         detalhado["Total"] = pd.to_numeric(detalhado.get("Total", 0), errors="coerce").fillna(0.0)
 
-        styled_dir = _zebra(detalhado[["Dia", "Total"]]).format({"Total": _fmt_moeda_str})
         st.dataframe(
-            styled_dir,
+            _zebra(detalhado[["Dia", "Total"]]).format({"Total": _fmt_moeda_str}),
             use_container_width=True,
             hide_index=True,
-            height=altura_esq,   # mesma altura da 1ª
+            height=altura_esq,
         )
 
     # 4) Tabela completa do mês (SELECT *)
@@ -229,10 +251,9 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
         except Exception:
             pass
 
-    # --- Formatações mínimas solicitadas ---
+    # --- Formatações mínimas ---
     cmap = {c.lower(): c for c in df_full.columns}
 
-    # Data -> só data
     if "data" in cmap:
         c = cmap["data"]
         try:
@@ -240,16 +261,13 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
         except Exception:
             pass
 
-    # Oculta Data_Liq
     for key in ("data_liq", "data_liquido", "data_liquidacao"):
         if key in cmap:
             df_full = df_full.drop(columns=[cmap[key]])
             break
 
-    # Reordena: maquineta antes de Usuario
     df_full = _reorder_cols(df_full, before_col_ci="maquineta", target_before_ci="usuario")
 
-    # Formatação de moeda (display) para Valor e valor_liquido
     fmt_map: dict[str, any] = {}
     if "valor" in cmap:
         fmt_map[cmap["valor"]] = _fmt_moeda_str
@@ -258,7 +276,6 @@ def render(df_entrada: pd.DataFrame, caminho_banco: str | None = None) -> None:
             fmt_map[cmap[key]] = _fmt_moeda_str
             break
 
-    # >>> AJUSTE PEDIDO: coluna parcela (inteiro sem vírgula)
     for key in ("parcela", "parcelas", "num_parcelas"):
         if key in cmap:
             fmt_map[cmap[key]] = _fmt_int_str

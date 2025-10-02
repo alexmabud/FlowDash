@@ -225,17 +225,14 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
     resumo = _resumo_por_mes_ano(df_card, ano_sel)
 
     # ---------- Botões do mês ----------
-    # Para os botões ficarem "apagados" nos meses sem compras,
-    # passamos ao helper APENAS as competências existentes naquele ano.
     df_btn_source = df_card[df_card["ano_num"] == ano_sel].copy()
     df_btn_source["Data"] = pd.to_datetime(df_btn_source["competencia_norm"] + "-01", errors="coerce")
     df_btn_source = df_btn_source[["Data"]].dropna()
 
     st.markdown("**Escolha um mês**")
-    # label="" evita aparecer "None" na UI
     mes_sel, _ = selecionar_mes(df_btn_source, key=f"mes_{cartao_id}_{ano_sel}", label="")
 
-    # se nada selecionado, e o ano é o atual, tenta abrir no mês corrente (se houver dados)
+    # Se nada selecionado e o ano é o atual, abrir no mês corrente (se houver dados)
     meses_disponiveis = set(df_btn_source["Data"].dt.month.tolist())
     if mes_sel is None and ano_sel == hoje.year and hoje.month in meses_disponiveis:
         mes_sel = hoje.month
@@ -247,9 +244,9 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
     col_resumo, col_itens = st.columns([1, 3])
 
     with col_resumo:
-        # Título com ano em destaque
+        # TÍTULO alinhado com Entradas/Saídas
         st.markdown(
-            f"**Valor da fatura por mês no ano** "
+            f"**Faturamento por mês no ano** "
             f"<span style='color:#60a5fa;'>{ano_sel}</span>",
             unsafe_allow_html=True,
         )
@@ -264,24 +261,34 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
         )
 
     with col_itens:
-        # Título com mês selecionado em destaque
+        # Preparar dados do mês selecionado e TOTAL para o título
+        if comp_target:
+            df_mes_raw = _itens_da_competencia(df_card, comp_target)
+            total_mes_num = float(pd.to_numeric(df_mes_raw.get("Valor", 0), errors="coerce").sum()) if not df_mes_raw.empty else 0.0
+        else:
+            df_mes_raw = pd.DataFrame(columns=["Data", "Valor", "Categoria", "Descrição"])
+            total_mes_num = 0.0
+
         mes_nome = PT_BR_MESES.get(int(mes_sel), "—") if mes_sel is not None else "—"
+
+        # TÍTULO alinhado com Entradas/Saídas (mês + total)
         st.markdown(
-            f"**Descrição de compras no mês** "
-            f"<span style='color:#60a5fa;'>{mes_nome}</span>",
+            f"**Detalhe diário do mês** "
+            f"<span style='color:#60a5fa;'>{mes_nome}</span> "
+            f"— Total: <span style='color:#00C853;'>{_fmt_moeda(total_mes_num)}</span>",
             unsafe_allow_html=True,
         )
 
-        if not comp_target:
+        # Render tabela do mês
+        if comp_target is None:
             st.caption("Selecione um mês para listar as compras.")
-            st.dataframe(pd.DataFrame(columns=["Data", "Valor", "Categoria", "Descrição"]),
-                         use_container_width=True, hide_index=True, height=180)
+            st.dataframe(df_mes_raw, use_container_width=True, hide_index=True, height=180)
         else:
-            df_mes = _itens_da_competencia(df_card, comp_target)
-            if df_mes.empty:
+            if df_mes_raw.empty:
                 st.caption(f"Sem compras para {mes_nome}/{ano_sel}.")
-                st.dataframe(df_mes, use_container_width=True, hide_index=True, height=180)
+                st.dataframe(df_mes_raw, use_container_width=True, hide_index=True, height=180)
             else:
+                df_mes = df_mes_raw.copy()
                 df_mes["Valor"] = df_mes["Valor"].map(_fmt_moeda)
                 st.dataframe(
                     _zebra(df_mes[["Data", "Valor", "Categoria", "Descrição"]]),

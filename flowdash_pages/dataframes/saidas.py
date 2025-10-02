@@ -4,6 +4,7 @@ import os
 import sqlite3
 import pandas as pd
 import streamlit as st
+from datetime import date  # <<< novo
 
 from flowdash_pages.dataframes.filtros import (
     selecionar_ano,
@@ -108,12 +109,34 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
     # ===== 2) Seletor de mês =====
     mes, df_mes = selecionar_mes(df_ano, key="saidas", label="Escolha um mês")
 
+    # 🔹 Auto-seleção: mês atual (se houver dados); senão, 1º mês com dados.
+    if ("Data" in df_ano.columns) and (mes is None or df_mes.empty):
+        dt_all = _safe_to_datetime(df_ano["Data"])
+        meses_com_dado = sorted(dt_all.dt.month.dropna().unique().tolist())
+        hoje = date.today()
+        mes_pref = None
+        if int(ano) == hoje.year and hoje.month in meses_com_dado:
+            mes_pref = hoje.month
+        elif meses_com_dado:
+            mes_pref = int(meses_com_dado[0])
+        if mes_pref is not None:
+            mes = mes_pref
+            df_mes = df_ano[dt_all.dt.month == mes].copy()
+
+    # Para títulos da direita
+    mes_nome = _MESES_PT.get(int(mes), "—") if mes is not None else "—"
+    total_mes = float(pd.to_numeric(df_mes.get("Valor", 0), errors="coerce").sum()) if mes is not None else 0.0
+
     # ===== 3) Duas colunas =====
     col_esq, col_dir = st.columns(2)
 
     # 3.1) ESQUERDA — Total por mês (12 linhas)
     with col_esq:
-        st.markdown("**Total por mês (ano selecionado)**")
+        st.markdown(
+            f"**Faturamento por mês no ano** "
+            f"<span style='color:#60a5fa;'>{ano}</span>",
+            unsafe_allow_html=True,
+        )
         resumo = resumo_por_mes(df_ano, valor_col="Valor")  # Esperado: Mes, MesNome, Total
 
         base = pd.DataFrame({"Mes": list(range(1, 13))})
@@ -142,7 +165,12 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
 
     # 3.2) DIREITA — Detalhe diário do mês (mesma altura)
     with col_dir:
-        st.markdown("**Detalhe diário do mês**")
+        st.markdown(
+            f"**Detalhe diário do mês** "
+            f"<span style='color:#60a5fa;'>{mes_nome}</span> "
+            f"— Total: <span style='color:#00C853;'>{_fmt_moeda_str(total_mes)}</span>",
+            unsafe_allow_html=True,
+        )
         if mes is None or df_mes.empty:
             detalhado = pd.DataFrame(columns=["Dia", "Total"])
         else:
@@ -209,7 +237,6 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
     # --- Formatações (sem remover colunas) ---
     cmap = {c.lower(): c for c in df_full.columns}
 
-    # Data => só data
     if "data" in cmap:
         c = cmap["data"]
         try:
@@ -217,7 +244,6 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
         except Exception:
             pass
 
-    # Formatação de moeda nas colunas conhecidas (se existirem)
     fmt_map: dict[str, any] = {}
     for key in ("valor", "valor_liquido", "valorliquido", "valor_liq", "valorliq", "juros", "multa", "desconto"):
         if key in cmap:
@@ -229,6 +255,6 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
     st.dataframe(
         styled_full,
         use_container_width=True,
-        hide_index=True,  # índice oculto; NENHUMA coluna é removida
+        hide_index=True,
         height=altura_full,
     )

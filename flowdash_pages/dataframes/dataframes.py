@@ -69,7 +69,7 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 # ============================ Heurísticas de colunas ============================
 
 _USER_COLS = ["Usuario", "usuario", "vendedor", "responsavel", "user", "nome_usuario"]
-_DATE_COLS = ["Data", "data", "data_venda", "data_lanc", "data_emissao", "created_at", "data_evento", "data_pagamento", "data_compra"]
+_DATE_COLS = ["Data", "data", "data_venda", "data_lanc", "data_emissao", "created_at", "data_evento", "data_pagamento", "data_compra", "data_fatura"]
 _VALU_COLS = [
     "Valor", "valor", "valor_total", "valor_liquido", "valor_bruto",
     "Valor_Mercadoria", "valor_evento", "valor_pago", "valor_a_pagar",
@@ -208,7 +208,7 @@ def carregar_df_saidas() -> pd.DataFrame:
 
             df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
 
-            # Se as colunas esperadas não existirem por renomeações, aborta esta tabela e tenta a próxima
+            # Se as colunas esperadas não existirem por renomeações, ajusta
             cols_lower = {c.lower(): c for c in df_all.columns}
             if date_col not in df_all.columns and date_col.lower() in cols_lower:
                 date_col = cols_lower[date_col.lower()]
@@ -299,6 +299,93 @@ def carregar_df_mercadorias() -> pd.DataFrame:
         conn.close()
 
 
+def carregar_df_fatura_cartao() -> pd.DataFrame:
+    """
+    Loader padronizado para itens de fatura de cartão.
+    Retorna colunas: Data, Valor, (Usuario opcional).
+    """
+    conn = _connect()
+    if not conn:
+        return pd.DataFrame(columns=["Data", "Valor"])
+    try:
+        # nomes comuns
+        candidates = [
+            "fatura_cartao_itens",
+            "cartao_fatura_itens",
+            "faturas_cartao_itens",
+            "fatura_cartao",
+            "cartao_fatura",
+        ]
+        for tb in candidates:
+            if not _table_exists(conn, tb):
+                continue
+
+            picked = _pick_cols(conn, tb)
+            if picked:
+                user_col, date_col, valu_col = picked
+                df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
+
+                # Ajusta nomes por variação de caixa/sotaque
+                cols_lower = {c.lower(): c for c in df_all.columns}
+                if date_col not in df_all.columns and date_col.lower() in cols_lower:
+                    date_col = cols_lower[date_col.lower()]
+                if valu_col not in df_all.columns and valu_col.lower() in cols_lower:
+                    valu_col = cols_lower[valu_col.lower()]
+
+                if date_col not in df_all.columns or valu_col not in df_all.columns:
+                    continue
+
+                df_all["Data"] = _to_datetime(df_all[date_col])
+                df_all["Valor"] = _to_numeric(df_all[valu_col])
+
+                if user_col and user_col in df_all.columns:
+                    df_all["Usuario"] = df_all[user_col].astype(str)
+
+                keep_cols = ["Data", "Valor"] + (["Usuario"] if "Usuario" in df_all.columns else [])
+                return df_all[keep_cols].copy()
+
+            # fallback quando _pick_cols não acha (tenta heurística direta)
+            df_raw = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
+            if df_raw.empty:
+                continue
+            cols_lower = {c.lower(): c for c in df_raw.columns}
+
+            # Data
+            date_col = None
+            for c in _DATE_COLS:
+                if c.lower() in cols_lower:
+                    date_col = cols_lower[c.lower()]
+                    break
+            if date_col is None:
+                continue
+
+            # Valor
+            value_col = None
+            for c in _VALU_COLS:
+                if c.lower() in cols_lower:
+                    value_col = cols_lower[c.lower()]
+                    break
+            if value_col is None:
+                continue
+
+            out = pd.DataFrame()
+            out["Data"] = _to_datetime(df_raw[date_col])
+            out["Valor"] = _to_numeric(df_raw[value_col])
+
+            # Usuario (opcional)
+            for c in _USER_COLS:
+                if c.lower() in cols_lower:
+                    out["Usuario"] = df_raw[cols_lower[c.lower()]].astype(str)
+                    break
+
+            keep_cols = ["Data", "Valor"] + (["Usuario"] if "Usuario" in out.columns else [])
+            return out[keep_cols].copy()
+
+        return pd.DataFrame(columns=["Data", "Valor"])
+    finally:
+        conn.close()
+
+
 def publicar_dfs_na_session() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Conveniência: carrega e publica na session (ex.: Metas usa df_entrada)."""
     df_e = carregar_df_entrada()
@@ -324,20 +411,32 @@ def render():
         pagina_str = str(pagina)
 
     db_path = _get_db_path()
+    pag_low = (pagina_str or "").lower()
 
-    if "Entradas" in pagina_str or "entrada" in pagina_str.lower():
+    if "entradas" in pag_low or "entrada" in pag_low:
         df_e = carregar_df_entrada()
         page_entradas.render(df_e, caminho_banco=db_path)
         return
 
-    if "Saídas" in pagina_str or "saidas" in pagina_str.lower() or "saida" in pagina_str.lower():
+    if "saídas" in pag_low or "saidas" in pag_low or "saida" in pag_low:
         df_s = carregar_df_saidas()
         page_saidas.render(df_s)
         return
 
-    if "Mercadorias" in pagina_str or "mercadorias" in pagina_str.lower() or "estoque" in pagina_str.lower():
+    if "mercadorias" in pag_low or "estoque" in pag_low:
         df_m = carregar_df_mercadorias()
         page_mercadorias.render(df_m)
+        return
+
+    # ---- Nova rota: Fatura Cartão de Crédito ----
+    if ("fatura" in pag_low and ("cartão" in pag_low or "cartao" in pag_low)) or ("cartões" in pag_low or "cartoes" in pag_low):
+        df_f = carregar_df_fatura_cartao()
+        try:
+            # import lazy para não quebrar enquanto a página não existe (Passo 2)
+            from flowdash_pages.dataframes import faturas_cartao as page_faturas_cartao  # type: ignore
+            page_faturas_cartao.render(df_f, caminho_banco=db_path)
+        except Exception:
+            st.warning("Página 'Fatura Cartão' ainda não instalada. (Próximo passo criaremos a página).")
         return
 
     st.info("Selecione uma opção no menu de DataFrames.")
@@ -353,4 +452,6 @@ def get_dataframe(name: Optional[str] = None) -> pd.DataFrame:
         return carregar_df_saidas()
     if key in {"mercadorias", "estoque", "produtos", "compras", "itens_venda", "df_mercadorias"}:
         return carregar_df_mercadorias()
+    if key in {"fatura_cartao", "faturas_cartao", "fatura_cartao_itens", "cartao_fatura_itens"}:
+        return carregar_df_fatura_cartao()
     return pd.DataFrame()

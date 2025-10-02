@@ -16,7 +16,6 @@ _MESES_PT_NOME = {
     1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
-# para reconhecer textos como "Jul", "Julho", "jul", etc.
 _MESES_TOKEN_TO_NUM = {
     "jan":1, "janeiro":1,
     "fev":2, "fevereiro":2,
@@ -54,6 +53,13 @@ def _auto_df_height(
     n = int(len(df))
     h = header_px + (n * row_px) + pad_px
     return min(h, max_px)
+
+def _height_exact_rows(n_rows: int) -> int:
+    """Altura exata para exibir n_rows sem scroll."""
+    header_px = 38
+    row_px = 34
+    pad_px = 4
+    return header_px + (n_rows * row_px) + pad_px
 
 def _safe_to_datetime(s: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(s):
@@ -95,7 +101,7 @@ def _ensure_valor(df_in: pd.DataFrame) -> pd.DataFrame:
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
     return df
 
-# --- Datas: conversão robusta (misto string/serial Excel/datetime) ---
+# --- Datas: conversão robusta ---
 def _to_date_str(s: pd.Series) -> pd.Series:
     """Converte série para string de data (YYYY-MM-DD) sem warnings."""
     if pd.api.types.is_datetime64_any_dtype(s):
@@ -124,7 +130,6 @@ def _month_name_pt_from_any(x) -> str:
     """Recebe data/numero/texto e retorna nome do mês em PT (ex: 'Julho'); vazio se não conseguir."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
-    # datetime-like em string ou objeto
     try:
         dt = pd.to_datetime(x, errors="coerce")
         if pd.notna(dt):
@@ -132,18 +137,14 @@ def _month_name_pt_from_any(x) -> str:
             return _MESES_PT_NOME.get(m, "")
     except Exception:
         pass
-    # número do mês
     try:
         n = int(float(x))
         if 1 <= n <= 12:
             return _MESES_PT_NOME[n]
     except Exception:
         pass
-    # texto de mês
     try:
-        token = str(x).strip().lower()
-        # normaliza 'março' -> 'marco'
-        token = token.replace("ç", "c")
+        token = str(x).strip().lower().replace("ç", "c")
         m = _MESES_TOKEN_TO_NUM.get(token)
         if m:
             m = int(m)
@@ -153,7 +154,6 @@ def _month_name_pt_from_any(x) -> str:
     return ""
 
 def _to_month_name_pt_series(s: pd.Series) -> pd.Series:
-    """Converte série heterogênea para nomes de meses PT (Janeiro..Dezembro)."""
     return s.apply(_month_name_pt_from_any)
 
 # --- Descoberta do caminho do banco ---
@@ -202,11 +202,10 @@ def _load_full_table_if_possible(df_hint: pd.DataFrame) -> pd.DataFrame:
 # ================= Página =================
 def render(df_merc: pd.DataFrame) -> None:
     """
-    📦 Mercadorias — filtros e totais baseados EM `Recebimento` (padrão do sistema)
-      • Botões Jan–Dez (meses sem dados desabilitados) calculados por `Recebimento`
-      • Duas tabelas empilhadas:
-          1) Total por mês (ano selecionado)
-          2) Tabela completa do mês selecionado (todas as colunas reais)
+    📦 Mercadorias — agora em 2 colunas:
+      • Esquerda (1/4): Total por mês no ano selecionado (Jan..Dez sem scroll)
+      • Direita  (3/4): Tabela completa do mês selecionado (todas as colunas)
+      • Abre por padrão no mês corrente, se houver dados no ano; senão, no 1º mês com dados.
     """
     if not isinstance(df_merc, pd.DataFrame) or df_merc.empty:
         st.info("Nenhuma mercadoria encontrada (ou DataFrame inválido/vazio).")
@@ -238,17 +237,6 @@ def render(df_merc: pd.DataFrame) -> None:
     df_ano = df.loc[mask_ano].copy()
     dt_ano = dt.loc[mask_ano]
 
-    total_ano = float(df_ano["Valor"].sum())
-    st.markdown(
-        f"""
-        <div style="font-size:1.25rem;font-weight:700;margin:6px 0 10px;">
-            Ano selecionado: {ano} • Total no ano:
-            <span style="color:#00C853;">{_fmt_moeda(total_ano)}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     # ----- botões de MESES (por Recebimento) -----
     meses = dt_ano.dt.month
     totais_por_mes = (
@@ -259,7 +247,10 @@ def render(df_merc: pd.DataFrame) -> None:
 
     meses_com_dado = [m for m in range(1, 13) if float(totais_por_mes.iloc[m-1]) > 0]
     hoje = date.today()
-    mes_default = hoje.month if (hoje.year == ano and float(totais_por_mes.iloc[hoje.month-1]) > 0) else (meses_com_dado[0] if meses_com_dado else 1)
+    mes_default = (
+        hoje.month if (hoje.year == ano and float(totais_por_mes.iloc[hoje.month-1]) > 0)
+        else (meses_com_dado[0] if meses_com_dado else 1)
+    )
 
     sel_key = "merc_mes_sel"
     mes_sel = st.session_state.get(sel_key, mes_default)
@@ -283,66 +274,67 @@ def render(df_merc: pd.DataFrame) -> None:
     mask_mes = (dt_ano.dt.month == mes_sel)
     df_mes = df_ano.loc[mask_mes].copy()
     total_mes = float(df_mes["Valor"].sum())
-    st.markdown(
-        f"""
-        <div style="font-size:1.05rem;font-weight:700;margin:10px 0 6px;">
-            Mês selecionado: <code>{_MESES_PT_ABREV.get(mes_sel, '—')}</code> • Total no mês:
-            <span style="color:#00C853;">{_fmt_moeda(total_mes)}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-    # ====== TABELA 1 — Total por mês (ano selecionado) ======
-    st.markdown("**Total por mês (ano selecionado)**")
-    tabela_mes = pd.DataFrame({
-        "Mês": [_MESES_PT_ABREV[m] for m in range(1, 13)],
-        "Total": [float(totais_por_mes.get(m, 0.0)) for m in range(1, 13)],
-    })
-    h_mes = _auto_df_height(tabela_mes, row_px=34, header_px=44, pad_px=14, max_px=10_000)
-    st.dataframe(
-        _zebra(tabela_mes).format({"Total": _fmt_moeda}),
-        use_container_width=True,
-        hide_index=True,
-        height=h_mes,
-    )
+    # ====== LAYOUT LADO A LADO (1/4 x 3/4) ======
+    col_esq, col_dir = st.columns([1, 3])
 
-    # ====== TABELA 2 — Mercadorias do mês selecionado (todas as colunas REAIS) ======
-    st.divider()
-    st.markdown("**Mercadorias do mês selecionado — Tabela completa**")
+    # ====== ESQUERDA — TABELA 1: Total por mês (ano selecionado) ======
+    with col_esq:
+        st.markdown(
+            f"**Total por mês no ano** "
+            f"<span style='color:#60a5fa;'>{ano}</span>",
+            unsafe_allow_html=True,
+        )
 
-    if df_mes.empty:
-        st.info("Selecione um mês com dados para visualizar a tabela completa.")
-        return
+        tabela_mes = pd.DataFrame({
+            "Mês": [_MESES_PT_ABREV[m] for m in range(1, 13)],
+            "Total": [float(totais_por_mes.get(m, 0.0)) for m in range(1, 13)],
+        })
+        # 12 linhas sem scroll
+        h_mes = _height_exact_rows(12)
+        st.dataframe(
+            _zebra(tabela_mes).format({"Total": _fmt_moeda}),
+            use_container_width=True,
+            hide_index=True,
+            height=h_mes,
+        )
 
-    df_full = df_mes.copy()
+    # ====== DIREITA — TABELA 2: Mercadorias do mês selecionado (todas as colunas) ======
+    with col_dir:
+        st.markdown(
+            f"**Mercadorias do mês** "
+            f"<span style='color:#60a5fa;'>{_MESES_PT_ABREV.get(mes_sel, '—')}</span> "
+            f"— Total: <span style='color:#00C853;'>{_fmt_moeda(total_mes)}</span>",
+            unsafe_allow_html=True,
+        )
 
-    # Datas: formatamos as de data como YYYY-MM-DD (sem warnings)
-    for col in ("Data", "Recebimento", "Faturamento"):
-        if col in df_full.columns:
-            df_full[col] = _to_date_str(df_full[col])
+        if df_mes.empty:
+            st.caption("Selecione um mês com dados para visualizar a tabela completa.")
+            st.dataframe(pd.DataFrame(), use_container_width=True, hide_index=True, height=180)
+        else:
+            df_full = df_mes.copy()
 
-    # ⚙️ 'Previsao_Recebimento' deve exibir NOME DO MÊS em PT (Julho, Agosto, ...)
-    # Aceita valores como data, número do mês, "Jul", "Julho", etc.
-    if "Previsao_Recebimento" in df_full.columns:
-        df_full["Previsao_Recebimento"] = _to_month_name_pt_series(df_full["Previsao_Recebimento"])
+            # Datas legíveis
+            for col in ("Data", "Recebimento", "Faturamento"):
+                if col in df_full.columns:
+                    df_full[col] = _to_date_str(df_full[col])
 
-    # Também tratamos 'Previsao_Faturamento' se existir (opcional)
-    if "Previsao_Faturamento" in df_full.columns:
-        # Se quiser mês por extenso também, descomente a próxima linha
-        # df_full["Previsao_Faturamento"] = _to_month_name_pt_series(df_full["Previsao_Faturamento"])
-        # Por enquanto mantém como data legível:
-        df_full["Previsao_Faturamento"] = _to_date_str(df_full["Previsao_Faturamento"])
+            # 'Previsao_Recebimento' em mês por extenso (PT)
+            if "Previsao_Recebimento" in df_full.columns:
+                df_full["Previsao_Recebimento"] = _to_month_name_pt_series(df_full["Previsao_Recebimento"])
 
-    fmt_map: dict[str, any] = {}
-    for cand in ("Valor", "frete", "Frete", "faturamento", "Faturamento", "recebimento", "Recebimento", "Valor_Recebido", "Frete_Cobrado"):
-        if cand in df_full.columns:
-            fmt_map[cand] = _fmt_moeda
+            if "Previsao_Faturamento" in df_full.columns:
+                df_full["Previsao_Faturamento"] = _to_date_str(df_full["Previsao_Faturamento"])
 
-    h_full = _auto_df_height(df_full, max_px=1200)
-    st.dataframe(
-        _zebra(df_full).format(fmt_map) if fmt_map else _zebra(df_full),
-        use_container_width=True,
-        hide_index=True,
-        height=h_full,
-    )
+            fmt_map: dict[str, any] = {}
+            for cand in ("Valor", "frete", "Frete", "faturamento", "Faturamento", "recebimento", "Recebimento", "Valor_Recebido", "Frete_Cobrado"):
+                if cand in df_full.columns:
+                    fmt_map[cand] = _fmt_moeda
+
+            h_full = _auto_df_height(df_full, max_px=1200)
+            st.dataframe(
+                _zebra(df_full).format(fmt_map) if fmt_map else _zebra(df_full),
+                use_container_width=True,
+                hide_index=True,
+                height=h_full,
+            )
