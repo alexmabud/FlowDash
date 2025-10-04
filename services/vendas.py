@@ -438,17 +438,27 @@ class VendasService:
 
             valor_liquido = round(float(valor_bruto) * (1.0 - float(taxa_eff) / 100.0), 2)
 
-            # Idempotência — único log por liquidação
+                        # Idempotência — único log por liquidação
             trans_uid = uid_venda_liquidacao(
                 data_venda, data_liq, float(valor_bruto), forma_u, int(parcelas),
                 bandeira, maquineta, banco_destino, float(taxa_eff), usuario,
             )
-            if conn.execute("SELECT id FROM movimentacoes_bancarias WHERE trans_uid=? LIMIT 1;", (trans_uid,)).fetchone():
-                return (-1, -1)
+            # ===== DESATIVADO: checagem de idempotência nas ENTRADAS =====
+            # if conn.execute("SELECT id FROM movimentacoes_bancarias WHERE trans_uid=? LIMIT 1;", (trans_uid,)).fetchone():
+            #     return (-1, -1)
+            # =============================================================
+
+            # 🔒 Evita colisão no índice UNIQUE quando a idempotência está desligada
+            try:
+                nonce = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("-%Y%m%d%H%M%S%f")
+            except Exception:
+                nonce = datetime.now().strftime("-%Y%m%d%H%M%S%f")
+            trans_uid = f"{trans_uid}{nonce}"
+
 
             cur = conn.cursor()
 
-            # 1) INSERT em `entrada`
+            # 1 INSERT em `entrada`
             venda_id = self._insert_entrada(
                 conn,
                 data_venda=str(data_venda),
