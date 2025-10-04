@@ -1,4 +1,4 @@
-# flowdash_pages/dataframes/faturas_cartao.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -10,37 +10,61 @@ import pandas as pd
 import streamlit as st
 from flowdash_pages.dataframes.filtros import selecionar_mes
 
+# ================= Descoberta de DB (segura) =================
+try:
+    # Usa a camada segura (não acessa session_state no import-time)
+    from shared.db import get_db_path as _shared_get_db_path, ensure_db_path_or_raise
+except Exception:
+    _shared_get_db_path = None
+
+    def ensure_db_path_or_raise(_: Optional[str] = None) -> str:
+        for p in (
+            os.path.join("data", "flowdash_data.db"),
+            os.path.join("data", "dashboard_rc.db"),
+            "dashboard_rc.db",
+            os.path.join("data", "flowdash_template.db"),
+        ):
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError("Nenhum banco padrão encontrado.")
+
+def _resolve_db_path(pref: Optional[str]) -> Optional[str]:
+    if isinstance(pref, str) and os.path.exists(pref):
+        return pref
+    if callable(_shared_get_db_path):
+        p = _shared_get_db_path()
+        if isinstance(p, str) and os.path.exists(p):
+            return p
+    # fallbacks locais
+    for p in (
+        os.path.join("data", "flowdash_data.db"),
+        os.path.join("data", "dashboard_rc.db"),
+        "dashboard_rc.db",
+        os.path.join("data", "flowdash_template.db"),
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+def _connect(db_like: Optional[str]) -> Optional[sqlite3.Connection]:
+    try:
+        db = ensure_db_path_or_raise(db_like)
+    except Exception as e:
+        st.error("❌ Banco de dados não encontrado (Fatura Cartão).")
+        st.caption(str(e))
+        return None
+    try:
+        return sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    except Exception as e:
+        st.error("❌ Erro ao conectar no banco (Fatura Cartão).")
+        st.exception(e)
+        return None
+
 # ================= Helpers =================
 PT_BR_MESES = {
     1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
     7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"
 }
-
-def _db_path(pref: Optional[str]) -> Optional[str]:
-    cands: List[str] = []
-    if pref: cands.append(pref)
-    for k in ("caminho_banco", "db_path"):
-        v = st.session_state.get(k)
-        if isinstance(v, str):
-            cands.append(v)
-    cands += [
-        "data/flowdash_data.db",
-        "dashboard_rc.db",
-        os.path.join("data", "dashboard_rc.db"),
-        os.path.join("data", "flowdash_template.db"),
-    ]
-    for p in cands:
-        if p and os.path.exists(p):
-            return p
-    return None
-
-def _conn(db_path: Optional[str]) -> Optional[sqlite3.Connection]:
-    if not db_path:
-        return None
-    try:
-        return sqlite3.connect(db_path)
-    except Exception:
-        return None
 
 def _fmt_moeda(v) -> str:
     try:
@@ -100,23 +124,31 @@ def _choose_val_total_col(df: pd.DataFrame) -> Optional[str]:
     return _choose_col(df, order)
 
 # ================= Leitura / preparação =================
-def _load_core(dbp: Optional[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    con = _conn(dbp)
+def _load_core(db_like: Optional[str]) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    con = _connect(db_like)
     if not con:
         return pd.DataFrame(), pd.DataFrame()
     try:
-        cards = pd.read_sql('SELECT id, nome FROM "cartoes_credito";', con)
-    except Exception:
+        # Cartões
         try:
-            cards = pd.read_sql('SELECT id, nome FROM "cartao_credito";', con)
+            cards = pd.read_sql('SELECT id, nome FROM "cartoes_credito";', con)
         except Exception:
-            cards = pd.DataFrame(columns=["id", "nome"])
-    try:
-        itens = pd.read_sql('SELECT * FROM "fatura_cartao_itens";', con)
-    except Exception:
-        itens = pd.DataFrame()
+            cards = pd.read_sql('SELECT id, nome FROM "cartao_credito";', con)
+
+        # Itens
+        try:
+            itens = pd.read_sql('SELECT * FROM "fatura_cartao_itens";', con)
+        except Exception:
+            itens = pd.DataFrame()
+    except Exception as e:
+        st.error("❌ Erro ao ler tabelas de cartão/fatura.")
+        st.exception(e)
+        return pd.DataFrame(), pd.DataFrame()
     finally:
-        con.close()
+        try:
+            con.close()
+        except Exception:
+            pass
     return cards, itens
 
 def _filter_itens_by_card(itens: pd.DataFrame, cards: pd.DataFrame, card_id: str) -> pd.DataFrame:
@@ -190,10 +222,14 @@ def _itens_da_competencia(df_card_norm: pd.DataFrame, comp: str) -> pd.DataFrame
 def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> None:
     st.markdown("### 💳 Fatura Cartão de Crédito")
 
-    dbp = _db_path(caminho_banco)
+    dbp = _resolve_db_path(caminho_banco)
+    if not dbp:
+        st.error("Não foi possível localizar o banco de dados.")
+        return
+
     cards, itens = _load_core(dbp)
     if cards.empty:
-        st.warning("Tabela 'cartoes_credito' vazia (ou não encontrada).")
+        st.warning("Tabela 'cartoes_credito' (ou 'cartao_credito') vazia ou não encontrada.")
         return
     if itens.empty:
         st.info("Tabela 'fatura_cartao_itens' vazia (sem lançamentos).")
@@ -202,8 +238,13 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
     # Seleção do cartão
     cards = cards.dropna(subset=["id", "nome"]).copy()
     cards["id"] = cards["id"].astype(str)
-    cartao_nome = st.selectbox("Escolha o cartão", cards["nome"].astype(str).tolist(), index=0, key="sel_cartao_fatura")
-    cartao_id = cards.loc[cards["nome"] == cartao_nome, "id"].astype(str).iloc[0]
+    nomes_cartoes = cards["nome"].astype(str).tolist()
+    cartao_nome = st.selectbox("Escolha o cartão", nomes_cartoes, index=0, key="sel_cartao_fatura")
+    try:
+        cartao_id = cards.loc[cards["nome"].astype(str) == cartao_nome, "id"].astype(str).iloc[0]
+    except Exception:
+        st.error("Cartão selecionado inválido.")
+        return
 
     # Itens desse cartão, com competências normalizadas
     df_card = _filter_itens_by_card(itens, cards, cartao_id)
@@ -215,10 +256,7 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
     # ---------- Seletor de ANO ----------
     anos_disponiveis = sorted(df_card["ano_num"].dropna().astype(int).unique())
     hoje = date.today()
-    if hoje.year in anos_disponiveis:
-        idx_padrao_ano = anos_disponiveis.index(hoje.year)
-    else:
-        idx_padrao_ano = len(anos_disponiveis) - 1
+    idx_padrao_ano = anos_disponiveis.index(hoje.year) if (hoje.year in anos_disponiveis) else len(anos_disponiveis) - 1
     ano_sel = st.selectbox("Ano (competência)", anos_disponiveis, index=idx_padrao_ano, key=f"ano_{cartao_id}")
 
     # ---------- Tabela 1 (1/4): Jan..Dez do ANO escolhido ----------
@@ -244,7 +282,6 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
     col_resumo, col_itens = st.columns([1, 3])
 
     with col_resumo:
-        # TÍTULO alinhado com Entradas/Saídas
         st.markdown(
             f"**Faturamento por mês no ano** "
             f"<span style='color:#60a5fa;'>{ano_sel}</span>",
@@ -271,7 +308,6 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
 
         mes_nome = PT_BR_MESES.get(int(mes_sel), "—") if mes_sel is not None else "—"
 
-        # TÍTULO alinhado com Entradas/Saídas (mês + total)
         st.markdown(
             f"**Detalhe diário do mês** "
             f"<span style='color:#60a5fa;'>{mes_nome}</span> "

@@ -1,4 +1,5 @@
 # flowdash_pages/dataframes/dataframes.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -14,30 +15,37 @@ from flowdash_pages.dataframes import entradas as page_entradas
 from flowdash_pages.dataframes import saidas as page_saidas
 from flowdash_pages.dataframes import mercadorias as page_mercadorias
 
+# Descoberta de DB segura (não usa session_state no import-time)
+try:
+    from shared.db import get_db_path as _shared_get_db_path, ensure_db_path_or_raise
+except Exception:
+    _shared_get_db_path = None
+    def ensure_db_path_or_raise(_: Optional[str] = None) -> str:  # fallback simples
+        for p in (
+            os.path.join("data", "flowdash_data.db"),
+            os.path.join("data", "dashboard_rc.db"),
+            "dashboard_rc.db",
+            os.path.join("data", "flowdash_template.db"),
+        ):
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError("Nenhum banco padrão encontrado.")
+
 
 # ============================ Descoberta do DB ============================
 
 def _get_db_path() -> Optional[str]:
-    # 1) session
-    cand = st.session_state.get("caminho_banco")
-    if isinstance(cand, str) and os.path.exists(cand):
-        return cand
+    """
+    Usa shared.db.get_db_path() quando disponível.
+    Não acessa st.session_state diretamente.
+    """
+    if callable(_shared_get_db_path):
+        p = _shared_get_db_path()
+        if isinstance(p, str) and os.path.exists(p):
+            return p
 
-    # 2) shared.db (se existir)
-    try:
-        from shared import db as sdb  # type: ignore
-        for name in ("get_db_path", "db_path", "DB_PATH"):
-            if hasattr(sdb, name):
-                obj = getattr(sdb, name)
-                p = obj() if callable(obj) else obj
-                if isinstance(p, str) and os.path.exists(p):
-                    return p
-    except Exception:
-        pass
-
-    # 3) defaults
+    # Fallbacks locais (sem session_state)
     for p in (
-        os.path.join("data", "entrada.db"),
         os.path.join("data", "flowdash_data.db"),
         os.path.join("data", "dashboard_rc.db"),
         "dashboard_rc.db",
@@ -49,12 +57,23 @@ def _get_db_path() -> Optional[str]:
 
 
 def _connect() -> Optional[sqlite3.Connection]:
-    db = _get_db_path()
-    if not db:
-        return None
+    """
+    Abre conexão leve para leitura. Usa ensure_db_path_or_raise para mensagens claras.
+    """
     try:
-        return sqlite3.connect(db)
-    except Exception:
+        db = ensure_db_path_or_raise(_get_db_path())
+    except Exception as e:
+        st.error("❌ Banco de dados não encontrado.")
+        st.caption(str(e))
+        return None
+
+    try:
+        # detect_types melhora parsing de DATE/DATETIME quando existir no schema
+        conn = sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        return conn
+    except Exception as e:
+        st.error("❌ Erro ao conectar no banco de dados.")
+        st.exception(e)
         return None
 
 
@@ -100,7 +119,7 @@ def _pick_cols(conn: sqlite3.Connection, table: str) -> Optional[Tuple[Optional[
 def _ensure_listlike(x):
     """
     Garante lista quando a chamada espera 1-D (ex.: .isin(), seleção de colunas).
-    Mantém estruturas já iteráveis. Evita o erro: 'arg must be a list/tuple/1-d array/Series'.
+    Evita o erro: 'arg must be a list/tuple/1-d array/Series'.
     """
     if x is None:
         return []
@@ -121,16 +140,13 @@ def _to_series1d(x) -> pd.Series:
     if isinstance(x, pd.Series):
         return x
     if isinstance(x, pd.DataFrame):
-        # se tiver 1 coluna, espreme; se tiver mais, pega a primeira por segurança
         if x.shape[1] == 1:
             return x.iloc[:, 0]
         squeezed = x.squeeze("columns")
         return squeezed if isinstance(squeezed, pd.Series) else x.iloc[:, 0]
-    # list/tuple/ndarray/escalar/dict
     try:
         return pd.Series(x)
     except Exception:
-        # último recurso: embrulha como lista
         return pd.Series([x])
 
 
@@ -142,7 +158,6 @@ def _to_datetime(s) -> pd.Series:
 def _to_numeric(s) -> pd.Series:
     s1 = _to_series1d(s)
     out = pd.to_numeric(s1, errors="coerce")
-    # garante float para evitar 'object' em NaN
     return out.astype(float).fillna(0.0)
 
 
@@ -170,20 +185,15 @@ def carregar_df_entrada() -> pd.DataFrame:
                 if user_col:
                     sql = f'SELECT "{user_col}" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
                 else:
-                    # força coluna Usuario para padronização
                     sql = f'SELECT "LOJA" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
 
                 df = pd.read_sql(sql, conn)
 
-                # Normalizações fortes
                 df["Data"] = _to_datetime(df["Data"])
                 df["Valor"] = _to_numeric(df["Valor"])
 
-                # Evita 'nan' string
-                df["Usuario"] = df["Usuario"].where(df["Usuario"].notna(), "LOJA")
-                df["Usuario"] = df["Usuario"].astype(str)
+                df["Usuario"] = df["Usuario"].where(df["Usuario"].notna(), "LOJA").astype(str)
 
-                # Ordem de colunas padrão
                 return df[["Usuario", "Data", "Valor"]].copy()
 
         return pd.DataFrame(columns=["Usuario", "Data", "Valor"])
@@ -208,7 +218,6 @@ def carregar_df_saidas() -> pd.DataFrame:
 
             df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
 
-            # Se as colunas esperadas não existirem por renomeações, ajusta
             cols_lower = {c.lower(): c for c in df_all.columns}
             if date_col not in df_all.columns and date_col.lower() in cols_lower:
                 date_col = cols_lower[date_col.lower()]
@@ -269,7 +278,6 @@ def carregar_df_mercadorias() -> pd.DataFrame:
             if value_col is not None:
                 out["Valor"] = _to_numeric(df[value_col])
             else:
-                # tenta preco*quantidade
                 preco_col = None
                 qtd_col = None
                 for name in ["preco", "preço", "valor_unit", "vl_unit", "unitario", "unit_price"]:
@@ -308,7 +316,6 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
     if not conn:
         return pd.DataFrame(columns=["Data", "Valor"])
     try:
-        # nomes comuns
         candidates = [
             "fatura_cartao_itens",
             "cartao_fatura_itens",
@@ -325,7 +332,6 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
                 user_col, date_col, valu_col = picked
                 df_all = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
 
-                # Ajusta nomes por variação de caixa/sotaque
                 cols_lower = {c.lower(): c for c in df_all.columns}
                 if date_col not in df_all.columns and date_col.lower() in cols_lower:
                     date_col = cols_lower[date_col.lower()]
@@ -344,13 +350,12 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
                 keep_cols = ["Data", "Valor"] + (["Usuario"] if "Usuario" in df_all.columns else [])
                 return df_all[keep_cols].copy()
 
-            # fallback quando _pick_cols não acha (tenta heurística direta)
+            # fallback heurístico
             df_raw = pd.read_sql(f'SELECT * FROM "{tb}";', conn)
             if df_raw.empty:
                 continue
             cols_lower = {c.lower(): c for c in df_raw.columns}
 
-            # Data
             date_col = None
             for c in _DATE_COLS:
                 if c.lower() in cols_lower:
@@ -359,7 +364,6 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
             if date_col is None:
                 continue
 
-            # Valor
             value_col = None
             for c in _VALU_COLS:
                 if c.lower() in cols_lower:
@@ -372,7 +376,6 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
             out["Data"] = _to_datetime(df_raw[date_col])
             out["Valor"] = _to_numeric(df_raw[value_col])
 
-            # Usuario (opcional)
             for c in _USER_COLS:
                 if c.lower() in cols_lower:
                     out["Usuario"] = df_raw[cols_lower[c.lower()]].astype(str)
@@ -389,7 +392,7 @@ def carregar_df_fatura_cartao() -> pd.DataFrame:
 def publicar_dfs_na_session() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Conveniência: carrega e publica na session (ex.: Metas usa df_entrada)."""
     df_e = carregar_df_entrada()
-    df_m = pd.DataFrame()  # mantido por compat
+    df_m = pd.DataFrame()  # compat
     st.session_state["df_entrada"] = df_e
     st.session_state["df_metas"]   = df_m
     return df_e, df_m
@@ -400,11 +403,8 @@ def publicar_dfs_na_session() -> Tuple[pd.DataFrame, pd.DataFrame]:
 def render():
     """
     Shim de roteamento: mantém compatibilidade com main.py chamando esta função.
-    - Não usa helpers de filtros (evita erros de assinatura).
-    - Apenas carrega o DF e delega para a página correspondente.
     """
     pagina = st.session_state.get("pagina_atual", "")
-    # Normaliza para string (evita casos onde vem lista/objeto)
     try:
         pagina_str = " ".join(_ensure_listlike(pagina)).strip()
     except Exception:
@@ -428,15 +428,13 @@ def render():
         page_mercadorias.render(df_m)
         return
 
-    # ---- Nova rota: Fatura Cartão de Crédito ----
     if ("fatura" in pag_low and ("cartão" in pag_low or "cartao" in pag_low)) or ("cartões" in pag_low or "cartoes" in pag_low):
         df_f = carregar_df_fatura_cartao()
         try:
-            # import lazy para não quebrar enquanto a página não existe (Passo 2)
             from flowdash_pages.dataframes import faturas_cartao as page_faturas_cartao  # type: ignore
             page_faturas_cartao.render(df_f, caminho_banco=db_path)
         except Exception:
-            st.warning("Página 'Fatura Cartão' ainda não instalada. (Próximo passo criaremos a página).")
+            st.warning("Página 'Fatura Cartão' ainda não instalada.")
         return
 
     st.info("Selecione uma opção no menu de DataFrames.")

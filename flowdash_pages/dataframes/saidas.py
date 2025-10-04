@@ -1,10 +1,13 @@
-# flowdash_pages/dataframes/saidas.py
+# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import os
 import sqlite3
+from datetime import date
+from typing import Optional, Iterable
+
 import pandas as pd
 import streamlit as st
-from datetime import date  # <<< novo
 
 from flowdash_pages.dataframes.filtros import (
     selecionar_ano,
@@ -12,7 +15,76 @@ from flowdash_pages.dataframes.filtros import (
     resumo_por_mes,
 )
 
-# ================= Helpers =================
+# ================= Descoberta de DB (segura) =================
+try:
+    # Usa nossa camada segura (não acessa session_state no import-time)
+    from shared.db import get_db_path as _shared_get_db_path, ensure_db_path_or_raise
+except Exception:
+    _shared_get_db_path = None
+
+    def ensure_db_path_or_raise(_: Optional[str] = None) -> str:
+        for p in (
+            os.path.join("data", "flowdash_data.db"),
+            os.path.join("data", "dashboard_rc.db"),
+            "dashboard_rc.db",
+            os.path.join("data", "flowdash_template.db"),
+        ):
+            if os.path.exists(p):
+                return p
+        raise FileNotFoundError("Nenhum banco padrão encontrado.")
+
+def _resolve_db_path(pref: Optional[str]) -> Optional[str]:
+    if isinstance(pref, str) and os.path.exists(pref):
+        return pref
+    if callable(_shared_get_db_path):
+        p = _shared_get_db_path()
+        if isinstance(p, str) and os.path.exists(p):
+            return p
+    # fallbacks locais
+    for p in (
+        os.path.join("data", "flowdash_data.db"),
+        os.path.join("data", "dashboard_rc.db"),
+        "dashboard_rc.db",
+        os.path.join("data", "flowdash_template.db"),
+    ):
+        if os.path.exists(p):
+            return p
+    return None
+
+def _connect(db_like: Optional[str]) -> Optional[sqlite3.Connection]:
+    try:
+        db = ensure_db_path_or_raise(db_like)
+    except Exception as e:
+        st.error("❌ Banco de dados não encontrado para Saídas.")
+        st.caption(str(e))
+        return None
+    try:
+        return sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+    except Exception as e:
+        st.error("❌ Erro ao conectar no banco (Saídas).")
+        st.exception(e)
+        return None
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    cur = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND LOWER(name)=LOWER(?) LIMIT 1;",
+        (name,),
+    )
+    return cur.fetchone() is not None
+
+def _find_first_table(conn: sqlite3.Connection, candidates: Iterable[str]) -> Optional[str]:
+    for t in candidates:
+        if _table_exists(conn, t):
+            return t
+    # fallback: qualquer tabela que contenha 'saida' no nome
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table';")
+    rows = cur.fetchall()
+    for (nm,) in rows:
+        if "saida" in nm.lower():
+            return nm
+    return None
+
+# ================= Helpers de UI =================
 def _auto_df_height(df: pd.DataFrame, row_px: int = 30, header_px: int = 44, pad_px: int = 14, max_px: int = 1200) -> int:
     n = int(len(df))
     h = header_px + (n * row_px) + pad_px
@@ -35,41 +107,6 @@ def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> p
         bg = light if (row.name % 2) else dark
         return [f"background-color: {bg}"] * ncols
     return df.style.apply(_row_style, axis=1)
-
-def _discover_db_path(user_path: str | None = None) -> str | None:
-    candidates: list[str] = []
-    if user_path:
-        candidates.append(user_path)
-    for k in ("caminho_banco", "db_path", "caminho_db", "_effective_path"):
-        v = st.session_state.get(k)
-        if isinstance(v, str):
-            candidates.append(v)
-    candidates += [
-        "data/flowdash_data.db",
-        "dashboard_rc.db",
-        os.path.join("data", "dashboard_rc.db"),
-        os.path.join("FlowDash", "data", "flowdash_data.db"),
-    ]
-    for p in candidates:
-        try:
-            if p and os.path.exists(p):
-                return p
-        except Exception:
-            pass
-    return None
-
-def _detect_saida_table_name(con: sqlite3.Connection) -> str:
-    """Localiza a tabela de saídas (preferência 'saida')."""
-    cur = con.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    names = {row[0].lower(): row[0] for row in cur.fetchall()}
-    for candidate in ("saida", "saidas"):
-        if candidate in names:
-            return names[candidate]
-    for key, original in names.items():
-        if "saida" in key:
-            return original
-    raise RuntimeError("Tabela de saídas não encontrada (ex.: 'saida' ou 'saidas').")
 
 # Mapeamento fixo de meses (12 linhas garantidas)
 _MESES_PT = {
@@ -202,9 +239,9 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
         st.info("Selecione um mês para visualizar a tabela completa.")
         return
 
-    db_path = _discover_db_path(caminho_banco)
+    db_path = _resolve_db_path(caminho_banco)
     if not db_path:
-        st.error("Não foi possível localizar o banco de dados. Informe 'caminho_banco' ou defina em st.session_state.")
+        st.error("Não foi possível localizar o banco de dados.")
         return
 
     ano_int, mes_int = int(ano), int(mes)
@@ -212,25 +249,29 @@ def render(df_saidas: pd.DataFrame, caminho_banco: str | None = None) -> None:
     last_day  = (pd.Timestamp(year=ano_int, month=mes_int, day=1) + pd.offsets.MonthEnd(1)).date()
 
     try:
-        con = sqlite3.connect(db_path)
-        tabela = _detect_saida_table_name(con)
+        con = _connect(db_path)
+        if not con:
+            return
+        tabela = _find_first_table(con, ("saida", "saidas", "lancamentos_saida", "pagamentos_saida", "pagamentos"))
+        if tabela is None:
+            st.warning("Tabela de Saídas não encontrada no banco.")
+            return
+
+        # Nota: nome da tabela foi obtido do sqlite_master, baixo risco;
+        # ainda assim, cercamos com aspas duplas.
         query = f"""
             SELECT *
-            FROM {tabela}
+            FROM "{tabela}"
             WHERE date(Data) BETWEEN ? AND ?
             ORDER BY datetime(Data) ASC
         """
         df_full = pd.read_sql_query(query, con, params=(str(first_day), str(last_day)))
     except Exception as e:
         st.error(f"Falha ao ler do banco '{db_path}': {e}")
-        try:
-            con and con.close()
-        except Exception:
-            pass
         return
     finally:
         try:
-            con.close()
+            con and con.close()
         except Exception:
             pass
 
