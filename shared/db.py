@@ -61,8 +61,11 @@ def _env_candidates() -> list[str]:
     return cands
 
 def _default_candidates() -> list[str]:
+    # 👇 Inclusão dos caminhos do dashboard_rc.db
     return [
         "data/flowdash_data.db",
+        "data/dashboard_rc.db",
+        "dashboard_rc.db",
         "data/flowdash_template.db",
         "./flowdash_data.db",
     ]
