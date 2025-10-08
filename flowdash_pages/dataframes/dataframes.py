@@ -10,18 +10,20 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 
-# Páginas específicas
+# Páginas específicas já existentes
 from flowdash_pages.dataframes import entradas as page_entradas
 from flowdash_pages.dataframes import saidas as page_saidas
 from flowdash_pages.dataframes import mercadorias as page_mercadorias
-from flowdash_pages.dataframes import emprestimos as page_emprestimos  # <- mantém
+from flowdash_pages.dataframes import emprestimos as page_emprestimos  # mantém
+from flowdash_pages.dataframes import contas_a_pagar as page_contas_a_pagar  # NOVO (padronizado)
 
-# Descoberta de DB segura (não usa session_state no import-time)
+# Descoberta de DB (segura)
 try:
     from shared.db import get_db_path as _shared_get_db_path, ensure_db_path_or_raise
 except Exception:
     _shared_get_db_path = None
-    def ensure_db_path_or_raise(_: Optional[str] = None) -> str:  # fallback simples
+
+    def ensure_db_path_or_raise(_: Optional[str] = None) -> str:
         for p in (
             os.path.join("data", "flowdash_data.db"),
             os.path.join("data", "dashboard_rc.db"),
@@ -73,7 +75,11 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 # ============================ Heurísticas de colunas ============================
 
 _USER_COLS = ["Usuario", "usuario", "vendedor", "responsavel", "user", "nome_usuario"]
-_DATE_COLS = ["Data", "data", "data_venda", "data_lanc", "data_emissao", "created_at", "data_evento", "data_pagamento", "data_compra", "data_fatura", "data_vencimento", "Data_Vencimento", "data_contratacao", "data_inicio_pagamento", "data_lancamento"]  # <- adicionei datas de empréstimo
+_DATE_COLS = [
+    "Data", "data", "data_venda", "data_lanc", "data_emissao", "created_at",
+    "data_evento", "data_pagamento", "data_compra", "data_fatura", "data_vencimento",
+    "Data_Vencimento", "data_contratacao", "data_inicio_pagamento", "data_lancamento"
+]
 _VALU_COLS = [
     "Valor", "valor", "valor_total", "valor_liquido", "valor_bruto",
     "Valor_Mercadoria", "valor_evento", "valor_pago", "valor_a_pagar",
@@ -184,9 +190,13 @@ def carregar_df_saidas() -> pd.DataFrame:
             if date_col not in df_all.columns and date_col.lower() in cols_lower:
                 date_col = cols_lower[date_col.lower()]
             if valu_col not in df_all.columns and valu_col.lower() in cols_lower:
+                # ✅ correção do typo: valucol -> valu_col
                 valu_col = cols_lower[valu_col.lower()]
             if date_col not in df_all.columns or valu_col not in df_all.columns:
-                continue
+                # fallback
+                valu_col = cols_lower.get("valor", valu_col)
+                if date_col not in df_all.columns or valu_col not in df_all.columns:
+                    continue
             df_all["Data"] = _to_datetime(df_all[date_col])
             df_all["Valor"] = _to_numeric(df_all[valu_col])
             if user_col and user_col in df_all.columns:
@@ -404,8 +414,16 @@ def render():
 
     if ("emprest" in pag_low) or ("financ" in pag_low):
         df_emp = carregar_df_emprestimos()
-        # 🔑 se vazio, passa None para acionar o fallback interno da página (procura table/view no sqlite_master)
         page_emprestimos.render(df_emp if not df_emp.empty else None, caminho_banco=db_path)
+        return
+
+    # ---- NOVO: Contas a Pagar
+    if ("contas a pagar" in pag_low) or ("contas" in pag_low and "pagar" in pag_low) or ("cap" in pag_low):
+        try:
+            page_contas_a_pagar.render(db_path)
+        except Exception as e:
+            st.error("Erro ao renderizar 'Contas a Pagar'.")
+            st.exception(e)
         return
 
     st.info("Selecione uma opção no menu de DataFrames.")
