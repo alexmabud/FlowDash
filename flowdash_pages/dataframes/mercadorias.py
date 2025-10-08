@@ -392,9 +392,18 @@ def render(df_merc: pd.DataFrame) -> None:
 
         # Formatações monetárias usuais
         fmt_map: dict[str, any] = {}
+
+        # 1) Campos comuns já conhecidos
         for cand in ("Valor", "valor", "Frete", "frete", "Faturamento", "faturamento", "Valor_Recebido", "Frete_Cobrado"):
             if cand in df_full.columns:
                 fmt_map[cand] = _fmt_moeda
+
+        # 2) **NOVO**: garantir BRL para 'valor_mercadorias' e variações (_VALOR_CANDIDATAS)
+        cols_lower = {c.lower(): c for c in df_full.columns}
+        for k in _VALOR_CANDIDATAS:
+            c = cols_lower.get(k.lower())
+            if c:
+                fmt_map[c] = _fmt_moeda
 
         total_mes = 0.0
         if "Valor" in df_full.columns:
