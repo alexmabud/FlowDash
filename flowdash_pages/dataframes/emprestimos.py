@@ -341,7 +341,7 @@ def render(df_base: Optional[pd.DataFrame] = None, caminho_banco: str | None = N
         st.info("Nenhum empréstimo/financiamento encontrado (ou DataFrame vazio).")
         return
 
-    # --------- Cabeçalho (ano)
+    # --------- Cabeçalho (ano) — agora calcula o total pelas PARCELAS do ano
     data_series = _best_date_series(df_full)
     cmap = {str(c).lower(): c for c in df_full.columns}
     if "valor_total" in cmap:
@@ -351,32 +351,35 @@ def render(df_base: Optional[pd.DataFrame] = None, caminho_banco: str | None = N
     else:
         valor_series = pd.Series([0.0] * len(df_full))
     df_esq_header = pd.DataFrame({"Data": data_series, "Valor": valor_series})
+
     ano, df_ano = selecionar_ano(df_esq_header, key="empfin", label="Ano (Empréstimos/Financiamentos)")
-    total_ano = float(pd.to_numeric(df_ano.get("Valor", 0), errors="coerce").sum())
+
+    # Gera cronograma para o ano selecionado e usa a soma das parcelas como total do cabeçalho
+    try:
+        parcelas_df = _parcelas_calendar_from_contracts(df_full, int(ano))
+    except Exception:
+        resumo = resumo_por_mes(df_ano, valor_col="Valor")
+        parcelas_df = resumo[["MesNome","Total"]].rename(columns={"MesNome":"Mês"})
+        parcelas_df["Total"] = pd.to_numeric(parcelas_df["Total"], errors="coerce").round(2)
+
+    total_ano = float(pd.to_numeric(parcelas_df["Total"], errors="coerce").sum())
     st.markdown(
-        f"<div style='font-size:1.1rem;font-weight:700;margin:6px 0 10px;'>Ano selecionado: {ano} • Total no ano (contratos): <span style='color:#00C853;'>{_fmt_moeda_str(total_ano)}</span></div>",
+        f"<div style='font-size:1.1rem;font-weight:700;margin:6px 0 10px;'>Ano selecionado: {ano} • Total gasto no ano selecionado: <span style='color:#00C853;'>{_fmt_moeda_str(total_ano)}</span></div>",
         unsafe_allow_html=True,
     )
 
     col_esq, col_dir = st.columns([0.36, 1.64])
 
-    # --------- ESQUERDA: Parcelas por mês — (apenas título ajustado)
+    # --------- ESQUERDA: Parcelas por mês — usa o dataframe já calculado acima
     with col_esq:
         st.markdown(f"**Parcelas por mês — {ano}**")
-        try:
-            parcelas_df = _parcelas_calendar_from_contracts(df_full, int(ano))
-        except Exception:
-            resumo = resumo_por_mes(df_ano, valor_col="Valor")
-            parcelas_df = resumo[["MesNome","Total"]].rename(columns={"MesNome":"Mês"})
-            parcelas_df["Total"] = pd.to_numeric(parcelas_df["Total"], errors="coerce").round(2)
-
         st.dataframe(
             _zebra(parcelas_df).format({"Total": _fmt_moeda_str}),
             use_container_width=True, hide_index=True,
             height=_auto_df_height(parcelas_df, row_px=34, header_px=44, pad_px=14, max_px=800)
         )
 
-    # --------- DIREITA: TABELA COMPLETA — (apenas título ajustado)
+    # --------- DIREITA: TABELA COMPLETA — sem filtros, com formatações
     with col_dir:
         st.markdown("**Tabela de Empréstimos**")
         df_show = df_full.copy()
