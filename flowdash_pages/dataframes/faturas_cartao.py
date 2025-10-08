@@ -220,7 +220,6 @@ def _itens_da_competencia(df_card_norm: pd.DataFrame, comp: str) -> pd.DataFrame
 
 # ================= Página =================
 def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> None:
-    
     dbp = _resolve_db_path(caminho_banco)
     if not dbp:
         st.error("Não foi possível localizar o banco de dados.")
@@ -260,6 +259,18 @@ def render(_df_unused: pd.DataFrame, caminho_banco: Optional[str] = None) -> Non
 
     # ---------- Tabela 1 (1/4): Jan..Dez do ANO escolhido ----------
     resumo = _resumo_por_mes_ano(df_card, ano_sel)
+
+    # ====== NOVO: Banner “Ano selecionado • Total no ano” ======
+    total_ano = float(pd.to_numeric(resumo["Total"], errors="coerce").fillna(0.0).sum()) if not resumo.empty else 0.0
+    st.markdown(
+        f"""
+        <div style="font-size:1.25rem;font-weight:700;margin:6px 0 10px;">
+            Ano selecionado: {ano_sel} • Total no ano:
+            <span style="color:#00C853;">{_fmt_moeda(total_ano)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # ---------- Botões do mês ----------
     df_btn_source = df_card[df_card["ano_num"] == ano_sel].copy()

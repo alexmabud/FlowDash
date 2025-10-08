@@ -11,7 +11,6 @@ import streamlit as st
 
 # ================= Descoberta de DB (segura) =================
 try:
-    # Usa a camada segura (não acessa session_state no import-time)
     from shared.db import get_db_path as _shared_get_db_path, ensure_db_path_or_raise
 except Exception:
     _shared_get_db_path = None
@@ -68,18 +67,10 @@ _MESES_PT_NOME = {
     7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
 _MESES_TOKEN_TO_NUM = {
-    "jan":1, "janeiro":1,
-    "fev":2, "fevereiro":2,
-    "mar":3, "março":"3", "marco":"3",
-    "abr":4, "abril":4,
-    "mai":5, "maio":5,
-    "jun":6, "junho":6,
-    "jul":7, "julho":7,
-    "ago":8, "agosto":8,
-    "set":9, "setembro":9, "sep":9, "sept":9,
-    "out":10, "outubro":10, "oct":10,
-    "nov":11, "novembro":11,
-    "dez":12, "dezembro":12,
+    "jan":1, "janeiro":1, "fev":2, "fevereiro":2, "mar":3, "março":"3", "marco":"3",
+    "abr":4, "abril":4, "mai":5, "maio":5, "jun":6, "junho":6, "jul":7, "julho":7,
+    "ago":8, "agosto":8, "set":9, "setembro":9, "sep":9, "sept":9, "out":10, "outubro":10, "oct":10,
+    "nov":11, "novembro":11, "dez":12, "dezembro":12,
 }
 
 _VALOR_CANDIDATAS = [
@@ -93,6 +84,10 @@ def _fmt_moeda(v) -> str:
         return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except Exception:
         return str(v)
+
+def _fmt_moeda_str(v) -> str:
+    # alias para manter o mesmo nome utilizado em Entradas/Saídas
+    return _fmt_moeda(v)
 
 def _auto_df_height(df: pd.DataFrame, row_px: int = 30, header_px: int = 44, pad_px: int = 14, max_px: int = 10_000) -> int:
     n = int(len(df))
@@ -125,7 +120,7 @@ def _pick_valor_col(df: pd.DataFrame) -> Optional[str]:
     return None
 
 def _ensure_valor(df_in: pd.DataFrame) -> pd.DataFrame:
-    """Garante uma coluna 'Valor' numérica (sem criar outras colunas auxiliares)."""
+    """Garante uma coluna 'Valor' numérica."""
     df = df_in.copy()
     if df.empty:
         return df
@@ -145,33 +140,24 @@ def _ensure_valor(df_in: pd.DataFrame) -> pd.DataFrame:
         df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
     return df
 
-# --- Datas: conversão robusta ---
 def _to_date_str(s: pd.Series) -> pd.Series:
-    """Converte série para string de data (YYYY-MM-DD) sem warnings."""
     if pd.api.types.is_datetime64_any_dtype(s):
         return s.dt.date.astype(str)
-
     out = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
-
-    # (1) números (serial Excel)
     ser_num = pd.to_numeric(s, errors="coerce")
     mask_num = ser_num.notna()
     if mask_num.any():
         base = pd.Timestamp("1899-12-30")  # base Excel
         out.loc[mask_num] = base + pd.to_timedelta(ser_num.loc[mask_num], unit="D")
-
-    # (2) restante: strings/mistos
     mask_rest = out.isna()
     if mask_rest.any():
         try:
             out.loc[mask_rest] = pd.to_datetime(s.loc[mask_rest], errors="coerce", format="mixed")
         except TypeError:
             out.loc[mask_rest] = pd.to_datetime(s.loc[mask_rest], errors="coerce", infer_datetime_format=False)
-
     return out.dt.date.astype(str)
 
 def _month_name_pt_from_any(x) -> str:
-    """Recebe data/numero/texto e retorna nome do mês PT (ex: 'Julho'); vazio se não conseguir."""
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return ""
     try:
@@ -220,15 +206,11 @@ def _load_full_table(conn: sqlite3.Connection) -> Optional[pd.DataFrame]:
         return None
 
 def _load_month(conn: sqlite3.Connection, ano: int, mes: int) -> Optional[pd.DataFrame]:
-    """
-    Carrega **todas as colunas** de 'mercadorias' filtrando por Recebimento do mês/ano,
-    quando a coluna existir. Se não existir, cai para filtro por Data.
-    """
+    """SELECT * por mês usando Recebimento (ou Data, se não existir)."""
     df_all = _load_full_table(conn)
     if df_all is None:
         return None
 
-    # Preferência por Recebimento (padrão definido)
     col_base = None
     for cand in ("Recebimento", "recebimento"):
         if _has_column(conn, "mercadorias", cand):
@@ -239,12 +221,9 @@ def _load_month(conn: sqlite3.Connection, ano: int, mes: int) -> Optional[pd.Dat
             if _has_column(conn, "mercadorias", cand):
                 col_base = cand
                 break
-
     if not col_base:
-        # Sem colunas de data reconhecíveis: devolve tudo (deixa para UI avisar)
         return df_all
 
-    # Filtra via SQL para performance
     first_day = pd.Timestamp(year=ano, month=mes, day=1).date()
     last_day  = (pd.Timestamp(year=ano, month=mes, day=1) + pd.offsets.MonthEnd(1)).date()
     q = f"""
@@ -254,10 +233,8 @@ def _load_month(conn: sqlite3.Connection, ano: int, mes: int) -> Optional[pd.Dat
         ORDER BY datetime("{col_base}") ASC
     """
     try:
-        df = pd.read_sql_query(q, conn, params=(str(first_day), str(last_day)))
-        return df
+        return pd.read_sql_query(q, conn, params=(str(first_day), str(last_day)))
     except Exception:
-        # Fallback: filtra em memória
         df = df_all.copy()
         if col_base in df.columns:
             df[col_base] = pd.to_datetime(df[col_base], errors="coerce")
@@ -278,7 +255,6 @@ def render(df_merc: pd.DataFrame) -> None:
         return
 
     # ====== Determina ano/mês a partir de Recebimento (ou Data) ======
-    # Usa df_merc apenas para sugerir anos disponíveis; os dados completos virão do banco.
     col_data_pref = "Recebimento" if "Recebimento" in df_merc.columns else ("Data" if "Data" in df_merc.columns else None)
     if not col_data_pref:
         st.warning("Nem 'Recebimento' nem 'Data' encontrados na amostra de Mercadorias.")
@@ -294,7 +270,7 @@ def render(df_merc: pd.DataFrame) -> None:
     ano_default = hoje.year if hoje.year in anos_disponiveis else anos_disponiveis[-1]
     ano = st.selectbox("Ano (Mercadorias)", options=anos_disponiveis, index=anos_disponiveis.index(ano_default), key="merc_ano")
 
-    # Totais por mês (usando amostra; apenas para o quadro da esquerda)
+    # Totais por mês (usando amostra; só para quadro da esquerda)
     dt_ano = dt[dt.dt.year == ano]
     base_mes = (
         df_merc.loc[dt.dt.year == ano]
@@ -302,6 +278,18 @@ def render(df_merc: pd.DataFrame) -> None:
         .pipe(_ensure_valor)
         .groupby("_Mes", dropna=True)["Valor"].sum()
         .reindex(range(1, 13), fill_value=0.0)
+    )
+
+    # ====== Banner com mesmo estilo de Entradas/Saídas ======
+    total_ano = float(base_mes.sum())
+    st.markdown(
+        f"""
+        <div style="font-size:1.25rem;font-weight:700;margin:6px 0 10px;">
+            Ano selecionado: {ano} • Total no ano:
+            <span style="color:#00C853;">{_fmt_moeda_str(total_ano)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     meses_com_dado = [m for m in range(1, 13) if float(base_mes.iloc[m-1]) > 0]
@@ -324,7 +312,7 @@ def render(df_merc: pd.DataFrame) -> None:
     # ====== LAYOUT LADO A LADO (1/4 x 3/4) ======
     col_esq, col_dir = st.columns([1, 3])
 
-    # ====== ESQUERDA — Total por mês (ano selecionado) ======
+    # ESQUERDA — Total por mês
     with col_esq:
         st.markdown(
             f"**Total por mês no ano** <span style='color:#60a5fa;'>{ano}</span>",
@@ -335,20 +323,19 @@ def render(df_merc: pd.DataFrame) -> None:
             "Total": [float(base_mes.iloc[m-1]) for m in range(1, 13)],
         })
         st.dataframe(
-            _zebra(tabela_mes).format({"Total": _fmt_moeda}),
+            _zebra(tabela_mes).format({"Total": _fmt_moeda_str}),
             use_container_width=True,
             hide_index=True,
             height=_height_exact_rows(12),
         )
 
-    # ====== DIREITA — Tabela completa do mês (todas as colunas) ======
+    # DIREITA — Tabela completa do mês
     with col_dir:
         st.markdown(
             f"**Mercadorias do mês** <span style='color:#60a5fa;'>{_MESES_PT_ABREV.get(mes_sel, '—')}</span>",
             unsafe_allow_html=True,
         )
 
-        # Carrega do banco com SELECT * filtrando por Recebimento (ou Data)
         db_path = _resolve_db_path(None)
         if not db_path:
             st.error("Não foi possível localizar o banco de dados.")
@@ -392,23 +379,14 @@ def render(df_merc: pd.DataFrame) -> None:
 
         # Formatações monetárias usuais
         fmt_map: dict[str, any] = {}
-
-        # 1) Campos comuns já conhecidos
         for cand in ("Valor", "valor", "Frete", "frete", "Faturamento", "faturamento", "Valor_Recebido", "Frete_Cobrado"):
             if cand in df_full.columns:
-                fmt_map[cand] = _fmt_moeda
-
-        # 2) **NOVO**: garantir BRL para 'valor_mercadorias' e variações (_VALOR_CANDIDATAS)
+                fmt_map[cand] = _fmt_moeda_str
         cols_lower = {c.lower(): c for c in df_full.columns}
         for k in _VALOR_CANDIDATAS:
             c = cols_lower.get(k.lower())
             if c:
-                fmt_map[c] = _fmt_moeda
-
-        total_mes = 0.0
-        if "Valor" in df_full.columns:
-            total_mes = float(pd.to_numeric(df_full["Valor"], errors="coerce").fillna(0.0).sum())
-        st.caption(f"Total do mês: **{_fmt_moeda(total_mes)}**")
+                fmt_map[c] = _fmt_moeda_str
 
         st.dataframe(
             _zebra(df_full).format(fmt_map) if fmt_map else _zebra(df_full),
