@@ -2,18 +2,16 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
-from datetime import date
-from typing import Optional, Iterable
+import calendar
+import datetime as dt
+from typing import Optional, List, Tuple
 
 import pandas as pd
 import streamlit as st
 
-from flowdash_pages.dataframes.filtros import (
-    selecionar_ano,
-    selecionar_mes,
-    resumo_por_mes,
-)
+from flowdash_pages.dataframes.filtros import selecionar_ano, resumo_por_mes
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -64,57 +62,70 @@ def _connect(db_like: Optional[str]) -> Optional[sqlite3.Connection]:
 
 def _object_exists(conn: sqlite3.Connection, name: str) -> bool:
     cur = conn.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE LOWER(name)=LOWER(?)
-          AND type IN ('table','view')
-        LIMIT 1;
-        """,
+        "SELECT 1 FROM sqlite_master WHERE LOWER(name)=LOWER(?) AND type IN ('table','view') LIMIT 1;",
         (name,),
     )
     return cur.fetchone() is not None
 
-def _find_first_table_or_view(conn: sqlite3.Connection, candidates: Iterable[str]) -> Optional[str]:
-    for t in candidates:
-        if _object_exists(conn, t):
-            return t
-    # fallback: qualquer **tabela ou view** que contenha 'emprest' ou 'financ'
-    cur = conn.execute("SELECT type, name FROM sqlite_master WHERE type IN ('table','view');")
-    rows = cur.fetchall()
-    for (_type, nm) in rows:
-        l = (nm or "").lower()
-        if ("emprest" in l) or ("financ" in l):
-            return nm
-    return None
+def _list_like_loan_objects(conn: sqlite3.Connection) -> List[Tuple[str,str]]:
+    rows = conn.execute("SELECT type, name FROM sqlite_master WHERE type IN ('table','view');").fetchall()
+    outs: List[Tuple[str,str]] = []
+    for t, n in rows:
+        ln = (n or "").lower()
+        if ("emprest" in ln) or ("financ" in ln):
+            outs.append((t, n))
+    return outs
 
-# ---------------- Helpers de UI/format ----------------
+def _table_cols(conn: sqlite3.Connection, name: str) -> List[str]:
+    try:
+        rows = conn.execute(f'PRAGMA table_info("{name}")').fetchall()
+        if rows:
+            return [r[1] for r in rows]
+    except Exception:
+        pass
+    try:
+        df = pd.read_sql_query(f'SELECT * FROM "{name}" LIMIT 1;', conn)
+        return list(df.columns)
+    except Exception:
+        return []
+
+_CONTRATO_HINT_COLS = {
+    "parcelas_total","num_parcelas","n_parcelas","parcelas",
+    "valor_parcela","valor_total","banco","taxa_juros_am","taxa_juros","tipo",
+    "data_contratacao","data_inicio_pagamento","vencimento","data_vencimento"
+}
+
+def _score_loan_object(conn: sqlite3.Connection, name: str) -> Tuple[int,int]:
+    cols = [c.lower() for c in _table_cols(conn, name)]
+    ncols = len(cols)
+    score = 0
+    if name.lower() == "emprestimos_financiamentos":
+        score += 100
+    score += sum(1 for c in cols if c in _CONTRATO_HINT_COLS) * 5
+    if set(cols).issubset({"data", "valor", "usuario"}):
+        score -= 50
+    score += min(ncols, 200)
+    return score, ncols
+
+def _pick_loans_object(conn: sqlite3.Connection) -> Optional[str]:
+    for name in ("emprestimos_financiamentos", "emprestimo_financiamento"):
+        if _object_exists(conn, name):
+            return name
+    cands = _list_like_loan_objects(conn)
+    if not cands:
+        return None
+    best_name, best_score, best_ncols = None, -10**9, -1
+    for _type, name in cands:
+        score, ncols = _score_loan_object(conn, name)
+        if (score > best_score) or (score == best_score and ncols > best_ncols):
+            best_name, best_score, best_ncols = name, score, ncols
+    return best_name
+
+# ---------------- Helpers visuais ----------------
 def _auto_df_height(df: pd.DataFrame, row_px: int = 30, header_px: int = 36, pad_px: int = 6, max_px: int = 1200) -> int:
     n = int(len(df))
     h = header_px + (n * row_px) + pad_px
     return min(h, max_px)
-
-def _safe_to_datetime(s: pd.Series) -> pd.Series:
-    if pd.api.types.is_datetime64_any_dtype(s):
-        return s
-    return pd.to_datetime(s, errors="coerce")
-
-def _fmt_moeda_str(v) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
-
-def _fmt_int_str(v) -> str:
-    try:
-        if pd.isna(v):
-            return ""
-        return str(int(float(v)))
-    except Exception:
-        try:
-            return str(int(str(v).strip()))
-        except Exception:
-            return str(v)
 
 def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> pd.io.formats.style.Styler:
     ncols = df.shape[1]
@@ -123,245 +134,268 @@ def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> p
         return [f"background-color: {bg}"] * ncols
     return df.style.apply(_row_style, axis=1)
 
-def _reorder_cols(df: pd.DataFrame, before_col_ci: str, target_before_ci: str) -> pd.DataFrame:
-    cols_map = {c.lower(): c for c in df.columns}
-    if before_col_ci.lower() not in cols_map or target_before_ci.lower() not in cols_map:
-        return df
-    before = cols_map[before_col_ci.lower()]
-    target = cols_map[target_before_ci.lower()]
-    if before == target:
-        return df
-    cols = list(df.columns)
-    cols.remove(before)
-    cols.insert(cols.index(target), before)
-    return df[cols]
+def _fmt_moeda_str(v) -> str:
+    try:
+        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(v)
 
-_MESES_PT_ABREV = {
-    1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
-    7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez",
-}
+def _fmt_percent_str(v) -> str:
+    try:
+        return f"{float(v):,.2f}%".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(v)
 
-# ---------------- Colunas tolerantes (Data/Valor) ----------------
-_DATA_CANDIDATAS = [
-    "Data", "data",
-    "Data_Vencimento", "data_vencimento", "vencimento",
-    "DataReferencia", "data_referencia", "Data_Ref", "data_ref",
-    # cobrir schemas comuns de empréstimos
-    "data_contratacao", "data_inicio_pagamento", "data_lancamento", "data_quitacao",
+# --------- Parsers robustos (BRL / int) ----------
+def _to_float_brl(x, default: float = 0.0) -> float:
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return default
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    if s == "":
+        return default
+    s = re.sub(r"[^\d,.\-]", "", s)
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s and "." not in s:
+        s = s.replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return default
+
+def _to_int_brl(x, default: int = 0) -> int:
+    try:
+        return int(round(_to_float_brl(x, float(default))))
+    except Exception:
+        return default
+
+_MESES_PT_ABREV = {1:"Jan",2:"Fev",3:"Mar",4:"Abr",5:"Mai",6:"Jun",7:"Jul",8:"Ago",9:"Set",10:"Out",11:"Nov",12:"Dez"}
+
+# --------- DataRef auxiliar (somente para filtro do cabeçalho) ---------
+_LOAN_DATE_PRIORITY = [
+    "data_inicio_pagamento","data_contratacao","data_vencimento",
+    "data","vencimento","data_lancamento",
 ]
-
-_VALOR_CANDIDATAS = [
-    "valor_parcela", "Valor_Parcela", "parcela_valor",
-    "Valor", "valor", "valor_total", "Total", "total",
-    "principal", "amortizacao", "amortização", "juros", "multa", "tarifa",
-]
-
-def _resolver_coluna_data(df: pd.DataFrame) -> Optional[str]:
-    cmap = {c.lower(): c for c in df.columns}
-    for k in _DATA_CANDIDATAS:
-        if k.lower() in cmap:
-            return cmap[k.lower()]
-    # fallback amplo: primeira coluna com "data"
+def _safe_to_datetime(s: pd.Series) -> pd.Series:
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    return pd.to_datetime(s, errors="coerce")
+def _best_date_series(df: pd.DataFrame) -> pd.Series:
+    lower = {str(c).lower(): c for c in df.columns}
+    for key in _LOAN_DATE_PRIORITY:
+        if key in lower:
+            s = _safe_to_datetime(df[lower[key]])
+            if s.notna().any():
+                return s
     for c in df.columns:
-        if "data" in c.lower():
-            return c
-    return None
+        if "data" in str(c).lower():
+            return _safe_to_datetime(df[c])
+    return pd.to_datetime(pd.NaT)
 
-def _construir_coluna_valor(df: pd.DataFrame) -> pd.DataFrame:
-    cmap = {c.lower(): c for c in df.columns}
-    # 1) preferir colunas de parcela/valor
-    for k in ("valor_parcela", "valor_total", "valor", "total"):
-        if k in cmap:
-            df["Valor"] = pd.to_numeric(df[cmap[k]], errors="coerce")
-            return df
-    # 2) somatório de partes
-    soma = None
-    for k in ("principal", "amortizacao", "amortização", "juros", "multa", "tarifa"):
-        if k in cmap:
-            v = pd.to_numeric(df[cmap[k]], errors="coerce")
-            soma = v if soma is None else (soma + v)
-    df["Valor"] = soma if soma is not None else pd.to_numeric(0.0)
-    return df
+# --------- Geração do CRONOGRAMA (sempre usado para a esquerda) ----------
+def _month_add(y: int, m: int, k: int) -> tuple[int,int]:
+    z = (y * 12 + (m - 1) + k)
+    ny, nm = divmod(z, 12)
+    return ny, nm + 1
+
+def _clamp_day(y: int, m: int, d: int) -> int:
+    return min(max(1, d), calendar.monthrange(y, m)[1])
+
+def _parcelas_calendar_from_contracts(df: pd.DataFrame, year: int) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame({"Mês": [v for k, v in _MESES_PT_ABREV.items()], "Total": [0.0]*12})
+
+    lower = {str(c).lower(): c for c in df.columns}
+    get = lambda key: lower.get(key.lower())
+
+    col_inicio = get("data_inicio_pagamento") or get("data_contratacao") or get("data_lancamento")
+    col_parcelas_total = get("parcelas_total") or get("num_parcelas") or get("n_parcelas")
+    col_venc_dia = get("vencimento_dia")
+    col_valor_parcela = get("valor_parcela")
+    col_valor_total = get("valor_total")
+    col_quit = get("data_quitacao")
+
+    registros: list[tuple[int,float]] = []
+
+    for _, row in df.iterrows():
+        dt_ini = _safe_to_datetime(pd.Series([row.get(col_inicio) if col_inicio else None])).iloc[0]
+        if pd.isna(dt_ini):
+            continue
+        n = _to_int_brl(row.get(col_parcelas_total), 0) if col_parcelas_total else 0
+        if n <= 0:
+            continue
+        if col_valor_parcela:
+            vparc = _to_float_brl(row.get(col_valor_parcela), 0.0)
+        elif col_valor_total and n > 0:
+            vparc = _to_float_brl(row.get(col_valor_total), 0.0) / n
+        else:
+            vparc = 0.0
+        if vparc == 0.0:
+            continue
+        base_day = _to_int_brl(row.get(col_venc_dia), int(getattr(dt_ini, "day", 1))) if col_venc_dia else int(getattr(dt_ini, "day", 1))
+        dt_quit = _safe_to_datetime(pd.Series([row.get(col_quit) if col_quit else None])).iloc[0]
+
+        sy, sm = int(dt_ini.year), int(dt_ini.month)
+        for k in range(n):
+            y, m = _month_add(sy, sm, k)
+            d = _clamp_day(y, m, base_day)
+            due = dt.date(y, m, d)
+            if pd.notna(dt_quit) and due > dt_quit.date():
+                break
+            if y == year:
+                registros.append((m, vparc))
+
+    full = pd.DataFrame({"m": list(range(1,13))})
+    if not registros:
+        out = full.copy()
+        out["Total"] = 0.0
+        out["Mês"] = out["m"].map(_MESES_PT_ABREV)
+        return out[["Mês","Total"]]
+
+    parc_df = pd.DataFrame(registros, columns=["m", "valor"])
+    soma = parc_df.groupby("m", as_index=False)["valor"].sum()
+    out = full.merge(soma, on="m", how="left").fillna({"valor": 0.0})
+    out["Total"] = pd.to_numeric(out["valor"], errors="coerce").round(2)
+    out["Mês"] = out["m"].map(_MESES_PT_ABREV)
+    return out[["Mês","Total"]]
+
+# --------- Monetárias / Percentuais (para a direita) ----------
+def _infer_currency_cols(df: pd.DataFrame) -> List[str]:
+    out: List[str] = []
+    for c in df.columns:
+        name = str(c); lc = name.lower()
+        if ("parcelas" in lc and "valor" not in lc) or ("taxa" in lc and "valor" not in lc):
+            continue
+        if any(k in lc for k in ["valor", "preco", "preço", "principal", "saldo", "multa", "desconto", "montante", "em_aberto", "pago"]):
+            try:
+                s = pd.to_numeric(df[name], errors="coerce")
+                if s.notna().any():
+                    out.append(name)
+            except Exception:
+                pass
+    seen = set()
+    return [c for c in out if not (c in seen or seen.add(c))]
+
+def _infer_percent_cols(df: pd.DataFrame) -> List[str]:
+    out: List[str] = []
+    for c in df.columns:
+        lc = str(c).lower()
+        if "juros" in lc or lc.startswith("taxa") or "percent" in lc:
+            try:
+                s = pd.to_numeric(df[c], errors="coerce")
+                if s.notna().any():
+                    out.append(str(c))
+            except Exception:
+                pass
+    seen = set()
+    return [c for c in out if not (c in seen or seen.add(c))]
+
+# --------- Colunas duplicadas: tornar únicas sem mudar visual (zero-width) ---------
+def _unique_cols_invisible(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return df
+    seen: dict[str, int] = {}
+    new_cols: list[str] = []
+    for c in list(df.columns):
+        c_str = str(c)
+        cnt = seen.get(c_str, 0)
+        new_cols.append(c_str if cnt == 0 else (c_str + ("\u200B" * cnt)))
+        seen[c_str] = cnt + 1
+    out = df.copy()
+    out.columns = new_cols
+    return out
 
 # ---------------- Página ----------------
 def render(df_base: Optional[pd.DataFrame] = None, caminho_banco: str | None = None) -> None:
-    # 0) Obter DF base
-    if df_base is None:
-        db_path = _resolve_db_path(caminho_banco)
-        if not db_path:
-            st.error("Não foi possível localizar o banco de dados.")
+    """
+    ESQUERDA: sempre usa CRONOGRAMA dos contratos (independe do CAP).
+    DIREITA: SELECT * do banco (todas as colunas), com BRL/2 casas e juros %.
+    """
+    # --------- Carregar do banco para a TABELA COMPLETA (direita)
+    db_path = _resolve_db_path(caminho_banco)
+    if not db_path:
+        st.error("Não foi possível localizar o banco de dados.")
+        return
+    con = _connect(db_path)
+    if not con:
+        return
+    try:
+        tabela = _pick_loans_object(con)
+        if tabela is None:
+            st.warning("Tabela/View de Empréstimos/Financiamentos não encontrada no banco.")
             return
-        con = _connect(db_path)
-        if not con:
-            return
+        df_full = pd.read_sql_query(f'SELECT * FROM "{tabela}"', con)
+        # (removido) st.caption da fonte
+    except Exception as e:
+        st.error(f"Falha ao ler do banco: {e}")
+        return
+    finally:
         try:
-            tabela = _find_first_table_or_view(con, (
-                "emprestimos_financiamentos",
-                "emprestimo_financiamento",
-                "emprestimos",
-                "financiamentos",
-                "emprestimo",
-                "financiamento",
-            ))
-            if tabela is None:
-                st.warning("Tabela/View de Empréstimos/Financiamentos não encontrada no banco.")
-                return
-            df_base = pd.read_sql_query(f'SELECT * FROM "{tabela}"', con)
-        except Exception as e:
-            st.error(f"Falha ao ler do banco: {e}")
-            return
-        finally:
-            try:
-                con and con.close()
-            except Exception:
-                pass
+            con and con.close()
+        except Exception:
+            pass
 
-    if not isinstance(df_base, pd.DataFrame) or df_base.empty:
-        st.info("Nenhum empréstimo/financiamento encontrado (ou DataFrame inválido/vazio).")
+    if not isinstance(df_full, pd.DataFrame) or df_full.empty:
+        st.info("Nenhum empréstimo/financiamento encontrado (ou DataFrame vazio).")
         return
 
-    # 1) Resolver data e valor para resumos
-    col_data = _resolver_coluna_data(df_base)
-    if not col_data:
-        st.error("Não foi possível identificar a coluna de Data (ex.: data_contratacao/data_inicio_pagamento/...).")
-        return
-
-    df_work = df_base.copy()
-    df_work[col_data] = _safe_to_datetime(df_work[col_data])
-    df_work = _construir_coluna_valor(df_work)
-
-    # 2) Filtro por Ano
-    df_pad = df_work.rename(columns={col_data: "Data"})
-    ano, df_ano = selecionar_ano(df_pad, key="empfin", label="Ano (Empréstimos/Financiamentos)")
-    if df_ano.empty:
-        st.warning("Não há dados para o ano selecionado.")
-        return
-
-    total_ano = float(pd.to_numeric(df_ano["Valor"], errors="coerce").sum())
+    # --------- Cabeçalho (ano)
+    data_series = _best_date_series(df_full)
+    cmap = {str(c).lower(): c for c in df_full.columns}
+    if "valor_total" in cmap:
+        valor_series = pd.to_numeric(df_full[cmap["valor_total"]], errors="coerce")
+    elif "valor" in cmap:
+        valor_series = pd.to_numeric(df_full[cmap["valor"]], errors="coerce")
+    else:
+        valor_series = pd.Series([0.0] * len(df_full))
+    df_esq_header = pd.DataFrame({"Data": data_series, "Valor": valor_series})
+    ano, df_ano = selecionar_ano(df_esq_header, key="empfin", label="Ano (Empréstimos/Financiamentos)")
+    total_ano = float(pd.to_numeric(df_ano.get("Valor", 0), errors="coerce").sum())
     st.markdown(
-        f"""
-        <div style="font-size:1.1rem;font-weight:700;margin:6px 0 10px;">
-            Ano selecionado: {ano} • Total no ano:
-            <span style="color:#00C853;">{_fmt_moeda_str(total_ano)}</span>
-        </div>
-        """,
+        f"<div style='font-size:1.1rem;font-weight:700;margin:6px 0 10px;'>Ano selecionado: {ano} • Total no ano (contratos): <span style='color:#00C853;'>{_fmt_moeda_str(total_ano)}</span></div>",
         unsafe_allow_html=True,
     )
 
-    # 3) Escolha de mês (mantemos para filtrar a tabela completa)
-    mes, df_mes = selecionar_mes(df_ano, key="empfin", label="Escolha um mês")
-
-    # Auto-seleção do mês (se nada escolhido)
-    if ("Data" in df_ano.columns) and (mes is None or df_mes.empty):
-        dt_all = _safe_to_datetime(df_ano["Data"])
-        meses_com_dado = sorted(dt_all.dt.month.dropna().unique().tolist())
-        hoje = date.today()
-        mes_pref = None
-        try:
-            ano_int = int(ano)
-        except Exception:
-            ano_int = hoje.year
-        if ano_int == hoje.year and hoje.month in meses_com_dado:
-            mes_pref = hoje.month
-        elif meses_com_dado:
-            mes_pref = int(meses_com_dado[0])
-        if mes_pref is not None:
-            mes = mes_pref
-            df_mes = df_ano[dt_all.dt.month == mes].copy()
-
-    # 4) Layout final: esquerda menor com total por mês; direita com tabela completa
     col_esq, col_dir = st.columns([0.36, 1.64])
 
+    # --------- ESQUERDA: Parcelas por mês — (apenas título ajustado)
     with col_esq:
-        st.markdown(f"**Totais por mês — {ano}**")
-        resumo = resumo_por_mes(df_ano, valor_col="Valor")
-        tabela_mes = resumo[["MesNome", "Total"]].rename(columns={"MesNome": "Mês"})
-        tabela_mes["Total"] = pd.to_numeric(tabela_mes["Total"], errors="coerce").fillna(0.0)
-        altura_esq = _auto_df_height(tabela_mes, row_px=34, header_px=44, pad_px=14, max_px=800)
+        st.markdown(f"**Parcelas por mês — {ano}**")
+        try:
+            parcelas_df = _parcelas_calendar_from_contracts(df_full, int(ano))
+        except Exception:
+            resumo = resumo_por_mes(df_ano, valor_col="Valor")
+            parcelas_df = resumo[["MesNome","Total"]].rename(columns={"MesNome":"Mês"})
+            parcelas_df["Total"] = pd.to_numeric(parcelas_df["Total"], errors="coerce").round(2)
+
         st.dataframe(
-            _zebra(tabela_mes).format({"Total": _fmt_moeda_str}),
-            use_container_width=True,
-            hide_index=True,
-            height=altura_esq,
+            _zebra(parcelas_df).format({"Total": _fmt_moeda_str}),
+            use_container_width=True, hide_index=True,
+            height=_auto_df_height(parcelas_df, row_px=34, header_px=44, pad_px=14, max_px=800)
         )
 
+    # --------- DIREITA: TABELA COMPLETA — (apenas título ajustado)
     with col_dir:
-        st.markdown("**Tabela completa do mês selecionado**")
+        st.markdown("**Tabela de Empréstimos**")
+        df_show = df_full.copy()
+        df_show.columns = [str(c) for c in df_show.columns]
+        df_show = _unique_cols_invisible(df_show)
 
-        if mes is None:
-            st.info("Selecione um mês para visualizar a tabela completa.")
-            return
+        money_cols = _infer_currency_cols(df_show)
+        percent_cols = _infer_percent_cols(df_show)
 
-        db_path = _resolve_db_path(caminho_banco)
-        if not db_path:
-            st.error("Não foi possível localizar o banco de dados.")
-            return
+        for c in money_cols:
+            df_show[c] = pd.to_numeric(df_show[c], errors="coerce").round(2)
+        for c in percent_cols:
+            df_show[c] = pd.to_numeric(df_show[c], errors="coerce").round(2)
 
-        ano_int, mes_int = int(ano), int(mes)
-        first_day = pd.Timestamp(year=ano_int, month=mes_int, day=1).date()
-        last_day  = (pd.Timestamp(year=ano_int, month=mes_int, day=1) + pd.offsets.MonthEnd(1)).date()
+        fmt_map = {c: _fmt_moeda_str for c in money_cols}
+        fmt_map.update({c: _fmt_percent_str for c in percent_cols})
 
-        try:
-            con = _connect(db_path)
-            if not con:
-                return
-            tabela = _find_first_table_or_view(con, (
-                "emprestimos_financiamentos",
-                "emprestimo_financiamento",
-                "emprestimos",
-                "financiamentos",
-                "emprestimo",
-                "financiamento",
-            ))
-            if tabela is None:
-                st.warning("Tabela/View de Empréstimos/Financiamentos não encontrada no banco.")
-                return
-
-            df_probe = pd.read_sql_query(f'SELECT * FROM "{tabela}" LIMIT 1;', con)
-            col_data_full = _resolver_coluna_data(df_probe) if not df_probe.empty else None
-            if not col_data_full:
-                col_data_full = "data_contratacao"  # fallback amplo
-
-            query = f'''
-                SELECT *
-                FROM "{tabela}"
-                WHERE date({col_data_full}) BETWEEN ? AND ?
-                ORDER BY datetime({col_data_full}) ASC
-            '''
-            df_full = pd.read_sql_query(query, con, params=(str(first_day), str(last_day)))
-        except Exception as e:
-            st.error(f"Falha ao ler do banco '{db_path}': {e}")
-            return
-        finally:
-            try:
-                con and con.close()
-            except Exception:
-                pass
-
-        # formatações básicas
-        cmap = {c.lower(): c for c in df_full.columns}
-        if col_data_full.lower() in cmap:
-            c = cmap[col_data_full.lower()]
-            try:
-                df_full[c] = pd.to_datetime(df_full[c], errors="coerce").dt.date.astype(str)
-            except Exception:
-                pass
-
-        df_full = _reorder_cols(df_full, before_col_ci="maquineta", target_before_ci="usuario")
-
-        fmt_map: dict[str, any] = {}
-        for key in ("valor", "valor_parcela", "valor_total", "principal", "juros", "multa", "tarifa"):
-            if key in cmap:
-                fmt_map[cmap[key]] = _fmt_moeda_str
-        for key in ("parcela", "parcelas", "num_parcelas", "n_parcelas", "parcelas_total", "parcelas_pagas"):
-            if key in cmap:
-                fmt_map[cmap[key]] = _fmt_int_str
-
-        styled_full = _zebra(df_full).format(fmt_map) if fmt_map else _zebra(df_full)
-        altura_full = _auto_df_height(df_full, max_px=1200)
         st.dataframe(
-            styled_full,
-            use_container_width=True,
-            hide_index=True,
-            height=altura_full,
+            _zebra(df_show).format(fmt_map),
+            use_container_width=True, hide_index=True,
+            height=_auto_df_height(df_show, max_px=1200)
         )
