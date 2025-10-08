@@ -110,6 +110,11 @@ def _load_contas_apagar_mov(db: DB) -> pd.DataFrame:
         return pd.DataFrame()
     return db.q('SELECT * FROM "contas_a_pagar_mov"')
 
+def _load_fatura_itens(db: DB) -> pd.DataFrame:
+    if not _table_exists(db, "fatura_cartao_itens"):
+        return pd.DataFrame()
+    return db.q('SELECT * FROM "fatura_cartao_itens"')
+
 # ---- FIXAS (categoria 4) ----
 def _load_subcats_fixas(db: DB) -> pd.DataFrame:
     for tb in ("subcategorias_saida", "subcategoria_saida", "saidas_subcategorias"):
@@ -203,38 +208,32 @@ def _normalize_paid_mask(df: pd.DataFrame) -> pd.Series:
 def _filter_card_rows(df: pd.DataFrame) -> pd.DataFrame:
     """
     Filtra linhas relacionadas a cartão de crédito.
-    Corrige FutureWarning removendo .fillna(False) no DataFrame e
-    garantindo a Series-máscara booleana previamente.
+    (Agora inclui 'credor' como nome do cartão e não faz downcasting silencioso)
     """
     if df.empty:
         return df
 
     cols = {c.lower(): c for c in df.columns}
     id_cols = [c for c in ("cartao_id","id_cartao","cartao_credito_id","id_cartao_credito") if c in cols]
-    name_cols = [c for c in ("cartao","cartão","cartao_nome","nome_cartao") if c in cols]
-    tipo_cols = [c for c in ("origem","tipo","categoria","fonte","meio_pagamento","forma_pagamento") if c in cols]
+    name_cols = [c for c in ("cartao","cartão","cartao_nome","nome_cartao","credor") if c in cols]
+    tipo_cols = [c for c in ("origem","tipo","categoria","fonte","meio_pagamento","forma_pagamento","tipo_origem") if c in cols]
 
-    # Quando há colunas de ID do cartão
     if id_cols:
         m = pd.Series(False, index=df.index)
         for c in id_cols:
             ser = df[cols[c]]
             s = ser.notna() & (ser.astype(str).str.strip() != "")
             m = m | s.fillna(False)
-        m = m.fillna(False).astype(bool)
-        return df[m]
+        return df[m.fillna(False).astype(bool)]
 
-    # Quando há colunas de NOME do cartão
     if name_cols:
         m = pd.Series(False, index=df.index)
         for c in name_cols:
             ser = df[cols[c]]
             s = ser.notna() & (ser.astype(str).str.strip() != "")
             m = m | s.fillna(False)
-        m = m.fillna(False).astype(bool)
-        return df[m]
+        return df[m.fillna(False).astype(bool)]
 
-    # Como fallback, tenta inferir por coluna "tipo"/"categoria"
     for c in tipo_cols:
         s = df[cols[c]].astype(str).str.lower()
         return df[s.str.contains("cartao") | s.str.contains("cartão")]
@@ -243,73 +242,127 @@ def _filter_card_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pick_amount_col(df: pd.DataFrame) -> Optional[str]:
-    return _first_existing(df, ["valor_a_pagar","valor_parcela","valor","valor_total","valor_pago","valor_saida","parcela_valor","valor_fatura"])
+    # >>> Inclui 'valor_evento' (do teu contas_a_pagar_mov)
+    return _first_existing(
+        df,
+        ["valor_evento","valor_a_pagar","valor_parcela","valor","valor_total","valor_pago","valor_saida","parcela_valor","valor_fatura"]
+    )
 
 def _pick_due_col(df: pd.DataFrame) -> Optional[str]:
-    return _first_existing(df, ["data_vencimento","vencimento","data_fatura","competencia","data"])
+    # Inclui 'competencia' e 'data_evento' como alternativas
+    return _first_existing(df, ["data_vencimento","vencimento","data_fatura","competencia","data","data_evento"])
 
-def _cards_view_from_mov(cards_cat: pd.DataFrame, mov: pd.DataFrame, ref_year: int, ref_month: int) -> pd.DataFrame:
-    if cards_cat.empty and mov.empty:
+def _parse_competencia(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip().str.replace("/", "-", regex=False)
+    return pd.to_datetime(s, errors="coerce")
+
+
+def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
+    """
+    Une:
+      - em_aberto_total: de contas_a_pagar_mov (usando status/pago + vencimento)
+      - fatura_mes_total: de fatura_cartao_itens (competencia)
+    Quase sempre tu vai ter as duas fontes; quando uma faltar, a outra cobre.
+    """
+    cards_cat = _load_cards_catalog(db)
+    mov = _load_contas_apagar_mov(db)
+    fat = _load_fatura_itens(db)
+
+    # === Base (catálogo)
+    if cards_cat.empty:
+        base = pd.DataFrame(columns=["card_id","card_nome","_key_nome_norm"])
+    else:
+        base = cards_cat[["card_id","card_nome","_key_nome_norm"]].copy()
+
+    # === Em aberto + (fallback para fatura do mês) vindos de MOV
+    em_aberto_by_id = pd.DataFrame(columns=["card_id","em_aberto_total","fatura_mes_total_mov"])
+    if not mov.empty:
+        mv = _filter_card_rows(mov.copy())
+        if not mv.empty:
+            amount_col = _pick_amount_col(mv)
+            due_col = _pick_due_col(mv)
+            paid = _normalize_paid_mask(mv)
+            mv["_valor"] = pd.to_numeric(mv[amount_col], errors="coerce").fillna(0.0) if amount_col else 0.0
+            if due_col:
+                if due_col.lower() == "competencia":
+                    mv["_venc"] = _parse_competencia(mv[due_col])
+                else:
+                    mv["_venc"] = pd.to_datetime(mv[due_col], errors="coerce")
+            else:
+                mv["_venc"] = pd.NaT
+
+            cols = {c.lower(): c for c in mv.columns}
+            id_colm = next((cols[c] for c in ("cartao_id","id_cartao","cartao_credito_id","id_cartao_credito") if c in cols), None)
+            if id_colm is None and not base.empty:
+                name_colm = next((cols[c] for c in ("cartao","cartão","cartao_nome","nome_cartao","credor") if c in cols), None)
+                if name_colm:
+                    mv["_key_nome_norm"] = mv[name_colm].astype(str).str.strip().str.lower()
+                    mv = mv.merge(base[["_key_nome_norm","card_id"]], on="_key_nome_norm", how="left")
+                    id_colm = "card_id"
+
+            if id_colm is not None:
+                id_ser = pd.to_numeric(mv[id_colm], errors="coerce").astype("Int64").astype(str)
+                is_mes = mv["_venc"].dt.month.eq(ref_month) & mv["_venc"].dt.year.eq(ref_year)
+                grp = mv.groupby(id_ser, dropna=False, sort=True)
+                em_aberto_by_id = pd.DataFrame({
+                    "card_id": grp.size().index.astype(str),
+                    "em_aberto_total": grp.apply(lambda g: float((g.loc[(~paid).loc[g.index], "_valor"]).sum())),
+                    "fatura_mes_total_mov": grp.apply(lambda g: float((g.loc[(~paid).loc[g.index] & is_mes.loc[g.index], "_valor"]).sum())),
+                }).reset_index(drop=True)
+
+    # === Fatura do mês vinda de FATURA_CARTAO_ITENS
+    fatura_by_name = pd.DataFrame(columns=["_key_nome_norm","fatura_mes_total_fat"])
+    if not fat.empty:
+        f = fat.copy()
+        cart_col = _first_existing(f, ["cartao","cartão","cartao_nome","nome_cartao"])
+        val_col  = _first_existing(f, ["valor_parcela","valor_fatura","valor","valor_total"])
+        comp_col = _first_existing(f, ["competencia","data_fatura","mes"])
+        f["_valor"] = pd.to_numeric(f[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
+        if comp_col:
+            if comp_col.lower() == "competencia":
+                f["_comp"] = _parse_competencia(f[comp_col])
+            else:
+                f["_comp"] = pd.to_datetime(f[comp_col], errors="coerce")
+        else:
+            f["_comp"] = pd.NaT
+        is_mes = f["_comp"].dt.month.eq(ref_month) & f["_comp"].dt.year.eq(ref_year)
+        f = f[is_mes]
+        if cart_col:
+            f["_key_nome_norm"] = f[cart_col].astype(str).str.strip().str.lower()
+        else:
+            f["_key_nome_norm"] = "cartao"
+        fatura_by_name = f.groupby("_key_nome_norm", dropna=False, sort=True)["_valor"].sum().reset_index(name="fatura_mes_total_fat")
+
+    # === Monta saída final
+    if base.empty:
+        if not em_aberto_by_id.empty:
+            df = em_aberto_by_id.copy()
+            df["card_nome"] = df["card_id"]
+            df["fatura_mes_total"] = df.get("fatura_mes_total_mov", 0.0)
+            return df[["card_id","card_nome","em_aberto_total","fatura_mes_total"]].sort_values("card_nome").reset_index(drop=True)
+        if not fatura_by_name.empty:
+            df = fatura_by_name.copy()
+            df["card_id"] = df["_key_nome_norm"]
+            df["card_nome"] = df["_key_nome_norm"]
+            df["em_aberto_total"] = 0.0
+            df["fatura_mes_total"] = df["fatura_mes_total_fat"]
+            return df[["card_id","card_nome","em_aberto_total","fatura_mes_total"]].sort_values("card_nome").reset_index(drop=True)
         return pd.DataFrame(columns=["card_id","card_nome","em_aberto_total","fatura_mes_total"])
 
-    base = cards_cat[["card_id","card_nome","_key_nome_norm"]].copy()
+    out = base.copy()
+    if not em_aberto_by_id.empty:
+        out = out.merge(em_aberto_by_id, on="card_id", how="left")
+    if not fatura_by_name.empty:
+        out = out.merge(fatura_by_name, on="_key_nome_norm", how="left")
 
-    mov = _filter_card_rows(mov.copy())
-    if mov.empty:
-        base["em_aberto_total"] = 0.0
-        base["fatura_mes_total"] = 0.0
-        return base
-
-    cols = {c.lower(): c for c in mov.columns}
-    paid_mask = _normalize_paid_mask(mov)
-    amount_col = _pick_amount_col(mov)
-    due_col = _pick_due_col(mov)
-
-    mov["_valor"] = pd.to_numeric(mov[amount_col], errors="coerce").fillna(0.0) if amount_col else 0.0
-    mov["_venc"] = pd.to_datetime(mov[due_col], errors="coerce") if due_col else pd.NaT
-
-    id_col = next((cols[c] for c in ("cartao_id","id_cartao","cartao_credito_id","id_cartao_credito") if c in cols), None)
-    name_col = next((cols[c] for c in ("cartao","cartão","cartao_nome","nome_cartao") if c in cols), None)
-
-    mov["_card_id"] = mov[id_col].astype(str) if id_col else None
-    mov["_card_nome_mov"] = mov[name_col].astype(str) if name_col else None
-    mov["_key_nome_norm"] = mov["_card_nome_mov"].astype(str).str.strip().str.lower() if name_col else None
-
-    if id_col:
-        mov["_key"] = mov["_card_id"]
-        base["_key"] = base["card_id"]
-        merge_keys = ("_key", "_key")
-    elif name_col:
-        mov["_key"] = mov["_key_nome_norm"]
-        base["_key"] = base["_key_nome_norm"]
-        merge_keys = ("_key", "_key")
-    else:
-        mov["_key"] = mov["_card_nome_mov"].fillna("Cartão").astype(str)
-        grp = mov.groupby("_key", dropna=False, sort=True)
-        is_mes = mov["_venc"].dt.month.eq(ref_month) & mov["_venc"].dt.year.eq(ref_year)
-        df_sum = pd.DataFrame({
-            "_key": grp.size().index,
-            "em_aberto_total": grp.apply(lambda g: float((g.loc[(~paid_mask).loc[g.index], "_valor"]).sum())),
-            "fatura_mes_total": grp.apply(lambda g: float((g.loc[(~paid_mask).loc[g.index] & is_mes.loc[g.index], "_valor"]).sum())),
-        }).reset_index(drop=True)
-        df_sum["card_id"] = df_sum["_key"]
-        df_sum["card_nome"] = df_sum["_key"]
-        return df_sum[["card_id","card_nome","em_aberto_total","fatura_mes_total"]].sort_values("card_nome").reset_index(drop=True)
-
-    grp = mov.groupby("_key", dropna=False, sort=True)
-    em_aberto = (~paid_mask)
-    is_mes = mov["_venc"].dt.month.eq(ref_month) & mov["_venc"].dt.year.eq(ref_year)
-    df_sum = pd.DataFrame({
-        "_key": grp.size().index,
-        "em_aberto_total": grp.apply(lambda g: float((g.loc[em_aberto.loc[g.index], "_valor"]).sum())),
-        "fatura_mes_total": grp.apply(lambda g: float((g.loc[em_aberto.loc[g.index] & is_mes.loc[g.index], "_valor"]).sum())),
-    }).reset_index(drop=True)
-
-    merged = base.merge(df_sum, how="left", left_on=merge_keys[0], right_on=merge_keys[1])
-    merged["em_aberto_total"] = pd.to_numeric(merged["em_aberto_total"], errors="coerce").fillna(0.0)
-    merged["fatura_mes_total"] = pd.to_numeric(merged["fatura_mes_total"], errors="coerce").fillna(0.0)
-
-    return merged[["card_id","card_nome","em_aberto_total","fatura_mes_total"]].sort_values("card_nome").reset_index(drop=True)
+    out["em_aberto_total"] = pd.to_numeric(out.get("em_aberto_total"), errors="coerce").fillna(0.0) if "em_aberto_total" in out.columns else 0.0
+    out["fatura_mes_total"] = 0.0
+    if "fatura_mes_total_fat" in out.columns:
+        out["fatura_mes_total"] = pd.to_numeric(out["fatura_mes_total_fat"], errors="coerce").fillna(0.0)
+    if "fatura_mes_total_mov" in out.columns:
+        out["fatura_mes_total"] = out["fatura_mes_total"].where(out["fatura_mes_total"] > 0,
+                                                                pd.to_numeric(out["fatura_mes_total_mov"], errors="coerce").fillna(0.0))
+    return out[["card_id","card_nome","em_aberto_total","fatura_mes_total"]].sort_values("card_nome").reset_index(drop=True)
 
 def _cards_totals(df_cards_view: pd.DataFrame) -> Dict[str, float]:
     if df_cards_view.empty:
@@ -322,11 +375,6 @@ def _cards_totals(df_cards_view: pd.DataFrame) -> Dict[str, float]:
 
 # ===================== FIXAS: painel (Pago / Sem) com soma por subcategoria =====================
 def _build_fixed_panel_status(subcats: pd.DataFrame, saidas: pd.DataFrame, ref_year: int, ref_month: int) -> pd.DataFrame:
-    """
-    Lê as subcategorias em `subcategorias_saida` e busca em `saida` os lançamentos
-    onde Categoria == 'Custos Fixos' (ou variações), casando pela Sub_Categoria.
-    Soma o Valor do mês/ano e define status 'pago' se soma > 0.
-    """
     out_cols = ["subcat_id", "subcat_nome", "status", "valor_mes"]
 
     if subcats.empty:
@@ -338,41 +386,31 @@ def _build_fixed_panel_status(subcats: pd.DataFrame, saidas: pd.DataFrame, ref_y
         df["valor_mes"] = 0.0
         return df[out_cols]
 
-    # ---- localizar colunas na tabela SAIDA (nomes mais comuns) ----
     cat_col  = _first_existing(saidas, ["Categoria", "categoria", "categoria_nome", "nome_categoria"])
     sub_col  = _first_existing(saidas, ["Sub_Categoria", "subcategoria", "Subcategoria", "nome_subcategoria", "subcategoria_nome"])
     valor_col = _first_existing(saidas, ["Valor", "valor", "valor_saida", "valor_total"])
     data_col  = _first_existing(saidas, ["Data", "data", "data_vencimento", "vencimento", "competencia"])
 
-    # Falhas críticas: sem colunas essenciais
     if not (cat_col and sub_col and valor_col and data_col):
-        # Retorna tudo "sem" se não houver como casar
         df = subcats.copy()
         df["status"] = "sem"
         df["valor_mes"] = 0.0
         return df[out_cols]
 
-    # ---- normalizações auxiliares ----
     def _norm_txt(x: Any) -> str:
         return str(x).strip().lower()
 
-    # Filtro por mês/ano
     saidas = saidas.copy()
     saidas["_dt"] = pd.to_datetime(saidas[data_col], errors="coerce")
     m_mes = saidas["_dt"].dt.month.eq(ref_month) & saidas["_dt"].dt.year.eq(ref_year)
 
-    # Filtro Categoria "Custos Fixos" (aceita variações comuns)
     cat_norm = saidas[cat_col].map(_norm_txt)
     CATS_OK = {"custos fixos", "contas fixas", "fixas", "despesas fixas"}
     m_cat = cat_norm.isin(CATS_OK)
 
-    # Valor numérico
     saidas["_valor"] = pd.to_numeric(saidas[valor_col], errors="coerce").fillna(0.0).clip(lower=0)
-
-    # Subcategoria normalizada
     saidas["_sub"] = saidas[sub_col].map(_norm_txt)
 
-    # Índice rápido por subcategoria deste mês e categoria válida
     base_mes = saidas[m_mes & m_cat]
 
     rows: List[Dict[str, Any]] = []
@@ -393,8 +431,7 @@ def _build_fixed_panel_status(subcats: pd.DataFrame, saidas: pd.DataFrame, ref_y
 # ===================== Render =====================
 def render(db_path_pref: Optional[str] = None):
 
-
-    # CSS
+    # CSS (acrescentadas classes do painel de fixas)
     st.markdown("""
     <style>
       .cap-card { border: 1px solid rgba(255,255,255,0.10); border-radius: 16px; padding: 14px 16px;
@@ -420,11 +457,8 @@ def render(db_path_pref: Optional[str] = None):
       .cap-cyan   { color: #22d3ee !important; }
       .cap-amber  { color: #f59e0b !important; }
       .cap-green  { color: #22c55e !important; }
-      h3.cap-h3.cap-purple, .stMarkdown h3.cap-h3.cap-purple { color:#a78bfa!important; }
-      h4.cap-h4.cap-purple, .stMarkdown h4.cap-h4.cap-purple { color:#a78bfa!important; }
-      h3.cap-h3.cap-cyan,   .stMarkdown h3.cap-h3.cap-cyan   { color:#22d3ee!important; }
-      h4.cap-h4.cap-cyan,   .stMarkdown h4.cap-h4.cap-cyan   { color:#22d3ee!important; }
 
+      /* NOVO: estilos do painel de Contas Fixas (iguais ao do segundo código) */
       .cap-chips-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
       .cap-chip { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px;
                   border:1px solid rgba(255,255,255,0.10); border-radius:12px;
@@ -439,18 +473,10 @@ def render(db_path_pref: Optional[str] = None):
       .cap-legend { display:flex; gap:14px; font-size:.85rem; opacity:.85; margin-bottom:8px; }
       .cap-legend span { display:flex; align-items:center; gap:6px; }
 
-      /* NOVO: centralizar conteúdo do card destacado */
-      .cap-center { 
-        text-align: center; 
-        display: flex; 
-        flex-direction: column; 
-        align-items: center; 
-        justify-content: center;
-      }
+      /* Centralizar conteúdo de métricas destacadas, se usado */
+      .cap-center { text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 
-      @media (max-width: 900px) {
-        .cap-metrics-row, .cap-metrics-row.cap-3col, .cap-metrics-row.cap-1col { grid-template-columns: 1fr; }
-      }
+      @media (max-width: 900px) { .cap-metrics-row, .cap-metrics-row.cap-3col, .cap-metrics-row.cap-1col { grid-template-columns: 1fr; } }
     </style>
     """, unsafe_allow_html=True)
 
@@ -459,18 +485,13 @@ def render(db_path_pref: Optional[str] = None):
     meses_labels = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
     col_mes, col_ano = st.columns([2,1])
     with col_mes:
-        ref_month = st.selectbox(
-            "📅 Mês",
-            options=list(range(1,13)),
-            index=hoje.month - 1,
-            format_func=lambda m: meses_labels[m-1]
-        )
+        ref_month = st.selectbox("📅 Mês", options=list(range(1,13)), index=hoje.month - 1, format_func=lambda m: meses_labels[m-1])
     with col_ano:
         anos_opts = list(range(hoje.year - 5, hoje.year + 2))
         ref_year = st.selectbox("Ano", options=anos_opts, index=anos_opts.index(hoje.year))
     st.caption(f"Exibindo dados de {_month_year_label(ref_year, ref_month)}.")
 
-    # DB
+    # ===== DB =====
     try:
         db = DB(_ensure_db_path_or_raise(db_path_pref))
     except Exception as e:
@@ -481,9 +502,8 @@ def render(db_path_pref: Optional[str] = None):
     df_loans = _build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
     loans_sums = _loans_totals(df_loans)
 
-    cards_cat = _load_cards_catalog(db)
-    mov = _load_contas_apagar_mov(db)
-    df_cards_view = _cards_view_from_mov(cards_cat, mov, ref_year, ref_month) if (not cards_cat.empty or not mov.empty) else pd.DataFrame()
+    # >>>>>> NOVO: usa visão combinada dos cartões
+    df_cards_view = _cards_view(db, ref_year, ref_month)
     cards_sums = _cards_totals(df_cards_view)
 
     subcats = _load_subcats_fixas(db)
@@ -491,7 +511,7 @@ def render(db_path_pref: Optional[str] = None):
     painel = _build_fixed_panel_status(subcats, saidas_all, ref_year, ref_month)
     total_fixas_mes = float(pd.to_numeric(painel["valor_mes"], errors="coerce").fillna(0).sum()) if not painel.empty else 0.0
 
-    # ===== NOVO CARD GERAL (3 + 1) — ACIMA de Contas Fixas =====
+    # ===== NOVO CARD GERAL =====
     total_saldo = loans_sums["saldo_total"] + cards_sums["aberto_total"]
     total_parcelas_mes = loans_sums["parcelas_total"] + cards_sums["faturas_mes_total"]
     total_mes_geral = total_parcelas_mes + total_fixas_mes
@@ -499,24 +519,11 @@ def render(db_path_pref: Optional[str] = None):
     novo_top_geral = dedent(f"""
     <div class="cap-card cap-card-lg">
       <div class="cap-title-xl cap-red">Total Geral — {_month_year_label(ref_year, ref_month)}</div>
-
-      <!-- Linha 1: 3 métricas lado a lado -->
       <div class="cap-metrics-row cap-3col">
-        <div class="cap-metric">
-          <div class="cap-label">Saldo devedor (cartões + empréstimos)</div>
-          <div class="cap-value">{_fmt_brl(total_saldo)}</div>
-        </div>
-        <div class="cap-metric">
-          <div class="cap-label">Parcelas do mês (cartões + empréstimos)</div>
-          <div class="cap-value">{_fmt_brl(total_parcelas_mes)}</div>
-        </div>
-        <div class="cap-metric">
-          <div class="cap-label">Gastos fixos (mês)</div>
-          <div class="cap-value">{_fmt_brl(total_fixas_mes)}</div>
-        </div>
+        <div class="cap-metric"><div class="cap-label">Saldo devedor (cartões + empréstimos)</div><div class="cap-value">{_fmt_brl(total_saldo)}</div></div>
+        <div class="cap-metric"><div class="cap-label">Parcelas do mês (cartões + empréstimos)</div><div class="cap-value">{_fmt_brl(total_parcelas_mes)}</div></div>
+        <div class="cap-metric"><div class="cap-label">Gastos fixos (mês)</div><div class="cap-value">{_fmt_brl(total_fixas_mes)}</div></div>
       </div>
-
-      <!-- Linha 2: Total do mês em UMA coluna, com destaque e centralizado -->
       <div class="cap-metrics-row cap-1col" style="margin-top:10px;">
         <div class="cap-metric cap-metric-accent cap-center">
           <div class="cap-label cap-green">Total do mês (Parcelas Empréstimos e Fatura + Contas Fixas)</div>
@@ -527,12 +534,10 @@ def render(db_path_pref: Optional[str] = None):
     """).strip()
     st.markdown(novo_top_geral, unsafe_allow_html=True)
 
-    # —— separador ——
     st.divider()
 
-    # ===== Contas Fixas (painel) =====
+    # ===== Contas Fixas (painel) — REFEITO IGUAL AO SEGUNDO CÓDIGO =====
     st.markdown('<h3 class="cap-h3 cap-amber">Contas Fixas (painel)</h3>', unsafe_allow_html=True)
-
     if painel.empty:
         st.info("Nenhuma subcategoria de contas fixas (categoria 4) encontrada.")
     else:
@@ -562,13 +567,10 @@ def render(db_path_pref: Optional[str] = None):
         """
         st.markdown(top_metric, unsafe_allow_html=True)
 
-    # —— separador ——
     st.divider()
 
     # ===== Empréstimos =====
     st.markdown('<h3 class="cap-h3 cap-purple">Empréstimos</h3>', unsafe_allow_html=True)
-
-    df_loans_raw = df_loans_raw  # já carregado
     if df_loans_raw.empty:
         st.info("Nenhum empréstimo encontrado (tabela esperada: `emprestimos_financiamentos`).")
     else:
@@ -576,20 +578,13 @@ def render(db_path_pref: Optional[str] = None):
         <div class="cap-card cap-card-lg">
           <div class="cap-title-xl">Total Empréstimos</div>
           <div class="cap-metrics-row">
-            <div class="cap-metric">
-              <div class="cap-label">Saldo devedor de todos empréstimos</div>
-              <div class="cap-value">{_fmt_brl(loans_sums['saldo_total'])}</div>
-            </div>
-            <div class="cap-metric">
-              <div class="cap-label">Parcela somada (mês) — todos os empréstimos</div>
-              <div class="cap-value">{_fmt_brl(loans_sums['parcelas_total'])}</div>
-            </div>
+            <div class="cap-metric"><div class="cap-label">Saldo devedor de todos empréstimos</div><div class="cap-value">{_fmt_brl(loans_sums['saldo_total'])}</div></div>
+            <div class="cap-metric"><div class="cap-label">Parcela somada (mês) — todos os empréstimos</div><div class="cap-value">{_fmt_brl(loans_sums['parcelas_total'])}</div></div>
           </div>
         </div>
         """).strip()
         st.markdown(top_html, unsafe_allow_html=True)
 
-        st.markdown('<h4 class="cap-h4 cap-purple">Resumo por empréstimo</h4>', unsafe_allow_html=True)
         if not df_loans.empty:
             cards: List[str] = ['<div class="cap-grid">']
             for _, r in df_loans.iterrows():
@@ -597,73 +592,50 @@ def render(db_path_pref: Optional[str] = None):
                 desc_raw = str(r.get("descricao", "") or "")
                 desc = html.escape(desc_raw)
                 titulo = desc if desc_raw and desc_raw != "(sem descrição)" else f"Empréstimo {emp_id}"
-                card_html = dedent(f"""
+                cards.append(dedent(f"""
                 <div class="cap-card">
                   <h4>{titulo}</h4>
                   <div class="cap-metrics-row">
-                    <div class="cap-metric">
-                      <div class="cap-label">Saldo devedor</div>
-                      <div class="cap-value">{_fmt_brl(r["Saldo Devedor do Empréstimo"])}</div>
-                    </div>
-                    <div class="cap-metric">
-                      <div class="cap-label">Parcela (mês)</div>
-                      <div class="cap-value">{_fmt_brl(r["Valor da Parcela Mensal"])}</div>
-                    </div>
+                    <div class="cap-metric"><div class="cap-label">Saldo devedor</div><div class="cap-value">{_fmt_brl(r["Saldo Devedor do Empréstimo"])}</div></div>
+                    <div class="cap-metric"><div class="cap-label">Parcela (mês)</div><div class="cap-value">{_fmt_brl(r["Valor da Parcela Mensal"])}</div></div>
                   </div>
                 </div>
-                """).strip()
-                cards.append(card_html)
+                """).strip())
             cards.append("</div>")
             st.markdown("\n".join(cards), unsafe_allow_html=True)
 
-    # —— separador ——
     st.divider()
 
     # ===== Cartões =====
     st.markdown('<h3 class="cap-h3 cap-cyan">Fatura Cartão de Crédito</h3>', unsafe_allow_html=True)
-
-    if cards_cat.empty and mov.empty:
-        st.info("Sem cartões ou movimentos localizados (tabelas esperadas: `cartoes_creditos` e `contas_a_pagar_mov`).")
+    if df_cards_view.empty:
+        st.info("Sem cartões/faturas localizados (tabelas esperadas: `cartoes_credito`, `fatura_cartao_itens` e/ou `contas_a_pagar_mov`).")
     else:
         top_cards = dedent(f"""
         <div class="cap-card cap-card-lg">
           <div class="cap-title-xl">Total Cartões</div>
           <div class="cap-metrics-row">
-            <div class="cap-metric">
-              <div class="cap-label">Valor em aberto (todos os cartões)</div>
-              <div class="cap-value">{_fmt_brl(cards_sums['aberto_total'])}</div>
-            </div>
-            <div class="cap-metric">
-              <div class="cap-label">Faturas do mês (somadas)</div>
-              <div class="cap-value">{_fmt_brl(cards_sums['faturas_mes_total'])}</div>
-            </div>
+            <div class="cap-metric"><div class="cap-label">Valor em aberto (todos os cartões)</div><div class="cap-value">{_fmt_brl(cards_sums['aberto_total'])}</div></div>
+            <div class="cap-metric"><div class="cap-label">Faturas do mês (somadas)</div><div class="cap-value">{_fmt_brl(cards_sums['faturas_mes_total'])}</div></div>
           </div>
         </div>
         """).strip()
         st.markdown(top_cards, unsafe_allow_html=True)
 
-        st.markdown(f'<h4 class="cap-h4 cap-cyan">Resumo por cartão — {_month_year_label(ref_year, ref_month)}</h4>', unsafe_allow_html=True)
-        if not df_cards_view.empty:
-            cards_html = ['<div class="cap-grid">']
-            for _, r in df_cards_view.iterrows():
-                nome = html.escape(str(r["card_nome"]))
-                cards_html.append(dedent(f"""
-                <div class="cap-card">
-                  <h4>{nome}</h4>
-                  <div class="cap-metrics-row">
-                    <div class="cap-metric">
-                      <div class="cap-label">Em aberto</div>
-                      <div class="cap-value">{_fmt_brl(r["em_aberto_total"])}</div>
-                    </div>
-                    <div class="cap-metric">
-                      <div class="cap-label">Fatura (mês)</div>
-                      <div class="cap-value">{_fmt_brl(r["fatura_mes_total"])}</div>
-                    </div>
-                  </div>
-                </div>
-                """).strip())
-            cards_html.append("</div>")
-            st.markdown("\n".join(cards_html), unsafe_allow_html=True)
+        cards_html = ['<div class="cap-grid">']
+        for _, r in df_cards_view.iterrows():
+            nome = html.escape(str(r["card_nome"]))
+            cards_html.append(dedent(f"""
+            <div class="cap-card">
+              <h4>{nome}</h4>
+              <div class="cap-metrics-row">
+                <div class="cap-metric"><div class="cap-label">Em aberto</div><div class="cap-value">{_fmt_brl(r["em_aberto_total"])}</div></div>
+                <div class="cap-metric"><div class="cap-label">Fatura (mês)</div><div class="cap-value">{_fmt_brl(r["fatura_mes_total"])}</div></div>
+              </div>
+            </div>
+            """).strip())
+        cards_html.append("</div>")
+        st.markdown("\n".join(cards_html), unsafe_allow_html=True)
 
 
 if __name__ == "__main__":
