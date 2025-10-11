@@ -672,10 +672,10 @@ def render(db_path_pref: Optional[str] = None):
     .cap-section-grid{
     display:grid;
     grid-template-columns:repeat(3,minmax(260px,1fr));
+    grid-auto-rows:1fr;              /* força altura igual por linha */
     gap:12px;
     align-items:stretch;
     }
-    /* garante que cada painel filho ocupe altura total e use flex coluna */
     .cap-section-grid > .cap-inner{display:flex;flex-direction:column;height:100%;}
     @media (max-width:1100px){ .cap-section-grid{grid-template-columns:repeat(2,minmax(260px,1fr));} }
     @media (max-width:900px){  .cap-section-grid{grid-template-columns:1fr;} }
@@ -684,7 +684,7 @@ def render(db_path_pref: Optional[str] = None):
     .cap-eq{display:flex;flex-direction:column;min-height:100%;}
     .cap-eq .cap-h4{margin-bottom:8px;}
     .cap-eq .cap-chips-grid{
-    flex:1;min-height:0; /* evita overflow e preenche igualmente */
+    flex:1;min-height:120px; /* garante volume mesmo vazia */
     display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;
     }
 
@@ -710,6 +710,8 @@ def render(db_path_pref: Optional[str] = None):
     background:rgba(255,255,255,0.04);overflow:hidden;
     }
     @media (max-width:1200px){ .cap-chip{grid-template-columns:1fr;align-items:flex-start;} }
+
+    .cap-chip.placeholder{opacity:.7;border-style:dashed;} /* para vazio ficar consistente */
 
     .cap-chip-left{min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;}
     .cap-chip-title{
@@ -812,10 +814,21 @@ def render(db_path_pref: Optional[str] = None):
     cards_card_df  = _chips_df_cartoes(db, ref_year, ref_month)
     bols_card_df   = _chips_df_boletos(db, ref_year, ref_month)
 
-    # nome do credor sempre em cima; badges sempre abaixo
+    # chips (inclui placeholder quando vazio para manter layout)
     def _chips_rows(df: pd.DataFrame) -> str:
         if df is None or df.empty:
-            return '<div class="cap-sub">Sem itens para o mês.</div>'
+            return (
+                '<div class="cap-chip cap-chip-stack placeholder">'
+                '  <div class="cap-chip-head">'
+                '    <span class="cap-chip-title">Sem itens para o mês.</span>'
+                '  </div>'
+                '  <div class="cap-badges">'
+                '    <span class="cap-badge">Mensal R$ 0,00</span>'
+                '    <span class="cap-badge">Pago R$ 0,00</span>'
+                '    <span class="cap-badge">Falta R$ 0,00</span>'
+                '  </div>'
+                '</div>'
+            )
         rows = []
         df2 = df.copy()
         for c in ("titulo","mensal","pago_mes","falta","status"):
@@ -843,7 +856,6 @@ def render(db_path_pref: Optional[str] = None):
         return "".join(rows)
 
     # seção estilo Contas Fixas, mas SEM "Total do mês (mensal)"
-    # (usa .cap-eq para garantir altura igual entre as três colunas)
     def _secao_like_fixas(titulo: str, color_cls: str, df: pd.DataFrame) -> str:
         chips_html = _chips_rows(df)
         return f"""
@@ -920,6 +932,7 @@ def render(db_path_pref: Optional[str] = None):
     st.markdown(painel_principal, unsafe_allow_html=True)
 
     st.divider()
+
 
 
 
