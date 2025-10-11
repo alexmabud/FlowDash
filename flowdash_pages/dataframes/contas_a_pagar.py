@@ -144,6 +144,48 @@ def _load_saidas_all(db: DB) -> pd.DataFrame:
             return db.q(f'SELECT * FROM "{tb}"')
     return pd.DataFrame()
 
+# ===================== Utilitários comuns CAP =====================
+def _pick_amount_col(df: pd.DataFrame) -> Optional[str]:
+    return _first_existing(df, [
+        "valor_evento","valor_a_pagar","valor_parcela","valor","valor_total",
+        "valor_saida","parcela_valor","valor_fatura"
+    ])
+
+def _pick_paid_col(df: pd.DataFrame) -> Optional[str]:
+    # Prioriza campos explícitos de pagamento no CAP
+    return _first_existing(df, [
+        "valor_pago", "valor_pago_mes", "valor_baixa", "valor_liquidado",
+        "valor_pago_acumulado"  # fallback (pode superestimar se for acumulado)
+    ])
+
+def _pick_due_col(df: pd.DataFrame) -> Optional[str]:
+    return _first_existing(df, ["competencia","data_vencimento","vencimento","data_fatura","data","data_evento"])
+
+def _parse_competencia(series: pd.Series) -> pd.Series:
+    s = series.astype(str).str.strip().str.replace("/", "-", regex=False)
+    return pd.to_datetime(s, errors="coerce")
+
+def _best_due_series(df: pd.DataFrame) -> pd.Series:
+    order = ["competencia","vencimento","data_vencimento","data_evento","data_fatura","data"]
+    best = None
+    best_count = -1
+    for c in order:
+        if c in df.columns:
+            dt = _parse_competencia(df[c]) if c.lower() == "competencia" else pd.to_datetime(df[c], errors="coerce")
+            n = int(dt.notna().sum())
+            if n > best_count:
+                best, best_count = dt, n
+    return best if best is not None else pd.Series(pd.NaT, index=df.index)
+
+def _calc_status_from_paid(mensal: float, pago: float, eps: float = 0.005) -> str:
+    m = float(mensal or 0.0)
+    p = float(pago or 0.0)
+    if p <= eps:
+        return "nada"            # sem pagamento
+    if p + eps < m - eps:
+        return "parcial"         # pago parcialmente
+    return "ok"                  # quitado (≈ ou >)
+
 # ===================== Contas Fixas (painel) =====================
 def _build_fixed_panel_status(
     subcats: pd.DataFrame,
@@ -236,29 +278,6 @@ def _loans_totals(df_view: pd.DataFrame) -> Dict[str, float]:
         "parcelas_total": float(pd.to_numeric(df_view["Valor da Parcela Mensal"], errors="coerce").fillna(0).sum()),
     }
 
-# === Utilitários CAP (datas/valor) ===
-def _pick_amount_col(df: pd.DataFrame) -> Optional[str]:
-    return _first_existing(df, ["valor_evento","valor_a_pagar","valor_parcela","valor","valor_total","valor_pago","valor_saida","parcela_valor","valor_fatura"])
-
-def _pick_due_col(df: pd.DataFrame) -> Optional[str]:
-    return _first_existing(df, ["competencia","data_vencimento","vencimento","data_fatura","data","data_evento"])
-
-def _parse_competencia(series: pd.Series) -> pd.Series:
-    s = series.astype(str).str.strip().str.replace("/", "-", regex=False)
-    return pd.to_datetime(s, errors="coerce")
-
-def _best_due_series(df: pd.DataFrame) -> pd.Series:
-    order = ["competencia","vencimento","data_vencimento","data_evento","data_fatura","data"]
-    best = None
-    best_count = -1
-    for c in order:
-        if c in df.columns:
-            dt = _parse_competencia(df[c]) if c.lower() == "competencia" else pd.to_datetime(df[c], errors="coerce")
-            n = int(dt.notna().sum())
-            if n > best_count:
-                best, best_count = dt, n
-    return best if best is not None else pd.Series(pd.NaT, index=df.index)
-
 # === Parcelas de EMPRÉSTIMOS (CAP) ===
 def _loans_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
     cap = _load_contas_apagar_mov(db)
@@ -292,8 +311,9 @@ def _loans_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
 
 # ===================== Cartões =====================
 def _normalize_paid_mask(df: pd.DataFrame) -> pd.Series:
+    # Mantido por compatibilidade, mas preferimos somar valor_pago quando disponível
     cols = {c.lower(): c for c in df.columns}
-    yes = {"1","true","t","sim","s","y","yes","pago","quitado","baixado","baixa","ok","liquidado"}
+    yes = {"1","true","t","sim","s","y","yes","pago","quitado","baixado","ok","liquidado"}
     if "pago" in cols:
         s = df[cols["pago"]].astype(str).str.lower()
         return s.isin(yes)
@@ -354,7 +374,6 @@ def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
         if not mv.empty:
             amount_col = _pick_amount_col(mv)
             due_col = _pick_due_col(mv)
-            paid = _normalize_paid_mask(mv)
             mv["_valor"] = pd.to_numeric(mv[amount_col], errors="coerce").fillna(0.0) if amount_col else 0.0
             if due_col:
                 if due_col.lower() == "competencia":
@@ -377,10 +396,12 @@ def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
                 id_ser = pd.to_numeric(mv[id_colm], errors="coerce").astype("Int64").astype(str)
                 is_mes = mv["_venc"].dt.month.eq(ref_month) & mv["_venc"].dt.year.eq(ref_year)
                 grp = mv.groupby(id_ser, dropna=False, sort=True)
+                # em_aberto_total somente itens não quitados ainda (sem usar valor_pago)
+                paid_mask = _normalize_paid_mask(mv)
                 em_aberto_by_id = pd.DataFrame({
                     "card_id": grp.size().index.astype(str),
-                    "em_aberto_total": grp.apply(lambda g: float((g.loc[(~paid).loc[g.index], "_valor"]).sum())),
-                    "fatura_mes_total_mov": grp.apply(lambda g: float((g.loc[(~paid).loc[g.index] & is_mes.loc[g.index], "_valor"]).sum())),
+                    "em_aberto_total": grp.apply(lambda g: float((g.loc[(~paid_mask).loc[g.index], "_valor"]).sum())),
+                    "fatura_mes_total_mov": grp.apply(lambda g: float((g.loc[(~paid_mask).loc[g.index] & is_mes.loc[g.index], "_valor"]).sum())),
                 }).reset_index(drop=True)
 
     fatura_by_name = pd.DataFrame(columns=["_key_nome_norm","fatura_mes_total_fat"])
@@ -482,7 +503,7 @@ def _build_boletos_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
     df["_dt"] = _best_due_series(df)
     val_col = _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
-    pago = _normalize_paid_mask(df)
+    paid = _normalize_paid_mask(df)
     m_bol = _boletos_flag_mask(df)
 
     cols = {c.lower(): c for c in df.columns}
@@ -493,7 +514,7 @@ def _build_boletos_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
     base_mes = pd.DataFrame({"fonte": fonte, "valor": df["_valor"]})[is_mes & m_bol]
     parcela_mes = base_mes.groupby("fonte", dropna=False, sort=True)["valor"].sum().rename("Valor da Parcela Mensal")
 
-    base_aberto = pd.DataFrame({"fonte": fonte, "valor": df["_valor"]})[m_bol & (~pago.fillna(False))]
+    base_aberto = pd.DataFrame({"fonte": fonte, "valor": df["_valor"]})[m_bol & (~paid.fillna(False))]
     sdev = base_aberto.groupby("fonte", dropna=False, sort=True)["valor"].sum().rename("Saldo Devedor do Boleto")
 
     out = pd.concat([sdev, parcela_mes], axis=1).fillna(0.0).reset_index()
@@ -510,23 +531,32 @@ def _boletos_totals_view(df_view: pd.DataFrame) -> Dict[str, float]:
         "parcelas_total": float(pd.to_numeric(df_view["Valor da Parcela Mensal"], errors="coerce").fillna(0).sum()),
     }
 
-# ===================== PAGOS NO MÊS (por tipo) =====================
+# ===================== PAGOS NO MÊS (usando valor_pago) =====================
 def _cap_month_paid_by_loan(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
     cap = _load_contas_apagar_mov(db)
     if cap.empty:
         return pd.DataFrame(columns=["loan_key","pago_mes"])
     df = cap.copy()
     df["_dt"] = _best_due_series(df)
+
     val_col = _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
+
+    paid_col = _pick_paid_col(df)
+    if paid_col:
+        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
+    else:
+        # Fallback: se não houver valor_pago, usa máscara booleana para contar valor integral
+        mask = _normalize_paid_mask(df)
+        df["_pago"] = df["_valor"].where(mask, 0.0)
+
     is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    paid = _normalize_paid_mask(df)
     cols = {c.lower(): c for c in df.columns}
     loan_id_col = next((cols[c] for c in ("emprestimo_id","id_emprestimo","loan_id") if c in cols), None)
     if loan_id_col is None:
         return pd.DataFrame(columns=["loan_key","pago_mes"])
-    grp = df[is_mes & paid].groupby(df[loan_id_col].astype(str), dropna=False, sort=True)["_valor"].sum()
-    return grp.reset_index().rename(columns={loan_id_col: "loan_key", "_valor": "pago_mes"})
+    grp = df[is_mes].groupby(df[loan_id_col].astype(str), dropna=False, sort=True)["_pago"].sum()
+    return grp.reset_index().rename(columns={loan_id_col: "loan_key", "_pago": "pago_mes"})
 
 def _cap_month_paid_by_card(db: DB, ref_year: int, ref_month: int, base_cards: pd.DataFrame) -> pd.DataFrame:
     cap = _load_contas_apagar_mov(db)
@@ -534,10 +564,18 @@ def _cap_month_paid_by_card(db: DB, ref_year: int, ref_month: int, base_cards: p
         return pd.DataFrame(columns=["card_id","pago_mes"])
     df = cap.copy()
     df["_dt"] = _best_due_series(df)
+
     val_col = _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
+
+    paid_col = _pick_paid_col(df)
+    if paid_col:
+        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
+    else:
+        mask = _normalize_paid_mask(df)
+        df["_pago"] = df["_valor"].where(mask, 0.0)
+
     is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    paid = _normalize_paid_mask(df)
     cols = {c.lower(): c for c in df.columns}
     id_colm = next((cols[c] for c in ("cartao_id","id_cartao","cartao_credito_id","id_cartao_credito") if c in cols), None)
     if id_colm is None:
@@ -547,8 +585,8 @@ def _cap_month_paid_by_card(db: DB, ref_year: int, ref_month: int, base_cards: p
         df["_key_nome_norm"] = df[name_colm].astype(str).str.strip().str.lower()
         df = df.merge(base_cards[["_key_nome_norm","card_id"]], on="_key_nome_norm", how="left")
         id_colm = "card_id"
-    grp = df[is_mes & paid].groupby(df[id_colm].astype(str), dropna=False, sort=True)["_valor"].sum()
-    return grp.reset_index().rename(columns={id_colm: "card_id", "_valor": "pago_mes"})
+    grp = df[is_mes].groupby(df[id_colm].astype(str), dropna=False, sort=True)["_pago"].sum()
+    return grp.reset_index().rename(columns={id_colm: "card_id", "_pago": "pago_mes"})
 
 def _cap_month_paid_by_boleto(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
     cap = _load_contas_apagar_mov(db)
@@ -556,16 +594,24 @@ def _cap_month_paid_by_boleto(db: DB, ref_year: int, ref_month: int) -> pd.DataF
         return pd.DataFrame(columns=["fonte","pago_mes"])
     df = cap.copy()
     df["_dt"] = _best_due_series(df)
+
     val_col = _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
+
+    paid_col = _pick_paid_col(df)
+    if paid_col:
+        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
+    else:
+        mask = _normalize_paid_mask(df)
+        df["_pago"] = df["_valor"].where(mask, 0.0)
+
     is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    paid = _normalize_paid_mask(df)
     m_bol = _boletos_flag_mask(df)
     cols = {c.lower(): c for c in df.columns}
     fonte_col = next((cols[c] for c in ("credor","fornecedor","descricao","descrição","titulo","título") if c in cols), None)
     fonte = (df[fonte_col].astype(str).str.strip() if fonte_col else pd.Series(["Boleto"]*len(df), index=df.index)).replace({"": "Boleto"})
-    grp = pd.DataFrame({"fonte": fonte, "_valor": df["_valor"]})[is_mes & paid & m_bol].groupby("fonte", dropna=False, sort=True)["_valor"].sum()
-    return grp.reset_index().rename(columns={"_valor": "pago_mes"})
+    grp = pd.DataFrame({"fonte": fonte, "_pago": df["_pago"]})[is_mes & m_bol].groupby("fonte", dropna=False, sort=True)["_pago"].sum()
+    return grp.reset_index().rename(columns={"_pago": "pago_mes"})
 
 # ===================== Render =====================
 def render(db_path_pref: Optional[str] = None):
@@ -596,6 +642,7 @@ def render(db_path_pref: Optional[str] = None):
 
       .cap-h3 { font-size: 1.5rem; font-weight: 800; margin: 14px 0 8px; }
       .cap-h4 { font-size: 1.05rem; font-weight: 700; margin: 2px 0 10px; opacity: .95; }
+
       .cap-red    { color: #ef4444 !important; }
       .cap-purple { color: #a78bfa !important; }
       .cap-cyan   { color: #22d3ee !important; }
@@ -603,8 +650,6 @@ def render(db_path_pref: Optional[str] = None):
       .cap-green  { color: #22c55e !important; }
       .cap-blue   { color: #60a5fa !important; }
       .cap-pink   { color: #f472b6 !important; }
-
-      /* NOVAS CORES (inéditas) */
       .cap-lime  { color: #a3e635 !important; }
       .cap-teal  { color: #2dd4bf !important; }
       .cap-indigo{ color: #818cf8 !important; }
@@ -664,7 +709,7 @@ def render(db_path_pref: Optional[str] = None):
 
     parcelas_mes_emprestimos_cap = _loans_month_total_from_cap(db, ref_year, ref_month)
 
-    # ===== CARD GERAL (mantido) =====
+    # ===== CARD GERAL =====
     total_saldo = loans_sums["saldo_total"] + cards_sums["aberto_total"]
     total_parcelas_mes = parcelas_mes_emprestimos_cap + cards_sums["faturas_mes_total"]
     total_mes_geral = total_parcelas_mes + total_fixas_mes
@@ -689,30 +734,24 @@ def render(db_path_pref: Optional[str] = None):
 
     st.divider()
 
-    # ====== Dados para os 3 cards/chips =====
+    # ====== Dados para os 3 cards/chips (USANDO valor_pago) =====
     paid_loans = _cap_month_paid_by_loan(db, ref_year, ref_month)
     loans_map = df_loans.rename(columns={"id":"loan_key","descricao":"titulo","Valor da Parcela Mensal":"mensal"})[["loan_key","titulo","mensal"]]
     loans_card_df = loans_map.merge(paid_loans, on="loan_key", how="left").fillna({"pago_mes":0.0})
     if not loans_card_df.empty:
         loans_card_df["falta"] = (loans_card_df["mensal"] - loans_card_df["pago_mes"]).clip(lower=0.0)
-        def _status_row(m, p):
-            if m <= 0: return "nada"
-            if p <= 0: return "nada"
-            if p >= m: return "ok"
-            return "parcial"
-        loans_card_df["status"] = [ _status_row(m, p) for m, p in zip(loans_card_df["mensal"], loans_card_df["pago_mes"]) ]
+        loans_card_df["status"] = [
+            _calc_status_from_paid(m, p) for m, p in zip(loans_card_df["mensal"], loans_card_df["pago_mes"])
+        ]
 
     paid_cards = _cap_month_paid_by_card(db, ref_year, ref_month, _load_cards_catalog(db))
     cards_map = df_cards_view.rename(columns={"card_id":"card_id","card_nome":"titulo","fatura_mes_total":"mensal"})[["card_id","titulo","mensal"]]
     cards_card_df = cards_map.merge(paid_cards, on="card_id", how="left").fillna({"pago_mes":0.0})
     if not cards_card_df.empty:
         cards_card_df["falta"] = (pd.to_numeric(cards_card_df["mensal"], errors="coerce").fillna(0.0) - cards_card_df["pago_mes"]).clip(lower=0.0)
-        def _status_row2(m, p):
-            if m <= 0: return "nada"
-            if p <= 0: return "nada"
-            if p >= m: return "ok"
-            return "parcial"
-        cards_card_df["status"] = [ _status_row2(m, p) for m, p in zip(cards_card_df["mensal"], cards_card_df["pago_mes"]) ]
+        cards_card_df["status"] = [
+            _calc_status_from_paid(m, p) for m, p in zip(cards_card_df["mensal"], cards_card_df["pago_mes"])
+        ]
 
     df_boletos_view = _build_boletos_view(db, ref_year, ref_month)
     paid_bol = _cap_month_paid_by_boleto(db, ref_year, ref_month)
@@ -720,12 +759,9 @@ def render(db_path_pref: Optional[str] = None):
     bols_card_df = bols_map.merge(paid_bol.rename(columns={"fonte":"titulo"}), on="titulo", how="left").fillna({"pago_mes":0.0})
     if not bols_card_df.empty:
         bols_card_df["falta"] = (pd.to_numeric(bols_card_df["mensal"], errors="coerce").fillna(0.0) - bols_card_df["pago_mes"]).clip(lower=0.0)
-        def _status_row3(m, p):
-            if m <= 0: return "nada"
-            if p <= 0: return "nada"
-            if p >= m: return "ok"
-            return "parcial"
-        bols_card_df["status"] = [ _status_row3(m, p) for m, p in zip(bols_card_df["mensal"], bols_card_df["pago_mes"]) ]
+        bols_card_df["status"] = [
+            _calc_status_from_paid(m, p) for m, p in zip(bols_card_df["mensal"], bols_card_df["pago_mes"])
+        ]
 
     # ===== NOVO CONTAINER PRINCIPAL + SUB-CONTAINERS =====
     def _rows_html(df: pd.DataFrame) -> str:
@@ -777,7 +813,7 @@ def render(db_path_pref: Optional[str] = None):
     else:
         chips_html = ''.join(
             f'<div class="cap-chip">'
-            f'  <div class="cap-chip-left"><span class="cap-dot {"ok" if r.status=="pago" else "nada"}"></span><span>{html.escape(str(r.subcat_nome))}</span></div>'
+            f'  <div class="cap-chip-left"><span class="cap-dot {"ok" if float(r.valor_mes) > 0 else "nada"}"></span><span>{html.escape(str(r.subcat_nome))}</span></div>'
             f'  <span class="cap-badge{" muted" if float(r.valor_mes) <= 0 else ""}">{_fmt_brl(r.valor_mes)}</span>'
             f'</div>'
             for r in painel.sort_values("subcat_nome").itertuples(index=False)
@@ -795,7 +831,7 @@ def render(db_path_pref: Optional[str] = None):
         </div>
         """).strip()
 
-    # Legenda GLOBAL (abaixo do título do container principal)
+    # Legenda GLOBAL
     legenda_global = dedent("""
     <div class="cap-legend" style="margin:6px 0 8px;">
       <span><span class="cap-dot ok"></span>Quitado</span>
