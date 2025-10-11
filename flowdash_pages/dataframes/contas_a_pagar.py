@@ -669,29 +669,23 @@ def render(db_path_pref: Optional[str] = None):
     @media (max-width:900px){  .cap-metrics-row.cap-3col{grid-template-columns:1fr;} }
 
     /* ===== Painéis “Empréstimos / Fatura / Boletos” ===== */
+    /* agora cada coluna usa apenas a altura do conteúdo */
     .cap-section-grid{
     display:grid;
     grid-template-columns:repeat(3,minmax(260px,1fr));
-    grid-auto-rows:1fr;              /* força altura igual por linha */
     gap:12px;
-    align-items:stretch;
+    align-items:start;
     }
-    .cap-section-grid > .cap-inner{display:flex;flex-direction:column;height:100%;}
     @media (max-width:1100px){ .cap-section-grid{grid-template-columns:repeat(2,minmax(260px,1fr));} }
     @media (max-width:900px){  .cap-section-grid{grid-template-columns:1fr;} }
 
-    /* container interno de cada painel com altura total */
-    .cap-eq{display:flex;flex-direction:column;min-height:100%;}
+    /* container interno sem forçar altura */
+    .cap-eq{display:block;}
     .cap-eq .cap-h4{margin-bottom:8px;}
-    .cap-eq .cap-chips-grid{
-    flex:1;min-height:120px; /* garante volume mesmo vazia */
-    display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;
-    }
 
-    /* quando a viewport estreitar, mantém uma coluna de chips */
-    @media (max-width:560px){
-    .cap-eq .cap-chips-grid{grid-template-columns:1fr;}
-    }
+    /* chips grid responsivo */
+    .cap-chips-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
+    @media (max-width:560px){ .cap-chips-grid{grid-template-columns:1fr;} }
 
     .cap-panel{display:flex;flex-direction:column;gap:8px;min-width:0;}
     .cap-panel-title{
@@ -699,10 +693,7 @@ def render(db_path_pref: Optional[str] = None):
     margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
     }
 
-    /* ===== Chips ===== */
-    .cap-chips-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
-    @media (max-width:560px){ .cap-chips-grid{grid-template-columns:1fr;} }
-
+    /* ===== Chip ===== */
     .cap-chip{
     display:grid;grid-template-columns:minmax(0,1fr) auto;
     align-items:center;gap:8px;padding:8px 10px;
@@ -710,8 +701,6 @@ def render(db_path_pref: Optional[str] = None):
     background:rgba(255,255,255,0.04);overflow:hidden;
     }
     @media (max-width:1200px){ .cap-chip{grid-template-columns:1fr;align-items:flex-start;} }
-
-    .cap-chip.placeholder{opacity:.7;border-style:dashed;} /* para vazio ficar consistente */
 
     .cap-chip-left{min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;}
     .cap-chip-title{
@@ -814,21 +803,10 @@ def render(db_path_pref: Optional[str] = None):
     cards_card_df  = _chips_df_cartoes(db, ref_year, ref_month)
     bols_card_df   = _chips_df_boletos(db, ref_year, ref_month)
 
-    # chips (inclui placeholder quando vazio para manter layout)
+    # chips (sem placeholder — reduz altura quando vazio)
     def _chips_rows(df: pd.DataFrame) -> str:
         if df is None or df.empty:
-            return (
-                '<div class="cap-chip cap-chip-stack placeholder">'
-                '  <div class="cap-chip-head">'
-                '    <span class="cap-chip-title">Sem itens para o mês.</span>'
-                '  </div>'
-                '  <div class="cap-badges">'
-                '    <span class="cap-badge">Mensal R$ 0,00</span>'
-                '    <span class="cap-badge">Pago R$ 0,00</span>'
-                '    <span class="cap-badge">Falta R$ 0,00</span>'
-                '  </div>'
-                '</div>'
-            )
+            return '<div class="cap-sub">Sem itens para o mês.</div>'
         rows = []
         df2 = df.copy()
         for c in ("titulo","mensal","pago_mes","falta","status"):
@@ -855,7 +833,7 @@ def render(db_path_pref: Optional[str] = None):
             )
         return "".join(rows)
 
-    # seção estilo Contas Fixas, mas SEM "Total do mês (mensal)"
+    # seção estilo Contas Fixas, sem "Total do mês (mensal)"
     def _secao_like_fixas(titulo: str, color_cls: str, df: pd.DataFrame) -> str:
         chips_html = _chips_rows(df)
         return f"""
@@ -865,7 +843,7 @@ def render(db_path_pref: Optional[str] = None):
         </div>
         """.strip()
 
-    # três seções com mesma altura
+    # três seções (altura natural)
     secao_emprestimos = _secao_like_fixas("Empréstimos", "cap-purple", loans_card_df)
     secao_fatura      = _secao_like_fixas("Fatura do Cartão", "cap-blue", cards_card_df)
     secao_boletos     = _secao_like_fixas("Boletos", "cap-pink", bols_card_df)
@@ -932,6 +910,7 @@ def render(db_path_pref: Optional[str] = None):
     st.markdown(painel_principal, unsafe_allow_html=True)
 
     st.divider()
+
 
 
 
