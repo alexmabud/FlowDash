@@ -151,12 +151,9 @@ def _pick_amount_col(df: pd.DataFrame) -> Optional[str]:
         "valor_saida","parcela_valor","valor_fatura"
     ])
 
-def _pick_paid_col(df: pd.DataFrame) -> Optional[str]:
-    # Prioriza campos explícitos de pagamento no CAP
-    return _first_existing(df, [
-        "valor_pago", "valor_pago_mes", "valor_baixa", "valor_liquidado",
-        "valor_pago_acumulado"  # fallback (pode superestimar se for acumulado)
-    ])
+def _pick_paid_acumulado_col(df: pd.DataFrame) -> Optional[str]:
+    # inclui variações mais comuns e fallback para valor_pago_mes/valor_pago
+    return _first_existing(df, ["valor_pago_acumulado", "valor_pago_acum", "pago_acumulado", "valor_pago_mes", "valor_pago"])
 
 def _pick_due_col(df: pd.DataFrame) -> Optional[str]:
     return _first_existing(df, ["competencia","data_vencimento","vencimento","data_fatura","data","data_evento"])
@@ -177,22 +174,61 @@ def _best_due_series(df: pd.DataFrame) -> pd.Series:
                 best, best_count = dt, n
     return best if best is not None else pd.Series(pd.NaT, index=df.index)
 
-def _calc_status_from_paid(mensal: float, pago: float, eps: float = 0.005) -> str:
-    m = float(mensal or 0.0)
-    p = float(pago or 0.0)
-    if p <= eps:
-        return "nada"            # sem pagamento
-    if p + eps < m - eps:
-        return "parcial"         # pago parcialmente
-    return "ok"                  # quitado (≈ ou >)
+# --------- Normalização de STATUS (texto do CAP) ----------
+def _norm_status_text(s: str) -> str:
+    t = str(s).strip().lower()
+    if "abert" in t or "pend" in t:
+        return "nada"      # sem pagamento
+    if "parc" in t:
+        return "parcial"   # pagamento parcial
+    if "quit" in t:
+        return "ok"        # quitado
+    return "nada"
 
-# ===================== Contas Fixas (painel) =====================
+def _agg_status(series: pd.Series) -> str:
+    """Pior status vence: aberto/pendente > parcial > quitado."""
+    vals = list(series.dropna().astype(str))
+    if any(v == "nada" for v in vals):
+        return "nada"
+    if any(v == "parcial" for v in vals):
+        return "parcial"
+    if any(v == "ok" for v in vals):
+        return "ok"
+    return "nada"
+
+# --------- Normalização de TIPO_OBRIGACAO ----------
+def _norm_tipo_obrigacao(s: str) -> str:
+    if not isinstance(s, str):
+        return ""
+    t = s.strip().lower()
+    # remoção simples de acentos-chave (robustez)
+    t = (t.replace("ã","a").replace("â","a").replace("á","a")
+           .replace("é","e").replace("ê","e")
+           .replace("í","i")
+           .replace("ó","o").replace("ô","o")
+           .replace("ú","u").replace("ç","c"))
+    if ("fatura" in t) and ("cart" in t):
+        return "fatura_cartao"
+    if "boleto" in t:
+        return "boleto"
+    if "emprest" in t:
+        return "emprestimo"
+    return t
+
+# ===================== FIXAS: painel (definido ANTES do uso) =====================
 def _build_fixed_panel_status(
     subcats: pd.DataFrame,
     saidas_all: pd.DataFrame,
     ref_year: int,
     ref_month: int,
 ) -> pd.DataFrame:
+    """
+    Monta o painel de Contas Fixas (categoria 4), devolvendo:
+    ['subcat_id', 'subcat_nome', 'valor_mes', 'status'].
+
+    - Soma por subcategoria no mês/ano selecionado.
+    - status: 'pago' se houve gasto (>0) no mês; senão 'pendente'.
+    """
     out_cols = ["subcat_id", "subcat_nome", "valor_mes", "status"]
     if subcats is None or subcats.empty or saidas_all is None or saidas_all.empty:
         return pd.DataFrame(columns=out_cols)
@@ -238,6 +274,66 @@ def _build_fixed_panel_status(
     painel["status"] = painel["valor_mes"].apply(lambda v: "pago" if v > 0 else "pendente")
     return painel[["subcat_id", "subcat_nome", "valor_mes", "status"]].sort_values("subcat_nome").reset_index(drop=True)
 
+# ===================== Somas/Status por tipo_obrigacao a partir do CAP =====================
+def _cap_month_summary_by_tipo(db: DB, ref_year: int, ref_month: int, tipo_key: str) -> pd.DataFrame:
+    """
+    Lê CAP e retorna por 'credor' (titulo) PARA UM TIPO (tipo_obrigacao/categoria_evento):
+      - mensal = soma(valor_evento) do mês
+      - pago_mes = soma(valor_pago_acumulado) do mês
+      - falta = mensal - pago_mes (>=0)
+      - status = mapeado da coluna 'status' do CAP (prioridade pior-vence)
+    Filtra por tipo (normalizado).
+    """
+    cap = _load_contas_apagar_mov(db)
+    if cap.empty:
+        return pd.DataFrame(columns=["titulo","mensal","pago_mes","falta","status"])
+
+    df = cap.copy()
+    df["_dt"] = _best_due_series(df)
+
+    # Colunas
+    val_col = "valor_evento" if "valor_evento" in df.columns else _pick_amount_col(df)
+    pago_col = _pick_paid_acumulado_col(df)
+    status_col = _first_existing(df, ["status","situacao","situação"])
+    credor_col = _first_existing(df, ["credor","fornecedor","descricao","descrição","titulo","título"])
+
+    # >>> PRIORIDADE CERTA: primeiro tipo_obrigacao, depois categoria_evento, etc. <<<
+    tipo_col = _first_existing(df, ["tipo_obrigacao", "categoria_evento", "tipo", "origem", "classe", "grupo"])
+
+    if val_col is None or credor_col is None or tipo_col is None:
+        return pd.DataFrame(columns=["titulo","mensal","pago_mes","falta","status"])
+
+    df["_tipo_norm"] = df[tipo_col].astype(str).map(_norm_tipo_obrigacao)
+    alvo = _norm_tipo_obrigacao(tipo_key)
+
+    # Filtro por MÊS/ANO + tipo
+    is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
+    df = df[is_mes & (df["_tipo_norm"] == alvo)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["titulo","mensal","pago_mes","falta","status"])
+
+    # Números
+    df["_mensal"] = pd.to_numeric(df[val_col],  errors="coerce").fillna(0.0) if val_col else 0.0
+    df["_pago"]   = pd.to_numeric(df[pago_col], errors="coerce").fillna(0.0) if pago_col else 0.0
+
+    # Título
+    df["_titulo"] = df[credor_col].astype(str).str.strip().replace({"": "(sem nome)"})
+
+    # Status por linha
+    if status_col:
+        df["_status_norm"] = df[status_col].astype(str).map(_norm_status_text)
+    else:
+        df["_status_norm"] = "nada"
+
+    grp = df.groupby("_titulo", dropna=False, sort=True)
+    out = pd.DataFrame({
+        "titulo": grp.size().index.astype(str),
+        "mensal": grp["_mensal"].sum().astype(float),
+        "pago_mes": grp["_pago"].sum().astype(float),
+        "status": grp["_status_norm"].apply(_agg_status).values
+    })
+    out["falta"] = (out["mensal"] - out["pago_mes"]).clip(lower=0.0)
+    return out.reset_index(drop=True)
 
 # ===================== Empréstimos =====================
 def _build_loans_view(df: pd.DataFrame) -> pd.DataFrame:
@@ -286,7 +382,7 @@ def _loans_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
     df = cap.copy()
     df["_dt"] = _best_due_series(df)
     is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    val_col = _pick_amount_col(df)
+    val_col = "valor_evento" if "valor_evento" in df.columns else _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
 
     cols = {c.lower(): c for c in df.columns}
@@ -295,7 +391,7 @@ def _loans_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
     if loan_id_col:
         m_loan = df[loan_id_col].notna() & (df[loan_id_col].astype(str).str.strip() != "")
     else:
-        hint_cols = [c for c in ("categoria","origem","tipo","fonte","classe","grupo") if c in cols]
+        hint_cols = [c for c in ("tipo_obrigacao","categoria_evento","categoria","origem","tipo","fonte","classe","grupo") if c in cols]
         if hint_cols:
             m_list = []
             for c in hint_cols:
@@ -309,9 +405,8 @@ def _loans_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
     return total
 
 
-# ===================== Cartões =====================
+# ===================== Cartões (cards grandes) =====================
 def _normalize_paid_mask(df: pd.DataFrame) -> pd.Series:
-    # Mantido por compatibilidade, mas preferimos somar valor_pago quando disponível
     cols = {c.lower(): c for c in df.columns}
     yes = {"1","true","t","sim","s","y","yes","pago","quitado","baixado","ok","liquidado"}
     if "pago" in cols:
@@ -396,7 +491,6 @@ def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
                 id_ser = pd.to_numeric(mv[id_colm], errors="coerce").astype("Int64").astype(str)
                 is_mes = mv["_venc"].dt.month.eq(ref_month) & mv["_venc"].dt.year.eq(ref_year)
                 grp = mv.groupby(id_ser, dropna=False, sort=True)
-                # em_aberto_total somente itens não quitados ainda (sem usar valor_pago)
                 paid_mask = _normalize_paid_mask(mv)
                 em_aberto_by_id = pd.DataFrame({
                     "card_id": grp.size().index.astype(str),
@@ -466,22 +560,26 @@ def _cards_totals(df_cards_view: pd.DataFrame) -> Dict[str, float]:
 
 # ===================== Boletos (CAP) =====================
 def _boletos_flag_mask(df: pd.DataFrame) -> pd.Series:
+    """Prioriza tipo_obrigacao == BOLETO; mantém heurística textual como fallback."""
     if df.empty:
         return pd.Series(False, index=df.index)
     cols = {c.lower(): c for c in df.columns}
-    m_direct = pd.Series(False, index=df.index)
-    if "tipo_obrigacao" in cols:
-        s = df[cols["tipo_obrigacao"]].astype(str).str.upper().str.strip()
-        m_direct = s.eq("BOLETO") | s.str.contains("BOLET")
+    m = pd.Series(False, index=df.index)
+
+    tipo_col = cols.get("tipo_obrigacao")
+    if tipo_col:
+        m = df[tipo_col].astype(str).map(_norm_tipo_obrigacao).eq("boleto")
+
+    if m.any():
+        return m.fillna(False)
     text_fields = ["tipo_obrigacao","tipo_origem","forma_pagamento","categoria_evento","categoria","origem","tipo","fonte","classe","grupo","descricao","descrição","titulo","título","credor","fornecedor"]
     m_text = pd.Series(False, index=df.index)
     for key in text_fields:
         c = cols.get(key)
-        if not c:
-            continue
+        if not c: continue
         s = df[c].astype(str).str.lower()
         m_text = m_text | s.str.contains("boleto")
-    return (m_direct | m_text).fillna(False)
+    return m_text.fillna(False)
 
 def _boletos_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> float:
     cap = _load_contas_apagar_mov(db)
@@ -490,7 +588,7 @@ def _boletos_month_total_from_cap(db: DB, ref_year: int, ref_month: int) -> floa
     df = cap.copy()
     df["_dt"] = _best_due_series(df)
     is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    val_col = _pick_amount_col(df)
+    val_col = "valor_evento" if "valor_evento" in df.columns else _pick_amount_col(df)
     df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
     m_bol = _boletos_flag_mask(df)
     return float(df.loc[is_mes & m_bol, "_valor"].sum())
@@ -531,87 +629,16 @@ def _boletos_totals_view(df_view: pd.DataFrame) -> Dict[str, float]:
         "parcelas_total": float(pd.to_numeric(df_view["Valor da Parcela Mensal"], errors="coerce").fillna(0).sum()),
     }
 
-# ===================== PAGOS NO MÊS (usando valor_pago) =====================
-def _cap_month_paid_by_loan(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
-    cap = _load_contas_apagar_mov(db)
-    if cap.empty:
-        return pd.DataFrame(columns=["loan_key","pago_mes"])
-    df = cap.copy()
-    df["_dt"] = _best_due_series(df)
+# ===================== Chips (por tipo_obrigacao + credor) =====================
+def _chips_df_emprestimos(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
+    return _cap_month_summary_by_tipo(db, ref_year, ref_month, "EMPRESTIMO")
 
-    val_col = _pick_amount_col(df)
-    df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
+def _chips_df_cartoes(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
+    return _cap_month_summary_by_tipo(db, ref_year, ref_month, "FATURA_CARTAO")
 
-    paid_col = _pick_paid_col(df)
-    if paid_col:
-        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
-    else:
-        # Fallback: se não houver valor_pago, usa máscara booleana para contar valor integral
-        mask = _normalize_paid_mask(df)
-        df["_pago"] = df["_valor"].where(mask, 0.0)
+def _chips_df_boletos(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
+    return _cap_month_summary_by_tipo(db, ref_year, ref_month, "BOLETO")
 
-    is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    cols = {c.lower(): c for c in df.columns}
-    loan_id_col = next((cols[c] for c in ("emprestimo_id","id_emprestimo","loan_id") if c in cols), None)
-    if loan_id_col is None:
-        return pd.DataFrame(columns=["loan_key","pago_mes"])
-    grp = df[is_mes].groupby(df[loan_id_col].astype(str), dropna=False, sort=True)["_pago"].sum()
-    return grp.reset_index().rename(columns={loan_id_col: "loan_key", "_pago": "pago_mes"})
-
-def _cap_month_paid_by_card(db: DB, ref_year: int, ref_month: int, base_cards: pd.DataFrame) -> pd.DataFrame:
-    cap = _load_contas_apagar_mov(db)
-    if cap.empty:
-        return pd.DataFrame(columns=["card_id","pago_mes"])
-    df = cap.copy()
-    df["_dt"] = _best_due_series(df)
-
-    val_col = _pick_amount_col(df)
-    df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
-
-    paid_col = _pick_paid_col(df)
-    if paid_col:
-        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
-    else:
-        mask = _normalize_paid_mask(df)
-        df["_pago"] = df["_valor"].where(mask, 0.0)
-
-    is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    cols = {c.lower(): c for c in df.columns}
-    id_colm = next((cols[c] for c in ("cartao_id","id_cartao","cartao_credito_id","id_cartao_credito") if c in cols), None)
-    if id_colm is None:
-        name_colm = next((cols[c] for c in ("cartao","cartão","cartao_nome","nome_cartao","credor") if c in cols), None)
-        if name_colm is None or base_cards.empty:
-            return pd.DataFrame(columns=["card_id","pago_mes"])
-        df["_key_nome_norm"] = df[name_colm].astype(str).str.strip().str.lower()
-        df = df.merge(base_cards[["_key_nome_norm","card_id"]], on="_key_nome_norm", how="left")
-        id_colm = "card_id"
-    grp = df[is_mes].groupby(df[id_colm].astype(str), dropna=False, sort=True)["_pago"].sum()
-    return grp.reset_index().rename(columns={id_colm: "card_id", "_pago": "pago_mes"})
-
-def _cap_month_paid_by_boleto(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
-    cap = _load_contas_apagar_mov(db)
-    if cap.empty:
-        return pd.DataFrame(columns=["fonte","pago_mes"])
-    df = cap.copy()
-    df["_dt"] = _best_due_series(df)
-
-    val_col = _pick_amount_col(df)
-    df["_valor"] = pd.to_numeric(df[val_col], errors="coerce").fillna(0.0) if val_col else 0.0
-
-    paid_col = _pick_paid_col(df)
-    if paid_col:
-        df["_pago"] = pd.to_numeric(df[paid_col], errors="coerce").fillna(0.0)
-    else:
-        mask = _normalize_paid_mask(df)
-        df["_pago"] = df["_valor"].where(mask, 0.0)
-
-    is_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
-    m_bol = _boletos_flag_mask(df)
-    cols = {c.lower(): c for c in df.columns}
-    fonte_col = next((cols[c] for c in ("credor","fornecedor","descricao","descrição","titulo","título") if c in cols), None)
-    fonte = (df[fonte_col].astype(str).str.strip() if fonte_col else pd.Series(["Boleto"]*len(df), index=df.index)).replace({"": "Boleto"})
-    grp = pd.DataFrame({"fonte": fonte, "_pago": df["_pago"]})[is_mes & m_bol].groupby("fonte", dropna=False, sort=True)["_pago"].sum()
-    return grp.reset_index().rename(columns={"_pago": "pago_mes"})
 
 # ===================== Render =====================
 def render(db_path_pref: Optional[str] = None):
@@ -619,61 +646,91 @@ def render(db_path_pref: Optional[str] = None):
     # CSS
     st.markdown("""
     <style>
-      .cap-card { border: 1px solid rgba(255,255,255,0.10); border-radius: 16px; padding: 14px 16px;
-                  background: rgba(255,255,255,0.03); box-shadow: 0 1px 4px rgba(0,0,0,0.10); }
-      .cap-card-lg { padding: 18px 20px; border-width: 1.5px; }
-      .cap-title-xl { font-size: 1.25rem; font-weight: 700; margin-bottom: 10px; }
-      .cap-metrics-row { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; }
-      .cap-metrics-row.cap-3col { grid-template-columns: repeat(3, minmax(0,1fr)); }
-      .cap-metrics-row.cap-1col { grid-template-columns: 1fr; }
-      .cap-metric { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-                    border-radius: 12px; padding: 10px 12px; }
-      .cap-metric-accent { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); }
-      .cap-label { font-size: 0.85rem; opacity: 0.85; margin-bottom: 4px; }
-      .cap-value { font-size: 1.35rem; font-weight: 700; }
+    /* --- cartões e estilos base --- */
+    .cap-card{border:1px solid rgba(255,255,255,0.10);border-radius:16px;padding:14px 16px;background:rgba(255,255,255,0.03);box-shadow:0 1px 4px rgba(0,0,0,0.10);}
+    .cap-card-lg{padding:18px 20px;border-width:1.5px;}
+    .cap-title-xl{font-size:1.25rem;font-weight:700;margin-bottom:10px;}
+    .cap-metric{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:10px 12px;}
+    .cap-metric-accent{background:rgba(34,197,94,0.12);border-color:rgba(34,197,94,0.35);}
+    .cap-label{font-size:.85rem;opacity:.85;margin-bottom:4px;}
+    .cap-value{font-size:1.35rem;font-weight:700;}
+    .cap-inner{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.12);border-radius:14px;padding:12px;}
+    .cap-inner + .cap-inner{margin-top:12px;}
+    .cap-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
+    .cap-h4{font-size:1.05rem;font-weight:700;margin:2px 0 10px;opacity:.95;}
+    .cap-red{color:#ef4444!important}.cap-purple{color:#a78bfa!important}.cap-blue{color:#60a5fa!important}.cap-pink{color:#f472b6!important}.cap-teal{color:#2dd4bf!important}.cap-indigo{color:#818cf8!important}.cap-lime{color:#a3e635!important}
 
-      .cap-inner { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.12);
-                   border-radius: 14px; padding: 12px; }
-      .cap-inner + .cap-inner { margin-top: 12px; }
+    /* ===== TOPO: 3 KPIs lado a lado; “Total do mês” sozinho ===== */
+    .cap-metrics-row{display:grid;gap:14px;}
+    .cap-metrics-row.cap-3col{grid-template-columns:repeat(3,minmax(260px,1fr));align-items:stretch;}
+    .cap-metrics-row.cap-1col{grid-template-columns:1fr;}
+    @media (max-width:1100px){ .cap-metrics-row.cap-3col{grid-template-columns:repeat(2,minmax(260px,1fr));} }
+    @media (max-width:900px){  .cap-metrics-row.cap-3col{grid-template-columns:1fr;} }
 
-      .cap-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
-      .cap-card h4 { margin: 0 0 8px 0; font-size: 1rem; }
-      .cap-sub { font-size: .80rem; opacity: .75; margin: -4px 0 8px 0; }
+    /* ===== Painéis “Empréstimos / Fatura / Boletos” ===== */
+    .cap-section-grid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:12px;}
+    @media (max-width:1100px){ .cap-section-grid{grid-template-columns:repeat(2,minmax(260px,1fr));} }
+    @media (max-width:900px){  .cap-section-grid{grid-template-columns:1fr;} }
 
-      .cap-h3 { font-size: 1.5rem; font-weight: 800; margin: 14px 0 8px; }
-      .cap-h4 { font-size: 1.05rem; font-weight: 700; margin: 2px 0 10px; opacity: .95; }
+    .cap-panel{display:flex;flex-direction:column;gap:8px;min-width:0;}
+    /* título do painel sempre sozinho em uma linha */
+    .cap-panel-title{
+      display:block;font-size:.95rem;font-weight:600;opacity:.9;
+      margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
 
-      .cap-red    { color: #ef4444 !important; }
-      .cap-purple { color: #a78bfa !important; }
-      .cap-cyan   { color: #22d3ee !important; }
-      .cap-amber  { color: #f59e0b !important; }
-      .cap-green  { color: #22c55e !important; }
-      .cap-blue   { color: #60a5fa !important; }
-      .cap-pink   { color: #f472b6 !important; }
-      .cap-lime  { color: #a3e635 !important; }
-      .cap-teal  { color: #2dd4bf !important; }
-      .cap-indigo{ color: #818cf8 !important; }
+    /* ===== Chips (grid onde ficam os itens/credores) ===== */
+    .cap-chips-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
+    @media (max-width:560px){ .cap-chips-grid{grid-template-columns:1fr;} }
 
-      .cap-chips-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:10px; }
-      .cap-chip { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 10px;
-                  border:1px solid rgba(255,255,255,0.10); border-radius:12px;
-                  background: rgba(255,255,255,0.04); }
-      .cap-chip-left { display:flex; align-items:center; gap:8px; min-width: 0; }
-      .cap-dot { width:12px; height:12px; border-radius:50%; border:1px solid rgba(255,255,255,0.35); flex:0 0 auto; }
-      .cap-dot.ok { background:#10b981; }
-      .cap-dot.parcial { background:#f59e0b; }
-      .cap-dot.nada { background:#6b7280; }
+    /* Chip padrão (também usado em fixas) */
+    .cap-chip{
+      display:grid;grid-template-columns:minmax(0,1fr) auto;
+      align-items:center;gap:8px;padding:8px 10px;
+      border:1px solid rgba(255,255,255,0.10);border-radius:12px;
+      background:rgba(255,255,255,0.04);overflow:hidden;
+    }
+    @media (max-width:1200px){ .cap-chip{grid-template-columns:1fr;align-items:flex-start;} }
 
-      .cap-badge { font-size:.80rem; padding:2px 8px; border-radius:9999px;
-                   background: rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.12); }
-      .cap-badges { display:flex; gap:6px; flex-wrap:wrap; }
+    .cap-chip-left{min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;}
+    /* título do chip: até 2 linhas quando usado no modo padrão */
+    .cap-chip-title{
+      min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+      overflow:hidden;word-break:break-word;overflow-wrap:anywhere;line-height:1.2;max-height:2.4em;
+    }
 
-      .cap-legend { display:flex; gap:14px; font-size:.85rem; opacity:.85; margin-bottom:8px; }
-      .cap-legend span { display:flex; align-items:center; gap:6px; }
+    .cap-badges{display:flex;gap:6px;flex-wrap:wrap;white-space:normal;justify-content:flex-end;}
+    .cap-badge{font-size:.80rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);text-align:center;}
 
-      .cap-center { text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+    /* ===== Modo EMPILHADO para Empréstimos/Fatura/Boletos:
+       (nome/credor SEMPRE em cima; badges SEMPRE embaixo) ===== */
+    .cap-chip.cap-chip-stack{
+      grid-template-columns:1fr !important;      /* força 1 coluna */
+      grid-template-rows:auto auto;
+      row-gap:6px; align-items:flex-start;
+    }
+    .cap-chip-stack .cap-chip-head{
+      display:flex; align-items:center; gap:8px; min-width:0;
+    }
+    .cap-chip-stack .cap-chip-title{
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;  /* 1 linha com reticências */
+    }
+    .cap-chip-stack .cap-badges{
+      justify-content:flex-start; flex-wrap:wrap; white-space:normal;
+    }
 
-      @media (max-width: 900px) { .cap-metrics-row, .cap-metrics-row.cap-3col, .cap-metrics-row.cap-1col { grid-template-columns: 1fr; } }
+    /* Pontos de status */
+    .cap-dot{width:12px;height:12px;border-radius:50%;border:1px solid rgba(255,255,255,0.35);flex:0 0 auto;}
+    .cap-dot.ok{background:#10b981;}
+    .cap-dot.parcial{background:#f59e0b;}
+    .cap-dot.nada{background:#6b7280;}
+
+    /* Legenda */
+    .cap-legend{display:flex;gap:14px;font-size:.85rem;opacity:.85;margin-bottom:8px;}
+    .cap-legend span{display:flex;align-items:center;gap:6px;}
+
+    /* Centro usado no KPI verde de total */
+    .cap-center{ text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:center; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -734,76 +791,58 @@ def render(db_path_pref: Optional[str] = None):
 
     st.divider()
 
-    # ====== Dados para os 3 cards/chips (USANDO valor_pago) =====
-    paid_loans = _cap_month_paid_by_loan(db, ref_year, ref_month)
-    loans_map = df_loans.rename(columns={"id":"loan_key","descricao":"titulo","Valor da Parcela Mensal":"mensal"})[["loan_key","titulo","mensal"]]
-    loans_card_df = loans_map.merge(paid_loans, on="loan_key", how="left").fillna({"pago_mes":0.0})
-    if not loans_card_df.empty:
-        loans_card_df["falta"] = (loans_card_df["mensal"] - loans_card_df["pago_mes"]).clip(lower=0.0)
-        loans_card_df["status"] = [
-            _calc_status_from_paid(m, p) for m, p in zip(loans_card_df["mensal"], loans_card_df["pago_mes"])
-        ]
+        # ===== CHIPS (lendo CAP por tipo + credor) =====
+    loans_card_df  = _chips_df_emprestimos(db, ref_year, ref_month)
+    cards_card_df  = _chips_df_cartoes(db, ref_year, ref_month)
+    bols_card_df   = _chips_df_boletos(db, ref_year, ref_month)
 
-    paid_cards = _cap_month_paid_by_card(db, ref_year, ref_month, _load_cards_catalog(db))
-    cards_map = df_cards_view.rename(columns={"card_id":"card_id","card_nome":"titulo","fatura_mes_total":"mensal"})[["card_id","titulo","mensal"]]
-    cards_card_df = cards_map.merge(paid_cards, on="card_id", how="left").fillna({"pago_mes":0.0})
-    if not cards_card_df.empty:
-        cards_card_df["falta"] = (pd.to_numeric(cards_card_df["mensal"], errors="coerce").fillna(0.0) - cards_card_df["pago_mes"]).clip(lower=0.0)
-        cards_card_df["status"] = [
-            _calc_status_from_paid(m, p) for m, p in zip(cards_card_df["mensal"], cards_card_df["pago_mes"])
-        ]
-
-    df_boletos_view = _build_boletos_view(db, ref_year, ref_month)
-    paid_bol = _cap_month_paid_by_boleto(db, ref_year, ref_month)
-    bols_map = df_boletos_view.rename(columns={"descricao":"titulo","Valor da Parcela Mensal":"mensal"})[["titulo","mensal"]]
-    bols_card_df = bols_map.merge(paid_bol.rename(columns={"fonte":"titulo"}), on="titulo", how="left").fillna({"pago_mes":0.0})
-    if not bols_card_df.empty:
-        bols_card_df["falta"] = (pd.to_numeric(bols_card_df["mensal"], errors="coerce").fillna(0.0) - bols_card_df["pago_mes"]).clip(lower=0.0)
-        bols_card_df["status"] = [
-            _calc_status_from_paid(m, p) for m, p in zip(bols_card_df["mensal"], bols_card_df["pago_mes"])
-        ]
-
-    # ===== NOVO CONTAINER PRINCIPAL + SUB-CONTAINERS =====
-    def _rows_html(df: pd.DataFrame) -> str:
-        if df.empty:
+    # nome do credor sempre em cima; badges sempre abaixo
+    def _chips_rows(df: pd.DataFrame) -> str:
+        if df is None or df.empty:
             return '<div class="cap-sub">Sem itens para o mês.</div>'
         rows = []
-        for _, r in df.sort_values("titulo").iterrows():
-            titulo = html.escape(str(r["titulo"])) if pd.notna(r["titulo"]) else "(sem título)"
+        df2 = df.copy()
+        for c in ("titulo","mensal","pago_mes","falta","status"):
+            if c not in df2.columns:
+                df2[c] = 0 if c not in ("titulo","status") else ("(sem nome)" if c=="titulo" else "nada")
+        for _, r in df2.sort_values("titulo").iterrows():
+            titulo = html.escape(str(r["titulo"])) if pd.notna(r["titulo"]) else "(sem nome)"
             mensal = _fmt_brl(r.get("mensal", 0.0))
             pago   = _fmt_brl(r.get("pago_mes", 0.0))
             falta  = _fmt_brl(r.get("falta", 0.0))
             status = str(r.get("status","nada"))
             rows.append(
-                f'<div class="cap-chip">'
-                f'  <div class="cap-chip-left"><span class="cap-dot {status}"></span><span>{titulo}</span></div>'
-                f'  <div class="cap-badges"><span class="cap-badge">Mensal {mensal}</span>'
-                f'  <span class="cap-badge">Pago {pago}</span>'
-                f'  <span class="cap-badge">Falta {falta}</span></div>'
+                f'<div class="cap-chip cap-chip-stack">'
+                f'  <div class="cap-chip-head">'
+                f'    <span class="cap-dot {status}"></span>'
+                f'    <span class="cap-chip-title">{titulo}</span>'
+                f'  </div>'
+                f'  <div class="cap-badges">'
+                f'    <span class="cap-badge">Mensal {mensal}</span>'
+                f'    <span class="cap-badge">Pago {pago}</span>'
+                f'    <span class="cap-badge">Falta {falta}</span>'
+                f'  </div>'
                 f'</div>'
             )
         return "".join(rows)
 
-    sub1_html = dedent(f"""
-    <div class="cap-inner">
-      <div class="cap-h4 cap-teal">Status Empréstimos, Fatura do Cartão e Boletos</div>
-      <div class="cap-metrics-row cap-3col" style="margin-top:6px;">
-        <div class="cap-metric">
-          <div class="cap-label cap-purple">Empréstimos</div>
-          <div>{_rows_html(loans_card_df)}</div>
+    # seção no mesmo estilo das Contas Fixas, mas SEM o bloco "Total do mês (mensal)"
+    def _secao_like_fixas(titulo: str, color_cls: str, df: pd.DataFrame) -> str:
+        chips_html = _chips_rows(df)
+        return f"""
+        <div class="cap-inner">
+          <div class="cap-h4 {color_cls}">{html.escape(titulo)}</div>
+          <div class="cap-chips-grid">{chips_html}</div>
         </div>
-        <div class="cap-metric">
-          <div class="cap-label cap-blue">Fatura do Cartão</div>
-          <div>{_rows_html(cards_card_df)}</div>
-        </div>
-        <div class="cap-metric">
-          <div class="cap-label cap-pink">Boletos</div>
-          <div>{_rows_html(bols_card_df)}</div>
-        </div>
-      </div>
-    </div>
-    """).strip()
+        """.strip()
 
+    # três seções (sem "Total do mês (mensal)")
+    secao_emprestimos = _secao_like_fixas("Empréstimos", "cap-purple", loans_card_df)
+    secao_fatura      = _secao_like_fixas("Fatura do Cartão", "cap-blue", cards_card_df)
+    secao_boletos     = _secao_like_fixas("Boletos", "cap-pink", bols_card_df)
+
+
+    # ===== Status Contas Fixas =====
     if painel.empty:
         sub2_inner = dedent("""
         <div class="cap-inner">
@@ -840,11 +879,17 @@ def render(db_path_pref: Optional[str] = None):
     </div>
     """).strip()
 
+    # Painel principal — sem sub1_html
+        # === Painel principal (agora com os 3 cards lado a lado) ===
     painel_principal = dedent(f"""
     <div class="cap-card cap-card-lg">
       <div class="cap-title-xl cap-lime">Painel Contas a Pagar</div>
       {legenda_global}
-      {sub1_html}
+      <div class="cap-section-grid">
+        {secao_emprestimos}
+        {secao_fatura}
+        {secao_boletos}
+      </div>
       {sub2_inner}
     </div>
     """).strip()
@@ -852,7 +897,8 @@ def render(db_path_pref: Optional[str] = None):
 
     st.divider()
 
-    # ===== Empréstimos — mantido =====
+
+    # ===== Seções grandes =====
     if df_loans_raw.empty:
         st.info("Nenhum empréstimo encontrado (tabela esperada: `emprestimos_financiamentos`).")
     else:
@@ -894,7 +940,6 @@ def render(db_path_pref: Optional[str] = None):
 
     st.divider()
 
-    # ===== Fatura — mantido =====
     if df_cards_view.empty:
         st.info("Sem cartões/faturas localizados (tabelas esperadas: `cartoes_credito`, `fatura_cartao_itens` e/ou `contas_a_pagar_mov`).")
     else:
@@ -932,7 +977,8 @@ def render(db_path_pref: Optional[str] = None):
 
     st.divider()
 
-    # ===== Boletos — mantido =====
+    # ===== Boletos (cards grandes) =====
+    df_boletos_view = _build_boletos_view(db, ref_year, ref_month)
     if df_boletos_view.empty:
         st.info("Nenhum boleto localizado (fonte: CAP).")
     else:
