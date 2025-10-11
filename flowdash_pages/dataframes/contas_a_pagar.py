@@ -643,7 +643,7 @@ def _chips_df_boletos(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
 # ===================== Render =====================
 def render(db_path_pref: Optional[str] = None):
 
-    # CSS
+# CSS
     st.markdown("""
     <style>
     /* --- cartões e estilos base --- */
@@ -659,6 +659,7 @@ def render(db_path_pref: Optional[str] = None):
     .cap-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px;}
     .cap-h4{font-size:1.05rem;font-weight:700;margin:2px 0 10px;opacity:.95;}
     .cap-red{color:#ef4444!important}.cap-purple{color:#a78bfa!important}.cap-blue{color:#60a5fa!important}.cap-pink{color:#f472b6!important}.cap-teal{color:#2dd4bf!important}.cap-indigo{color:#818cf8!important}.cap-lime{color:#a3e635!important}
+    .cap-cyan{color:#22d3ee!important} /* nova cor */
 
     /* ===== TOPO: 3 KPIs lado a lado; “Total do mês” sozinho ===== */
     .cap-metrics-row{display:grid;gap:14px;}
@@ -668,56 +669,66 @@ def render(db_path_pref: Optional[str] = None):
     @media (max-width:900px){  .cap-metrics-row.cap-3col{grid-template-columns:1fr;} }
 
     /* ===== Painéis “Empréstimos / Fatura / Boletos” ===== */
-    .cap-section-grid{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:12px;}
+    .cap-section-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(260px,1fr));
+    gap:12px;
+    align-items:stretch;
+    }
+    /* garante que cada painel filho ocupe altura total e use flex coluna */
+    .cap-section-grid > .cap-inner{display:flex;flex-direction:column;height:100%;}
     @media (max-width:1100px){ .cap-section-grid{grid-template-columns:repeat(2,minmax(260px,1fr));} }
     @media (max-width:900px){  .cap-section-grid{grid-template-columns:1fr;} }
 
-    .cap-panel{display:flex;flex-direction:column;gap:8px;min-width:0;}
-    /* título do painel sempre sozinho em uma linha */
-    .cap-panel-title{
-      display:block;font-size:.95rem;font-weight:600;opacity:.9;
-      margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    /* container interno de cada painel com altura total */
+    .cap-eq{display:flex;flex-direction:column;min-height:100%;}
+    .cap-eq .cap-h4{margin-bottom:8px;}
+    .cap-eq .cap-chips-grid{
+    flex:1;min-height:0; /* evita overflow e preenche igualmente */
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;
     }
 
-    /* ===== Chips (grid onde ficam os itens/credores) ===== */
+    /* quando a viewport estreitar, mantém uma coluna de chips */
+    @media (max-width:560px){
+    .cap-eq .cap-chips-grid{grid-template-columns:1fr;}
+    }
+
+    .cap-panel{display:flex;flex-direction:column;gap:8px;min-width:0;}
+    .cap-panel-title{
+    display:block;font-size:.95rem;font-weight:600;opacity:.9;
+    margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+
+    /* ===== Chips ===== */
     .cap-chips-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;}
     @media (max-width:560px){ .cap-chips-grid{grid-template-columns:1fr;} }
 
-    /* Chip padrão (também usado em fixas) */
     .cap-chip{
-      display:grid;grid-template-columns:minmax(0,1fr) auto;
-      align-items:center;gap:8px;padding:8px 10px;
-      border:1px solid rgba(255,255,255,0.10);border-radius:12px;
-      background:rgba(255,255,255,0.04);overflow:hidden;
+    display:grid;grid-template-columns:minmax(0,1fr) auto;
+    align-items:center;gap:8px;padding:8px 10px;
+    border:1px solid rgba(255,255,255,0.10);border-radius:12px;
+    background:rgba(255,255,255,0.04);overflow:hidden;
     }
     @media (max-width:1200px){ .cap-chip{grid-template-columns:1fr;align-items:flex-start;} }
 
     .cap-chip-left{min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden;}
-    /* título do chip: até 2 linhas quando usado no modo padrão */
     .cap-chip-title{
-      min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
-      overflow:hidden;word-break:break-word;overflow-wrap:anywhere;line-height:1.2;max-height:2.4em;
+    min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden;word-break:break-word;overflow-wrap:anywhere;line-height:1.2;max-height:2.4em;
     }
 
     .cap-badges{display:flex;gap:6px;flex-wrap:wrap;white-space:normal;justify-content:flex-end;}
     .cap-badge{font-size:.80rem;padding:2px 8px;border-radius:9999px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.12);text-align:center;}
 
-    /* ===== Modo EMPILHADO para Empréstimos/Fatura/Boletos:
-       (nome/credor SEMPRE em cima; badges SEMPRE embaixo) ===== */
+    /* ===== Modo EMPILHADO ===== */
     .cap-chip.cap-chip-stack{
-      grid-template-columns:1fr !important;      /* força 1 coluna */
-      grid-template-rows:auto auto;
-      row-gap:6px; align-items:flex-start;
+    grid-template-columns:1fr !important;
+    grid-template-rows:auto auto;
+    row-gap:6px; align-items:flex-start;
     }
-    .cap-chip-stack .cap-chip-head{
-      display:flex; align-items:center; gap:8px; min-width:0;
-    }
-    .cap-chip-stack .cap-chip-title{
-      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;  /* 1 linha com reticências */
-    }
-    .cap-chip-stack .cap-badges{
-      justify-content:flex-start; flex-wrap:wrap; white-space:normal;
-    }
+    .cap-chip-stack .cap-chip-head{display:flex; align-items:center; gap:8px; min-width:0;}
+    .cap-chip-stack .cap-chip-title{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .cap-chip-stack .cap-badges{justify-content:flex-start; flex-wrap:wrap; white-space:normal;}
 
     /* Pontos de status */
     .cap-dot{width:12px;height:12px;border-radius:50%;border:1px solid rgba(255,255,255,0.35);flex:0 0 auto;}
@@ -731,6 +742,10 @@ def render(db_path_pref: Optional[str] = None):
 
     /* Centro usado no KPI verde de total */
     .cap-center{ text-align:center; display:flex; flex-direction:column; align-items:center; justify-content:center; }
+
+    /* utilitárias agrupadas */
+    .cap-spacer{height:14px}
+    .cap-panel-title-plain{font-size:.95rem;font-weight:600;opacity:.9;margin:6px 0 8px;}
     </style>
     """, unsafe_allow_html=True)
 
@@ -749,7 +764,8 @@ def render(db_path_pref: Optional[str] = None):
     try:
         db = DB(_ensure_db_path_or_raise(db_path_pref))
     except Exception as e:
-        st.error(str(e)); return
+        st.error(str(e)); 
+        return
 
     # ===== CÁLCULOS =====
     df_loans_raw = _load_loans_raw(db)
@@ -773,25 +789,25 @@ def render(db_path_pref: Optional[str] = None):
 
     novo_top_geral = dedent(f"""
     <div class="cap-card cap-card-lg">
-      <div class="cap-title-xl cap-red">Total Geral — {_month_year_label(ref_year, ref_month)}</div>
-      <div class="cap-metrics-row cap-3col">
+    <div class="cap-title-xl cap-red">Total Geral — {_month_year_label(ref_year, ref_month)}</div>
+    <div class="cap-metrics-row cap-3col">
         <div class="cap-metric"><div class="cap-label">Saldo devedor: Cartões + Empréstimos + Boletos</div><div class="cap-value">{_fmt_brl(total_saldo)}</div></div>
         <div class="cap-metric"><div class="cap-label">Parcelas do mês: Cartões + Empréstimos + Boletos</div><div class="cap-value">{_fmt_brl(total_parcelas_mes)}</div></div>
         <div class="cap-metric"><div class="cap-label">Gastos fixos (mês)</div><div class="cap-value">{_fmt_brl(total_fixas_mes)}</div></div>
-      </div>
-      <div class="cap-metrics-row cap-1col" style="margin-top:10px;">
+    </div>
+    <div class="cap-metrics-row cap-1col" style="margin-top:10px;">
         <div class="cap-metric cap-metric-accent cap-center">
-          <div class="cap-label cap-green">Total do mês: Cartões + Empréstimos + Boletos + Gastos Fixos</div>
-          <div class="cap-value cap-green">{_fmt_brl(total_mes_geral)}</div>
+        <div class="cap-label cap-green">Total do mês: Cartões + Empréstimos + Boletos + Gastos Fixos</div>
+        <div class="cap-value cap-green">{_fmt_brl(total_mes_geral)}</div>
         </div>
-      </div>
+    </div>
     </div>
     """).strip()
     st.markdown(novo_top_geral, unsafe_allow_html=True)
 
     st.divider()
 
-        # ===== CHIPS (lendo CAP por tipo + credor) =====
+    # ===== CHIPS (lendo CAP por tipo + credor) =====
     loans_card_df  = _chips_df_emprestimos(db, ref_year, ref_month)
     cards_card_df  = _chips_df_cartoes(db, ref_year, ref_month)
     bols_card_df   = _chips_df_boletos(db, ref_year, ref_month)
@@ -826,27 +842,27 @@ def render(db_path_pref: Optional[str] = None):
             )
         return "".join(rows)
 
-    # seção no mesmo estilo das Contas Fixas, mas SEM o bloco "Total do mês (mensal)"
+    # seção estilo Contas Fixas, mas SEM "Total do mês (mensal)"
+    # (usa .cap-eq para garantir altura igual entre as três colunas)
     def _secao_like_fixas(titulo: str, color_cls: str, df: pd.DataFrame) -> str:
         chips_html = _chips_rows(df)
         return f"""
-        <div class="cap-inner">
-          <div class="cap-h4 {color_cls}">{html.escape(titulo)}</div>
-          <div class="cap-chips-grid">{chips_html}</div>
+        <div class="cap-inner cap-eq">
+        <div class="cap-h4 {color_cls}">{html.escape(titulo)}</div>
+        <div class="cap-chips-grid">{chips_html}</div>
         </div>
         """.strip()
 
-    # três seções (sem "Total do mês (mensal)")
+    # três seções com mesma altura
     secao_emprestimos = _secao_like_fixas("Empréstimos", "cap-purple", loans_card_df)
     secao_fatura      = _secao_like_fixas("Fatura do Cartão", "cap-blue", cards_card_df)
     secao_boletos     = _secao_like_fixas("Boletos", "cap-pink", bols_card_df)
-
 
     # ===== Status Contas Fixas =====
     if painel.empty:
         sub2_inner = dedent("""
         <div class="cap-inner">
-          <div class="cap-sub">Nenhuma subcategoria de contas fixas (categoria 4) encontrada.</div>
+        <div class="cap-sub">Nenhuma subcategoria de contas fixas (categoria 4) encontrada.</div>
         </div>
         """).strip()
     else:
@@ -859,43 +875,54 @@ def render(db_path_pref: Optional[str] = None):
         )
         sub2_inner = dedent(f"""
         <div class="cap-inner">
-          <div class="cap-h4 cap-indigo">Status Contas Fixas</div>
-          <div class="cap-metrics-row cap-1col">
+        <div class="cap-h4 cap-cyan">Status Contas Fixas</div>
+        <div class="cap-metrics-row cap-1col">
             <div class="cap-metric">
-              <div class="cap-label">Total gasto fixo (mês)</div>
-              <div class="cap-value">{_fmt_brl(total_fixas_mes)}</div>
+            <div class="cap-label">Total gasto fixo (mês)</div>
+            <div class="cap-value">{_fmt_brl(total_fixas_mes)}</div>
             </div>
-          </div>
-          <div class="cap-chips-grid">{chips_html}</div>
+        </div>
+        <div class="cap-chips-grid">{chips_html}</div>
         </div>
         """).strip()
 
     # Legenda GLOBAL
     legenda_global = dedent("""
     <div class="cap-legend" style="margin:6px 0 8px;">
-      <span><span class="cap-dot ok"></span>Quitado</span>
-      <span><span class="cap-dot parcial"></span>Parcial</span>
-      <span><span class="cap-dot nada"></span>Sem pagamento</span>
+    <span><span class="cap-dot ok"></span>Quitado</span>
+    <span><span class="cap-dot parcial"></span>Parcial</span>
+    <span><span class="cap-dot nada"></span>Sem pagamento</span>
     </div>
     """).strip()
 
-    # Painel principal — sem sub1_html
-        # === Painel principal (agora com os 3 cards lado a lado) ===
-    painel_principal = dedent(f"""
-    <div class="cap-card cap-card-lg">
-      <div class="cap-title-xl cap-lime">Painel Contas a Pagar</div>
-      {legenda_global}
-      <div class="cap-section-grid">
+    # === Container agrupado: Status Empréstimos, Fatura do Cartão e Boletos ===
+    secao_status_ags = dedent(f"""
+    <div class="cap-inner">
+    <div class="cap-h4 cap-cyan">Status Empréstimos, Fatura do Cartão e Boletos</div>
+    <div class="cap-section-grid">
         {secao_emprestimos}
         {secao_fatura}
         {secao_boletos}
-      </div>
-      {sub2_inner}
+    </div>
+    </div>
+    """).strip()
+
+    # === Painel principal com container + espaçador antes do Status Contas Fixas ===
+    painel_principal = dedent(f"""
+    <div class="cap-card cap-card-lg">
+    <div class="cap-title-xl cap-lime">Painel Contas a Pagar</div>
+    {legenda_global}
+    {secao_status_ags}
+    <div class="cap-spacer"></div>
+    {sub2_inner}
     </div>
     """).strip()
     st.markdown(painel_principal, unsafe_allow_html=True)
 
     st.divider()
+
+
+
 
 
     # ===== Seções grandes =====
