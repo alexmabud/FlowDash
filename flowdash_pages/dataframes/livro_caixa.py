@@ -238,7 +238,6 @@ def render(db_path_pref: Optional[str] = None) -> None:
         st.error(str(e))
         return
 
-
     if df.empty:
         st.info("Nenhuma movimentação encontrada.")
         return
@@ -335,12 +334,41 @@ def render(db_path_pref: Optional[str] = None) -> None:
     st.caption(filtro_msg)
     st.markdown(_legend_html(), unsafe_allow_html=True)
 
+    # ===== Altura para ~30 linhas antes do scroll =====
+    # Aproximação: 30 linhas * ~34px + cabeçalho/margens
+    _rows_target = 30
+    _row_px = 34
+    _header_px = 52
+    height_px = min(_rows_target, len(to_show)) * _row_px + _header_px
+
     # ======= Render com estilo por série (sem adicionar coluna) =======
     if ref_series is not None:
         def _apply_row_style(row: pd.Series):
             val = ref_series.iloc[row.name] if row.name < len(ref_series) else ""
             return _style_row_from_value(val, len(row.index))
         styled = to_show.style.apply(_apply_row_style, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+
+        # <<< Garantir quebra de linha na coluna 'observacao' >>>
+        if "observacao" in to_show.columns:
+            styled = styled.set_properties(
+                subset=["observacao"],
+                **{
+                    "white-space": "pre-wrap",
+                    "word-break": "break-word",
+                },
+            )
+
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=height_px)
     else:
-        st.dataframe(to_show, use_container_width=True, hide_index=True)
+        # Sem coloração por linha, ainda aplicamos a quebra de linha em 'observacao'
+        if "observacao" in to_show.columns:
+            styled = to_show.style.set_properties(
+                subset=["observacao"],
+                **{
+                    "white-space": "pre-wrap",
+                    "word-break": "break-word",
+                },
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True, height=height_px)
+        else:
+            st.dataframe(to_show, use_container_width=True, hide_index=True, height=height_px)
