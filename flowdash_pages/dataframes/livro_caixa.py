@@ -313,16 +313,18 @@ def render(db_path_pref: Optional[str] = None) -> None:
 
     # ======= Preparação dos campos =======
     df_work = df_filt.copy()
-    df_work["data_hora"] = df_work["_dt"].dt.strftime("%d/%m/%Y %H:%M")
 
-    valor_col = _infer_valor_col(df_work)
-    df_work["valor"] = df_work[valor_col].apply(_fmt_moeda) if valor_col else _fmt_moeda(0)
+    # >>> ORDEM CORRETA: ordenar por _dt (datetime), depois formatar a string de exibição
+    df_sorted = df_work.sort_values(by="_dt", ascending=False, ignore_index=True)
+
+    # Agora geramos a coluna exibida "data_hora"
+    df_sorted["data_hora"] = df_sorted["_dt"].dt.strftime("%d/%m/%Y %H:%M")
+
+    valor_col = _infer_valor_col(df_sorted)
+    df_sorted["valor"] = df_sorted[valor_col].apply(_fmt_moeda) if valor_col else _fmt_moeda(0)
 
     base_cols = ["data_hora", "valor", "observacao", "banco", "usuario"]
-    show_cols = [c for c in base_cols if c in df_work.columns]
-
-    # Ordena para exibição (mantém alinhamento para a série de referência)
-    df_sorted = df_work.sort_values(by="data_hora", ascending=False, ignore_index=True)
+    show_cols = [c for c in base_cols if c in df_sorted.columns]
 
     # Série de referência (para colorir as linhas) — nunca exibida
     ref_col = _infer_ref_col(df_sorted)
@@ -335,7 +337,6 @@ def render(db_path_pref: Optional[str] = None) -> None:
     st.markdown(_legend_html(), unsafe_allow_html=True)
 
     # ===== Altura para ~30 linhas antes do scroll =====
-    # Aproximação: 30 linhas * ~34px + cabeçalho/margens
     _rows_target = 30
     _row_px = 34
     _header_px = 52
@@ -348,7 +349,7 @@ def render(db_path_pref: Optional[str] = None) -> None:
             return _style_row_from_value(val, len(row.index))
         styled = to_show.style.apply(_apply_row_style, axis=1)
 
-        # <<< Garantir quebra de linha na coluna 'observacao' >>>
+        # Quebra de linha na coluna 'observacao'
         if "observacao" in to_show.columns:
             styled = styled.set_properties(
                 subset=["observacao"],
@@ -360,7 +361,6 @@ def render(db_path_pref: Optional[str] = None) -> None:
 
         st.dataframe(styled, use_container_width=True, hide_index=True, height=height_px)
     else:
-        # Sem coloração por linha, ainda aplicamos a quebra de linha em 'observacao'
         if "observacao" in to_show.columns:
             styled = to_show.style.set_properties(
                 subset=["observacao"],
