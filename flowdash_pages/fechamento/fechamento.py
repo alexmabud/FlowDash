@@ -476,7 +476,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
 
     # Total consolidado (até a data) – continua usando os valores do DIA (sem alteração de lógica)
-    saldo_total = float(caixa_total_dia + caixa2_total_dia + total_bancos)
+    saldo_total = float(disp_caixa + disp_caixa2 + total_bancos)
 
 
     # CSS para mini-tabela compacta
@@ -570,8 +570,8 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                     (
                         str(data_sel),
                         float(b1), float(b2), float(b3), float(b4),  # acumulados bancos
-                        float(caixa_total_dia),                      # caixa do dia (mantido)
-                        float(caixa2_total_dia),                     # caixa 2 do dia (mantido)
+                        float(disp_caixa),           # SALDO de Caixa até a data
+                        float(disp_caixa2),          # SALDO de Caixa 2 até a data
                         float(entradas_total_dia),                   # Dinheiro+Pix(Data) + Cartão D-1(Data_Liq)
                         float(saidas_total_dia),
                         float(corr_dia),
