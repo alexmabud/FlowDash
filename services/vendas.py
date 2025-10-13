@@ -9,7 +9,8 @@ em `movimentacoes_bancarias`.
 
 Regras de datas (alinhadas com o combinado):
 - `entrada.Data`        = **data_referencia** escolhida no lançamento (data da venda).
-- `entrada.created_at`  = **timestamp do salvamento** em America/Sao_Paulo (Brasília).
+- `entrada.created_at`  = **timestamp do salvamento** em Brasília, **sem timezone**
+                          (formato 'YYYY-MM-DD HH:MM:SS').
 - `entrada.Data_Liq`    = **data em que o dinheiro cai**:
     • Dinheiro / PIX  → **mesmo dia** da data_referencia.
     • Débito / Crédito / Link de Pagamento → **D+1 útil** (usa Workalendar BR; fallback seg–sex).
@@ -21,12 +22,12 @@ from typing import Optional, Tuple
 import re
 import sqlite3
 from datetime import datetime, date, timedelta
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from shared.db import get_conn
 from shared.ids import uid_venda_liquidacao, sanitize
+from utils.utils import agora_local_naive_str  # <-- salvar sem fuso
 
 __all__ = ["VendasService"]
 
@@ -295,10 +296,8 @@ class VendasService:
         if "Data_Liq" not in colnames:
             conn.execute('ALTER TABLE entrada ADD COLUMN "Data_Liq" TEXT;'); colnames.add("Data_Liq")
 
-        try:
-            created_at_value = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
-        except Exception:
-            created_at_value = datetime.now().isoformat(timespec="seconds")
+        # >>> grava 'YYYY-MM-DD HH:MM:SS' sem timezone (Brasília)
+        created_at_value = agora_local_naive_str()
 
         forma_upper = (forma or "").upper()
         parcelas = int(parcelas or 1)
@@ -438,7 +437,7 @@ class VendasService:
 
             valor_liquido = round(float(valor_bruto) * (1.0 - float(taxa_eff) / 100.0), 2)
 
-                        # Idempotência — único log por liquidação
+            # Idempotência — único log por liquidação
             trans_uid = uid_venda_liquidacao(
                 data_venda, data_liq, float(valor_bruto), forma_u, int(parcelas),
                 bandeira, maquineta, banco_destino, float(taxa_eff), usuario,
@@ -449,16 +448,12 @@ class VendasService:
             # =============================================================
 
             # 🔒 Evita colisão no índice UNIQUE quando a idempotência está desligada
-            try:
-                nonce = datetime.now(ZoneInfo("America/Sao_Paulo")).strftime("-%Y%m%d%H%M%S%f")
-            except Exception:
-                nonce = datetime.now().strftime("-%Y%m%d%H%M%S%f")
+            nonce = datetime.now().strftime("-%Y%m%d%H%M%S%f")
             trans_uid = f"{trans_uid}{nonce}"
-
 
             cur = conn.cursor()
 
-            # 1 INSERT em `entrada`
+            # 1) INSERT em `entrada`
             venda_id = self._insert_entrada(
                 conn,
                 data_venda=str(data_venda),
@@ -530,10 +525,8 @@ class VendasService:
                 "trans_uid": trans_uid,
             }
             if "data_hora" in cols_exist:
-                try:
-                    payload["data_hora"] = datetime.now(ZoneInfo("America/Sao_Paulo")).isoformat(timespec="seconds")
-                except Exception:
-                    payload["data_hora"] = datetime.now().isoformat(timespec="seconds")
+                # >>> grava 'YYYY-MM-DD HH:MM:SS' sem timezone (Brasília)
+                payload["data_hora"] = agora_local_naive_str()
             if "usuario" in cols_exist:
                 payload["usuario"] = usuario
 

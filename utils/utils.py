@@ -14,7 +14,7 @@ Inclui:
 Observações
 -----------
 - `formatar_moeda` / `formatar_percentual` aceitam int/float/str/Decimal.
-- `gerar_hash_senha` usa SHA‑256 (sem sal). Para produção, considere sal/pepper.
+- `gerar_hash_senha` usa SHA-256 (sem sal). Para produção, considere sal/pepper.
 """
 
 from __future__ import annotations
@@ -22,9 +22,45 @@ import hashlib
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# (NOVO) Datas/Tempo - helpers para salvar sem timezone
+# ---------------------------------------------------------------------
+try:
+    from zoneinfo import ZoneInfo  # Python 3.9+
+except Exception:  # pragma: no cover
+    ZoneInfo = None  # fallback se não houver zoneinfo (ambiente antigo)
+
+def agora_local_naive_str(fmt: str = "%Y-%m-%d %H:%M:%S", tz: str = "America/Sao_Paulo") -> str:
+    """
+    Retorna data/hora LOCAL como string **sem timezone** (naive).
+    Ex.: '2025-10-13 19:21:45'
+    Use esta função ao gravar em colunas como `created_at` / `data_hora`.
+    """
+    if ZoneInfo:
+        dt = datetime.now(ZoneInfo(tz)).replace(tzinfo=None)
+    else:
+        # Fallback: assume que o host já está no fuso correto
+        dt = datetime.now()
+    return dt.strftime(fmt)
+
+def strip_tz_to_local_naive(dt, fmt: str = "%Y-%m-%d %H:%M:%S", tz: str = "America/Sao_Paulo") -> str:
+    """
+    Converte um datetime (com ou sem tz) para o fuso LOCAL e remove o tz,
+    devolvendo string formatada (naive). Aceita pandas.Timestamp.
+    Útil para normalizar valores antes de persistir em texto no SQLite.
+    """
+    if hasattr(dt, "to_pydatetime"):
+        dt = dt.to_pydatetime()
+    if getattr(dt, "tzinfo", None) is not None and ZoneInfo:
+        dt = dt.astimezone(ZoneInfo(tz)).replace(tzinfo=None)
+    elif getattr(dt, "tzinfo", None) is not None:
+        # Sem ZoneInfo: apenas descarta tz (melhor do que gravar com sufixo)
+        dt = dt.replace(tzinfo=None)
+    return dt.strftime(fmt)
+
+# ---------------------------------------------------------------------
 # Segurança
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 def gerar_hash_senha(senha: str) -> str:
     """
     Gera hash SHA-256 de uma senha em texto claro.
@@ -44,9 +80,9 @@ def gerar_hash_senha(senha: str) -> str:
     return hashlib.sha256(senha.encode("utf-8")).hexdigest()
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Formatação
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 def _to_decimal(valor) -> Decimal:
     """Converte `valor` para Decimal, retornando 0 em caso de falha."""
     if isinstance(valor, Decimal):
@@ -113,9 +149,9 @@ formatar_preco = formatar_moeda
 formatar_porcentagem = formatar_percentual
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Infraestrutura / Banco
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 def garantir_trigger_totais_saldos_caixas(caminho_banco: str) -> None:
     """
     Garante (idempotente) a estrutura mínima e o registro inicial da tabela `saldos_caixas`.
