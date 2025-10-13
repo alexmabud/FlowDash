@@ -636,7 +636,7 @@ for title in ["📊 Dashboard", "📉 DRE", "🧾 Lançamentos", "💼 Fechament
 
 with st.sidebar.expander("📋 DataFrames", expanded=False):
     for title in [
-        "📥 Entradas", "📤 Saídas", "📦 Mercadorias",
+        "📘 Livro Caixa","📥 Entradas", "📤 Saídas", "📦 Mercadorias",
         "💳 Fatura Cartão de Crédito", "📄 Contas a Pagar", "🏦 Empréstimos/Financiamentos"
     ]:
         if st.button(title, use_container_width=True):
@@ -666,6 +666,7 @@ ROTAS = {
     "🧾 Lançamentos": "flowdash_pages.lancamentos.pagina.page_lancamentos",
     "💼 Fechamento de Caixa": "flowdash_pages.fechamento.fechamento",
     "🎯 Metas": "flowdash_pages.metas.metas",
+    "📘 Livro Caixa": "flowdash_pages.dataframes.livro_caixa",
     "📥 Entradas": "flowdash_pages.dataframes.dataframes",
     "📤 Saídas": "flowdash_pages.dataframes.dataframes",
     "📦 Mercadorias": "flowdash_pages.dataframes.dataframes",
@@ -690,6 +691,7 @@ PERMISSOES = {
     "🧾 Lançamentos": {"Administrador", "Gerente", "Vendedor"},
     "💼 Fechamento de Caixa": {"Administrador", "Gerente"},
     "🎯 Metas": {"Administrador", "Gerente"},
+    "📘 Livro Caixa": {"Administrador", "Gerente"},
     "📥 Entradas": {"Administrador", "Gerente"},
     "📤 Saídas": {"Administrador", "Gerente"},
     "📦 Mercadorias": {"Administrador", "Gerente"},
