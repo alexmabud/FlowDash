@@ -97,10 +97,12 @@ def _infer_ref_col(df: pd.DataFrame) -> Optional[str]:
 def _style_row_by_ref(row: pd.Series, ref_col: str) -> List[str]:
     """
     Estiliza a linha inteira baseado no valor de ref_col.
-    - 'entrada'                             -> verde suave
-    - 'saida'                               -> vermelho suave
+    - 'entrada'                              -> verde suave
+    - 'saida'                                -> vermelho suave
     - 'contas_a_pagar_mov' (ou contas_a_pagar) -> rosa suave
-    - 'saldos_bancos'/'saldos_caixa(s)'     -> laranja suave
+    - 'saldos_bancos'/'saldos_caixa(s)'      -> laranja suave
+    - 'movimentacoes_bancarias'/'transferencias'/'transferencia' -> azul suave
+    - 'correcao_caixa'                       -> roxo suave
     """
     val = str(row.get(ref_col, "")).strip().lower()
     base_style = [""] * len(row.index)
@@ -121,6 +123,16 @@ def _style_row_by_ref(row: pd.Series, ref_col: str) -> List[str]:
     if val in {"saldos_bancos", "saldos_bancarios", "saldos_bancários", "saldos_caixa", "saldos_caixas"}:
         # laranja
         style = "background-color: rgba(245,158,11,.18); color: #d97706; font-weight: 600;"
+        return [style] * len(base_style)
+
+    if val in {"movimentacoes_bancarias", "movimentações_bancárias", "transferencias", "transferências", "transferencia", "transferência"}:
+        # azul
+        style = "background-color: rgba(59,130,246,.18); color: #2563eb; font-weight: 600;"
+        return [style] * len(base_style)
+
+    if val == "correcao_caixa":
+        # roxo
+        style = "background-color: rgba(139,92,246,.18); color: #7c3aed; font-weight: 600;"
         return [style] * len(base_style)
 
     return base_style
@@ -156,7 +168,8 @@ def render(db_path_pref: Optional[str] = None) -> None:
         * Mês inclui “Todos os meses” para listar o ano inteiro.
         * Dia visível sempre; só filtra se "Filtrar pelo dia escolhido" estiver marcado.
     - Estilo: linha VERDE para 'entrada', VERMELHA para 'saida',
-              ROSA para 'contas_a_pagar_mov' e LARANJA para 'saldos_bancos/caixa'.
+              ROSA para 'contas_a_pagar_mov', LARANJA para 'saldos_bancos/caixa',
+              AZUL para 'movimentacoes_bancarias/transferencias' e ROXO para 'correcao_caixa'.
     - Colunas exibidas: data_hora, valor (R$), observacao, banco, usuario.
     """
     st.title("📘 Livro Caixa")
@@ -314,7 +327,8 @@ def render(db_path_pref: Optional[str] = None) -> None:
         st.dataframe(styled, use_container_width=True, hide_index=True)
         st.caption(
             "Legendas: **verde = entrada**, **vermelho = saída**, "
-            "**rosa = contas_a_pagar_mov**, **laranja = saldos_bancos/caixa**."
+            "**rosa = contas_a_pagar_mov**, **laranja = saldos_bancos/caixa**, "
+            "**azul = movimentacoes_bancarias/transferencias**, **roxo = correcao_caixa**."
         )
     else:
         st.dataframe(to_show, use_container_width=True, hide_index=True)
