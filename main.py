@@ -648,7 +648,7 @@ if perfil == "Administrador":
         for title in [
             "👥 Usuários", "🎯 Cadastro de Metas", "⚙️ Taxas Maquinetas", "📇 Cartão de Crédito", "💵 Caixa",
             "🛠️ Correção de Caixa", "🏦 Saldos Bancários", "🏛️ Cadastro de Empréstimos",
-            "🏦 Cadastro de Bancos", "📂 Cadastro de Saídas"
+            "🏦 Cadastro de Bancos", "📂 Cadastro de Saídas","🧮 Variáveis do DRE"
         ]:
             if st.button(title, use_container_width=True):
                 st.session_state.pagina_atual = title
@@ -683,6 +683,7 @@ ROTAS = {
     "🏛️ Cadastro de Empréstimos": "flowdash_pages.cadastros.pagina_emprestimos",
     "🏦 Cadastro de Bancos": "flowdash_pages.cadastros.pagina_bancos_cadastrados",
     "📂 Cadastro de Saídas": "flowdash_pages.cadastros.cadastro_categorias",
+    "🧮 Variáveis do DRE": "flowdash_pages.cadastros.variaveis_dre"
 }
 
 PERMISSOES = {
@@ -708,6 +709,7 @@ PERMISSOES = {
     "🏛️ Cadastro de Empréstimos": {"Administrador"},
     "🏦 Cadastro de Bancos": {"Administrador"},
     "📂 Cadastro de Saídas": {"Administrador"},
+    "🧮 Variáveis do DRE": {"Administrador"}
 }
 
 pagina = st.session_state.get("pagina_atual", "📊 Dashboard")
