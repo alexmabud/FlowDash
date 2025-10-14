@@ -47,50 +47,15 @@ CREATE TABLE IF NOT EXISTS dre_variaveis (
 );
 """
 
-# Seeds oficiais (4 variáveis manuais)
-_SEED: List[Tuple[str, str, Optional[float], Optional[str], str]] = [
-    ("aliquota_simples_nacional", "num", 4.32, None, "Alíquota Simples Nacional (%)"),
-    ("markup_medio",              "num", 2.40, None, "Markup médio (coeficiente)"),
-    ("sacolas_percent",           "num", 1.20, None, "Custo de sacolas sobre faturamento (%)"),
-    ("fundo_promocao_percent",    "num", 1.00, None, "Fundo de promoção (%)"),
-]
-
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
 
-def _bootstrap(conn: sqlite3.Connection) -> None:
-    """Cria a tabela e garante as 4 chaves (sem limpar extras)."""
+def _ensure_table(conn: sqlite3.Connection) -> None:
+    """Somente garante a existência da tabela (DDL). Não insere seeds."""
     conn.execute(_SQL_CREATE)
-    for chave, tipo, vnum, vtxt, desc in _SEED:
-        if tipo == "num":
-            conn.execute(
-                """
-                INSERT INTO dre_variaveis (chave, tipo, valor_num, descricao)
-                VALUES (?,?,?,?)
-                ON CONFLICT(chave) DO UPDATE SET
-                    tipo=excluded.tipo,
-                    valor_num=excluded.valor_num,
-                    descricao=excluded.descricao,
-                    updated_at=datetime('now')
-                """,
-                (chave, tipo, float(vnum or 0.0), desc),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO dre_variaveis (chave, tipo, valor_text, descricao)
-                VALUES (?,?,?,?)
-                ON CONFLICT(chave) DO UPDATE SET
-                    tipo=excluded.tipo,
-                    valor_text=excluded.valor_text,
-                    descricao=excluded.descricao,
-                    updated_at=datetime('now')
-                """,
-                (chave, tipo, (vtxt or ""), desc),
-            )
     conn.commit()
 
 def _list(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -149,65 +114,12 @@ def _delete(conn: sqlite3.Connection, var_id: int):
     conn.execute("DELETE FROM dre_variaveis WHERE id = ?", (var_id,))
     conn.commit()
 
-# ============== Garantia de schema no boot (p/ usar via main.py) ==============
-def ensure_schema_dre_variaveis(db_path_pref: Optional[str] = None, prune_others: bool = False) -> None:
-    """
-    Garante a existência da tabela 'dre_variaveis' e das 4 chaves oficiais.
-    Pode ser chamada no boot do app (main.py), funciona em qualquer banco.
-    Se prune_others=True, remove chaves antigas que não estão no seed.
-    """
-    db_path = _ensure_db_path_or_raise(db_path_pref)
-    conn = _connect(db_path)
-    try:
-        conn.execute(_SQL_CREATE)
-        if prune_others:
-            conn.execute("""
-                DELETE FROM dre_variaveis
-                 WHERE chave NOT IN (
-                   'aliquota_simples_nacional',
-                   'markup_medio',
-                   'sacolas_percent',
-                   'fundo_promocao_percent'
-                 );
-            """)
-        # UPSERT das 4 oficiais
-        for chave, tipo, vnum, vtxt, desc in _SEED:
-            if tipo == "num":
-                conn.execute(
-                    """
-                    INSERT INTO dre_variaveis (chave, tipo, valor_num, descricao)
-                    VALUES (?,?,?,?)
-                    ON CONFLICT(chave) DO UPDATE SET
-                        tipo=excluded.tipo,
-                        valor_num=excluded.valor_num,
-                        descricao=excluded.descricao,
-                        updated_at=datetime('now')
-                    """,
-                    (chave, tipo, float(vnum or 0.0), desc),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO dre_variaveis (chave, tipo, valor_text, descricao)
-                    VALUES (?,?,?,?)
-                    ON CONFLICT(chave) DO UPDATE SET
-                        tipo=excluded.tipo,
-                        valor_text=excluded.valor_text,
-                        descricao=excluded.descricao,
-                        updated_at=datetime('now')
-                    """,
-                    (chave, tipo, (vtxt or ""), desc),
-                )
-        conn.commit()
-    finally:
-        conn.close()
-
 # ============== UI ==============
 def render(db_path_pref: Optional[str] = None):
     """Cadastros » Variáveis do DRE (4 parâmetros manuais)."""
     db_path = _ensure_db_path_or_raise(db_path_pref)
     conn = _connect(db_path)
-    _bootstrap(conn)
+    _ensure_table(conn)  # apenas cria a tabela se não existir (sem seeds)
 
     st.markdown("### 🧮 Cadastros › Variáveis do DRE")
 
@@ -255,7 +167,7 @@ def render(db_path_pref: Optional[str] = None):
 
     df = _list(conn)
     if not df.empty:
-        # Tabela amigável (agora com ID)
+        # Tabela amigável (com ID)
         def _fmt(row):
             if row["tipo"] == "num" and row["valor_num"] is not None:
                 return f"{row['valor_num']:.4f}".rstrip("0").rstrip(".")
@@ -269,7 +181,6 @@ def render(db_path_pref: Optional[str] = None):
 
     with st.expander("Excluir variável (cuidado)"):
         if not df.empty:
-            # opções rotuladas "ID — chave"
             options = [(int(r["id"]), f"ID {int(r['id'])} — {r['chave']}") for _, r in df.iterrows()]
             selected = st.selectbox(
                 "Selecione para excluir",
