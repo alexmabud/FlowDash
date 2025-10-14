@@ -226,15 +226,24 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 @st.cache_data(show_spinner=False)
 def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
     """
-    Soma Marketing via fatura_cartao_itens:
-    - filtra por data_compra (ou data/dt_compra se existir)
-    - filtra categoria contendo 'Despesas / Marketing' (robusto a espaços) ou contendo 'Marketing'
-    - soma COALESCE dos campos de valor existentes
-    Retorna 0 se a tabela/colunas não existirem.
+    Soma Marketing via fatura_cartao_itens, usando APENAS colunas reais do banco:
+      - data_compra (filtro de período)
+      - categoria  (igual a 'Despesas / Marketing')
+      - valor_parcela (soma)
     """
-    cols = _table_cols(db_path, "fatura_cartao_itens")
-    if not cols:
+    sql = """
+    SELECT SUM(COALESCE(valor_parcela, 0))
+    FROM fatura_cartao_itens
+    WHERE date(data_compra) BETWEEN ? AND ?
+      AND categoria = 'Despesas / Marketing';
+    """
+    try:
+        with _conn(db_path) as c:
+            row = c.execute(sql, (ini, fim)).fetchone()
+            return _safe(row[0])
+    except Exception:
         return 0.0
+
 
     # Descobrir nomes de colunas existentes
     date_col = _find_col(cols, ["data_compra", "Data_Compra", "data", "dt_compra", "Data_Transacao"])
