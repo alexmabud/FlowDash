@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from calendar import monthrange
 from dataclasses import dataclass
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Iterable, Optional
 
 import pandas as pd
 import streamlit as st
@@ -49,6 +49,27 @@ class VarsDRE:
     markup: float = 0.0     # coef
     sacolas: float = 0.0    # %
     fundo: float = 0.0      # %
+
+
+# ============================== Schema helpers ==============================
+
+@st.cache_data(show_spinner=False)
+def _table_cols(db_path: str, table: str) -> List[str]:
+    """Lista as colunas (minúsculas) de uma tabela; retorna [] se não existir."""
+    try:
+        with _conn(db_path) as c:
+            rows = c.execute(f"PRAGMA table_info('{table}')").fetchall()
+            return [str(r[1]).lower() for r in rows]
+    except Exception:
+        return []
+
+def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[str]:
+    """Retorna o primeiro nome de coluna realmente existente (respeita caixa original se estiver em candidates)."""
+    lowset = {c.lower() for c in cols_lower}
+    for cand in candidates:
+        if cand.lower() in lowset:
+            return cand
+    return None
 
 
 # ============================== Queries (cache) ==============================
@@ -164,7 +185,6 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
     try:
         total = _sum_with_sub("Sub_Categoria")
         if total == 0.0 and subcat:
-            # 1b) Fallback: só por subcategoria
             only = _sum_only_sub("Sub_Categoria")
             if only > 0.0:
                 return only
@@ -203,16 +223,73 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
     except Exception:
         return 0.0
 
+@st.cache_data(show_spinner=False)
+def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
+    """
+    Soma Marketing via fatura_cartao_itens:
+    - filtra por data_compra (ou data/dt_compra se existir)
+    - filtra categoria contendo 'Despesas / Marketing' (robusto a espaços) ou contendo 'Marketing'
+    - soma COALESCE dos campos de valor existentes
+    Retorna 0 se a tabela/colunas não existirem.
+    """
+    cols = _table_cols(db_path, "fatura_cartao_itens")
+    if not cols:
+        return 0.0
+
+    # Descobrir nomes de colunas existentes
+    date_col = _find_col(cols, ["data_compra", "Data_Compra", "data", "dt_compra", "Data_Transacao"])
+    cat_col  = _find_col(cols, ["categoria", "Categoria"])
+    val_candidates = [c for c in ["valor", "valor_total", "valor_parcela", "valor_compra", "valor_item"] if c.lower() in cols]
+    if not date_col or not cat_col or not val_candidates:
+        return 0.0
+
+    # COALESCE dinâmico com as colunas de valor disponíveis
+    coalesce_vals = "COALESCE(" + ", ".join(val_candidates + ["0"]) + ")"
+
+    # Normalização de 'Despesas / Marketing' removendo espaços
+    # Usa match exato normalizado ou LIKE Marketing
+    sql = f"""
+    SELECT SUM({coalesce_vals})
+    FROM fatura_cartao_itens
+    WHERE date({date_col}) BETWEEN ? AND ?
+      AND (
+            UPPER(REPLACE({cat_col}, ' ', '')) = 'DESPESAS/MARKETING'
+         OR UPPER({cat_col}) LIKE '%MARKETING%'
+      );
+    """
+    try:
+        with _conn(db_path) as c:
+            row = c.execute(sql, (ini, fim)).fetchone()
+            return _safe(row[0])
+    except Exception:
+        return 0.0
+
 
 # ============================== Anos disponíveis ==============================
 
 @st.cache_data(show_spinner=False)
 def _listar_anos(db_path: str) -> List[int]:
     """
-    Lista anos presentes em entrada.Data, mercadorias.Data, saida.Data e contas_a_pagar_mov.competencia.
-    Retorna ordenado ASC. Usa substr para ser tolerante a TEXT.
+    Lista anos presentes em entrada.Data, mercadorias.Data, saida.Data,
+    contas_a_pagar_mov.competencia e (se existir) fatura_cartao_itens.data_compra.
+    Tenta consulta completa; se falhar por falta de tabela/coluna, usa fallback sem o trecho problemático.
     """
-    sql = """
+    sql_all = """
+    SELECT ano FROM (
+        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada       WHERE length(COALESCE(Data,'')) >= 4
+        UNION
+        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM mercadorias   WHERE length(COALESCE(Data,'')) >= 4
+        UNION
+        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida         WHERE length(COALESCE(Data,'')) >= 4
+        UNION
+        SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov WHERE length(COALESCE(competencia,'')) >= 4
+        UNION
+        SELECT CAST(substr(data_compra,1,4) AS INT) AS ano FROM fatura_cartao_itens WHERE length(COALESCE(data_compra,'')) >= 4
+    )
+    WHERE ano IS NOT NULL
+    ORDER BY ano;
+    """
+    sql_fallback = """
     SELECT ano FROM (
         SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada       WHERE length(COALESCE(Data,'')) >= 4
         UNION
@@ -228,14 +305,24 @@ def _listar_anos(db_path: str) -> List[int]:
     anos: List[int] = []
     try:
         with _conn(db_path) as c:
-            rows = c.execute(sql).fetchall()
+            rows = c.execute(sql_all).fetchall()
             for r in rows:
                 try:
                     anos.append(int(r[0]))
                 except Exception:
                     pass
     except Exception:
-        pass
+        try:
+            with _conn(db_path) as c:
+                rows = c.execute(sql_fallback).fetchall()
+                for r in rows:
+                    try:
+                        anos.append(int(r[0]))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     if not anos:
         anos = [pd.Timestamp.today().year]
     return sorted(set(anos))
@@ -250,25 +337,29 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> Dict[str, 
     fat, taxa_maq_rs = _query_entradas(db_path, ini, fim)
     fretes_rs = _query_fretes(db_path, ini, fim)
     fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
-    # Marketing e Manutenção/Limpeza: tenta Categoria=Despesas+Sub; se não achar, soma só pela Sub
-    mkt_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Marketing")
+
+    # Marketing: soma de SAÍDA + Itens de Fatura de Cartão
+    mkt_saida_rs  = _query_saidas_total(db_path, ini, fim, "Despesas", "Marketing")
+    mkt_cartao_rs = _query_mkt_cartao(db_path, ini, fim)
+    mkt_rs = mkt_saida_rs + mkt_cartao_rs
+
     limp_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Manutenção/Limpeza")
-    emp_rs = _query_cap_emprestimos(db_path, comp)
+    emp_rs  = _query_cap_emprestimos(db_path, comp)
 
     simples_rs = fat * (vars_dre.simples / 100.0)
-    fundo_rs = fat * (vars_dre.fundo / 100.0)
+    fundo_rs   = fat * (vars_dre.fundo   / 100.0)
     sacolas_rs = fat * (vars_dre.sacolas / 100.0)
-    cmv_rs = (fat / vars_dre.markup) if vars_dre.markup > 0 else 0.0
+    cmv_rs     = (fat / vars_dre.markup) if vars_dre.markup > 0 else 0.0
 
-    saida_imp_maq = simples_rs + taxa_maq_rs
-    receita_liq = fat - saida_imp_maq
+    saida_imp_maq   = simples_rs + taxa_maq_rs
+    receita_liq     = fat - saida_imp_maq
 
     total_grupo_cmv = cmv_rs + fretes_rs + sacolas_rs + fundo_rs
-    margem_contrib = receita_liq - total_grupo_cmv
+    margem_contrib  = receita_liq - total_grupo_cmv
 
     total_cf_emprestimos = fixas_rs + emp_rs
-    total_saida_oper = fixas_rs + emp_rs + mkt_rs + limp_rs
-    ebitda = margem_contrib - total_saida_oper
+    total_saida_oper     = fixas_rs + emp_rs + mkt_rs + limp_rs
+    ebitda               = margem_contrib - total_saida_oper
 
     return {
         "fat": fat,
@@ -388,13 +479,13 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
                 "Simples Nacional": m["simples"],
                 "Taxa Maquineta": m["taxa_maq"],
                 "Saída Imposto e Maquininha": m["saida_imp_maq"],
-                "Receita Líquida": m["receita_liq"],
+                "Receita Líquida": m["receita_liq"] if m["receita_liq"] is not None else None,
 
                 "CMV (Mercadorias)": m["cmv"],
                 "Fretes": m["fretes"],
                 "Sacolas": m["sacolas"],
                 "Fundo de Promoção": m["fundo"],
-                "Margem de Contribuição": m["margem_contrib"],
+                "Margem de Contribuição": m["margem_contrib"] if m["margem_contrib"] is not None else None,
 
                 "Custo Fixo Mensal": m["fixas"],
                 "Empréstimos/Financiamentos": m["emp"],
