@@ -121,42 +121,78 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
     Soma Valor de `saida` por filtros.
     - categoria: compara case-insensitive
     - subcat: se informado, compara case-insensitive
+    Implementa fallback p/ diferenças de schema:
+      - Sub_Categoria (preferido) ou Sub_Categorias_saida (legado)
+      - se não achar nada com Categoria + Sub, tenta só Sub_Categoria
     """
-    if subcat:
-        sql = """
-        SELECT SUM(COALESCE(Valor,0))
-        FROM saida
-        WHERE UPPER(Categoria)=UPPER(?)
-          AND UPPER(COALESCE(Sub_Categorias_saida,''))=UPPER(?)
-          AND date(Data) BETWEEN ? AND ?;
-        """
-        args = (categoria, subcat, ini, fim)
-    else:
-        sql = """
-        SELECT SUM(COALESCE(Valor,0))
-        FROM saida
-        WHERE UPPER(Categoria)=UPPER(?)
-          AND date(Data) BETWEEN ? AND ?;
-        """
-        args = (categoria, ini, fim)
-
-    try:
+    def _sum_with_sub(subcol: str) -> float:
+        if subcat:
+            sql = f"""
+            SELECT SUM(COALESCE(Valor,0))
+            FROM saida
+            WHERE UPPER(Categoria)=UPPER(?)
+              AND UPPER(COALESCE({subcol},''))=UPPER(?)
+              AND date(Data) BETWEEN ? AND ?;
+            """
+            args = (categoria, subcat, ini, fim)
+        else:
+            sql = """
+            SELECT SUM(COALESCE(Valor,0))
+            FROM saida
+            WHERE UPPER(Categoria)=UPPER(?)
+              AND date(Data) BETWEEN ? AND ?;
+            """
+            args = (categoria, ini, fim)
         with _conn(db_path) as c:
             row = c.execute(sql, args).fetchone()
             return _safe(row[0])
+
+    def _sum_only_sub(subcol: str) -> float:
+        if not subcat:
+            return 0.0
+        sql = f"""
+        SELECT SUM(COALESCE(Valor,0))
+        FROM saida
+        WHERE UPPER(COALESCE({subcol},''))=UPPER(?)
+          AND date(Data) BETWEEN ? AND ?;
+        """
+        with _conn(db_path) as c:
+            row = c.execute(sql, (subcat, ini, fim)).fetchone()
+            return _safe(row[0])
+
+    # 1) Tenta com Sub_Categoria
+    try:
+        total = _sum_with_sub("Sub_Categoria")
+        if total == 0.0 and subcat:
+            # 1b) Fallback: só por subcategoria
+            only = _sum_only_sub("Sub_Categoria")
+            if only > 0.0:
+                return only
+        return total
+    except Exception:
+        pass
+
+    # 2) Fallback: schema legado Sub_Categorias_saida
+    try:
+        total = _sum_with_sub("Sub_Categorias_saida")
+        if total == 0.0 and subcat:
+            only = _sum_only_sub("Sub_Categorias_saida")
+            if only > 0.0:
+                return only
+        return total
     except Exception:
         return 0.0
 
 @st.cache_data(show_spinner=False)
 def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
     """
-    Soma valor_pago_acumulado na CAP:
+    Soma valor_pago_acumulado em contas_a_pagar_mov:
     - tipo_obrigacao='EMPRESTIMO'
     - competencia='YYYY-MM'
     """
     sql = """
     SELECT SUM(COALESCE(valor_pago_acumulado,0))
-    FROM cap
+    FROM contas_a_pagar_mov
     WHERE tipo_obrigacao = 'EMPRESTIMO'
       AND competencia = ?;
     """
@@ -173,7 +209,7 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 @st.cache_data(show_spinner=False)
 def _listar_anos(db_path: str) -> List[int]:
     """
-    Lista anos presentes em entrada.Data, mercadorias.Data, saida.Data e cap.competencia.
+    Lista anos presentes em entrada.Data, mercadorias.Data, saida.Data e contas_a_pagar_mov.competencia.
     Retorna ordenado ASC. Usa substr para ser tolerante a TEXT.
     """
     sql = """
@@ -184,7 +220,7 @@ def _listar_anos(db_path: str) -> List[int]:
         UNION
         SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida         WHERE length(COALESCE(Data,'')) >= 4
         UNION
-        SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM cap    WHERE length(COALESCE(competencia,'')) >= 4
+        SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov WHERE length(COALESCE(competencia,'')) >= 4
     )
     WHERE ano IS NOT NULL
     ORDER BY ano;
@@ -214,6 +250,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> Dict[str, 
     fat, taxa_maq_rs = _query_entradas(db_path, ini, fim)
     fretes_rs = _query_fretes(db_path, ini, fim)
     fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
+    # Marketing e Manutenção/Limpeza: tenta Categoria=Despesas+Sub; se não achar, soma só pela Sub
     mkt_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Marketing")
     limp_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Manutenção/Limpeza")
     emp_rs = _query_cap_emprestimos(db_path, comp)
@@ -373,7 +410,6 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             if fat > 0:
                 for r in rows:
                     v = vals.get(r, 0.0)
-                    # % simples: v / FAT * 100 (preserva sinal de resultados se negativo)
                     if isinstance(v, (int, float)):
                         df.loc[r, (meses[i], "Análise Vertical")] = (v / fat * 100.0)
                     else:
