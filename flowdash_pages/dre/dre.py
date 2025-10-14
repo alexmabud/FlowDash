@@ -345,25 +345,26 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
                 if r != "Faturamento":
                     df.loc[r, (meses[i], "Análise Vertical")] = None
         else:
+            # Tudo positivo (sem inverter sinal)
             vals = {
                 "Faturamento": m["fat"],
-                "Simples Nacional": -m["simples"],
-                "Taxa Maquineta": -m["taxa_maq"],
-                "Saída Imposto e Maquininha": -m["saida_imp_maq"],
+                "Simples Nacional": m["simples"],
+                "Taxa Maquineta": m["taxa_maq"],
+                "Saída Imposto e Maquininha": m["saida_imp_maq"],
                 "Receita Líquida": m["receita_liq"],
 
-                "CMV (Mercadorias)": -m["cmv"],
-                "Fretes": -m["fretes"],
-                "Sacolas": -m["sacolas"],
-                "Fundo de Promoção": -m["fundo"],
+                "CMV (Mercadorias)": m["cmv"],
+                "Fretes": m["fretes"],
+                "Sacolas": m["sacolas"],
+                "Fundo de Promoção": m["fundo"],
                 "Margem de Contribuição": m["margem_contrib"],
 
-                "Custo Fixo Mensal": -m["fixas"],
-                "Empréstimos/Financiamentos": -m["emp"],
-                "Marketing": -m["mkt"],
-                "Manutenção/Limpeza": -m["limp"],
-                "Total CF + Empréstimos": -m["total_cf_emp"],
-                "Total de Saída": -m["total_saida_oper"],
+                "Custo Fixo Mensal": m["fixas"],
+                "Empréstimos/Financiamentos": m["emp"],
+                "Marketing": m["mkt"],
+                "Manutenção/Limpeza": m["limp"],
+                "Total CF + Empréstimos": m["total_cf_emp"],
+                "Total de Saída": m["total_saida_oper"],
                 "EBITDA Lucro/Prejuízo": m["ebitda"],
             }
             for r in rows:
@@ -372,8 +373,11 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             if fat > 0:
                 for r in rows:
                     v = vals.get(r, 0.0)
-                    pct = (abs(v) / fat * 100.0) if (isinstance(v, (int, float)) and v < 0) else ((v / fat * 100.0) if isinstance(v, (int, float)) else None)
-                    df.loc[r, (meses[i], "Análise Vertical")] = pct
+                    # % simples: v / FAT * 100 (preserva sinal de resultados se negativo)
+                    if isinstance(v, (int, float)):
+                        df.loc[r, (meses[i], "Análise Vertical")] = (v / fat * 100.0)
+                    else:
+                        df.loc[r, (meses[i], "Análise Vertical")] = None
             else:
                 df.loc[:, (meses[i], "Análise Vertical")] = 0.0
 
