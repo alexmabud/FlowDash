@@ -12,7 +12,6 @@ import streamlit as st
 
 
 # ============================== Config de início do DRE ==============================
-# Meses ANTES de START_YEAR/START_MONTH mostram apenas Faturamento
 START_YEAR = 2025
 START_MONTH = 10  # Outubro
 
@@ -26,7 +25,6 @@ def _conn(db_path: str) -> sqlite3.Connection:
     return conn
 
 def _periodo_ym(ano: int, mes: int) -> Tuple[str, str, str]:
-    """Retorna (inicio_iso, fim_iso, competencia 'YYYY-MM')."""
     last = monthrange(ano, mes)[1]
     ini = f"{ano:04d}-{mes:02d}-01"
     fim = f"{ano:04d}-{mes:02d}-{last:02d}"
@@ -55,7 +53,6 @@ class VarsDRE:
 
 @st.cache_data(show_spinner=False)
 def _table_cols(db_path: str, table: str) -> List[str]:
-    """Lista as colunas (minúsculas) de uma tabela; retorna [] se não existir."""
     try:
         with _conn(db_path) as c:
             rows = c.execute(f"PRAGMA table_info('{table}')").fetchall()
@@ -64,7 +61,6 @@ def _table_cols(db_path: str, table: str) -> List[str]:
         return []
 
 def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[str]:
-    """Retorna o primeiro nome de coluna realmente existente (respeita caixa original se estiver em candidates)."""
     lowset = {c.lower() for c in cols_lower}
     for cand in candidates:
         if cand.lower() in lowset:
@@ -102,11 +98,6 @@ def _load_vars(db_path: str) -> VarsDRE:
 
 @st.cache_data(show_spinner=False)
 def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float]:
-    """
-    Retorna (faturamento_bruto, taxa_maquineta_rs)
-    - Faturamento = SUM(Valor)
-    - Taxa Maquineta (R$) = SUM(Valor - COALESCE(valor_liquido,0))
-    """
     sql = """
     SELECT
       SUM(COALESCE(Valor,0)) AS fat,
@@ -138,14 +129,6 @@ def _query_fretes(db_path: str, ini: str, fim: str) -> float:
 @st.cache_data(show_spinner=False)
 def _query_saidas_total(db_path: str, ini: str, fim: str,
                         categoria: str, subcat: str | None = None) -> float:
-    """
-    Soma Valor de `saida` por filtros.
-    - categoria: compara case-insensitive
-    - subcat: se informado, compara case-insensitive
-    Implementa fallback p/ diferenças de schema:
-      - Sub_Categoria (preferido) ou Sub_Categorias_saida (legado)
-      - se não achar nada com Categoria + Sub, tenta só Sub_Categoria
-    """
     def _sum_with_sub(subcol: str) -> float:
         if subcat:
             sql = f"""
@@ -181,7 +164,6 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
             row = c.execute(sql, (subcat, ini, fim)).fetchone()
             return _safe(row[0])
 
-    # 1) Tenta com Sub_Categoria
     try:
         total = _sum_with_sub("Sub_Categoria")
         if total == 0.0 and subcat:
@@ -192,7 +174,6 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
     except Exception:
         pass
 
-    # 2) Fallback: schema legado Sub_Categorias_saida
     try:
         total = _sum_with_sub("Sub_Categorias_saida")
         if total == 0.0 and subcat:
@@ -205,11 +186,6 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
 
 @st.cache_data(show_spinner=False)
 def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
-    """
-    Soma valor_pago_acumulado em contas_a_pagar_mov:
-    - tipo_obrigacao='EMPRESTIMO'
-    - competencia='YYYY-MM'
-    """
     sql = """
     SELECT SUM(COALESCE(valor_pago_acumulado,0))
     FROM contas_a_pagar_mov
@@ -225,12 +201,6 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 
 @st.cache_data(show_spinner=False)
 def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
-    """
-    Soma Marketing via fatura_cartao_itens, usando APENAS colunas reais do banco:
-      - data_compra (filtro de período)
-      - categoria  (igual a 'Despesas / Marketing')
-      - valor_parcela (soma)
-    """
     sql = """
     SELECT SUM(COALESCE(valor_parcela, 0))
     FROM fatura_cartao_itens
@@ -249,11 +219,6 @@ def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
 
 @st.cache_data(show_spinner=False)
 def _listar_anos(db_path: str) -> List[int]:
-    """
-    Lista anos presentes em entrada.Data, mercadorias.Data, saida.Data,
-    contas_a_pagar_mov.competencia e (se existir) fatura_cartao_itens.data_compra.
-    Tenta consulta completa; se falhar por falta de tabela/coluna, usa fallback sem o trecho problemático.
-    """
     sql_all = """
     SELECT ano FROM (
         SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada       WHERE length(COALESCE(Data,'')) >= 4
@@ -364,7 +329,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> Dict[str, 
 # ============================== UI / Página ==============================
 
 def render_dre(caminho_banco: str):
-    """Página DRE — visão anual em uma tabela (pré-out/2025: apenas Faturamento)."""
     st.subheader("📉 DRE — Visão Anual (12 meses)")
 
     anos = _listar_anos(caminho_banco)
@@ -390,7 +354,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Faturamento",
         "Simples Nacional",
         "Taxa Maquineta",
-        "Saída Imposto e Maquininha",
+        "Imposto + Taxa Maquineta",
         "Receita Líquida",
         "CMV (Mercadorias)",
         "Fretes",
@@ -427,7 +391,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         else:
             vals = {
                 "Faturamento": m["fat"], "Simples Nacional": m["simples"], "Taxa Maquineta": m["taxa_maq"],
-                "Saída Imposto e Maquininha": m["saida_imp_maq"],
+                "Imposto + Taxa Maquineta": m["saida_imp_maq"],
                 "Receita Líquida": m["receita_liq"] if m["receita_liq"] is not None else None,
                 "CMV (Mercadorias)": m["cmv"], "Fretes": m["fretes"], "Sacolas": m["sacolas"],
                 "Fundo de Promoção": m["fundo"],
@@ -471,23 +435,44 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     _KEY_ROWS = [
         "Faturamento",
         "Receita Líquida",
-        "Saída Imposto e Maquininha",
+        "Imposto + Taxa Maquineta",
         "Margem de Contribuição",
         "Total CF + Empréstimos",
         "Total de Saída",
         "EBITDA Lucro/Prejuízo",
     ]
 
+    # ---- Negrito + fontes maiores (linhas-chave) ----
     styler = df_show.style.set_properties(
         **{"font-weight": "bold", "font-size": "1.16em"},
         subset=pd.IndexSlice[_KEY_ROWS, :]
     )
 
-    # Altura: mostrar +1 linha extra para eliminar qualquer scroll vertical
-    rows_to_show = len(rows)      # 17
-    row_px = 32                   # altura estimada por linha
-    header_px = 96                # cabeçalho (MultiIndex)
-    height_px = header_px + (rows_to_show + 1) * row_px  # <<< +1 linha
+    # ---- Cores específicas nas linhas ----
+    styler = styler.set_properties(
+        **{"background-color": "#1f6f3f"},
+        subset=pd.IndexSlice[["Faturamento"], :]
+    )
+    styler = styler.set_properties(
+        **{"background-color": "rgba(46, 204, 113, 0.30)"},
+        subset=pd.IndexSlice[["Receita Líquida"], :]
+    )
+    styler = styler.set_properties(
+        **{"background-color": "rgba(231, 76, 60, 0.18)"},
+        subset=pd.IndexSlice[["Simples Nacional", "Taxa Maquineta"], :]
+    )
+    # >>> vermelho mais vivo para "Imposto + Taxa Maquineta"
+    styler = styler.set_properties(
+        # vermelho vivo (quase sólido). Se preferir com transparência: rgba(255, 77, 79, 0.70)
+        **{"background-color": "#ff4d4f"},
+        subset=pd.IndexSlice[["Imposto + Taxa Maquineta"], :]
+    )
+
+    # Altura: +1 linha para não ter scroll vertical
+    rows_to_show = len(rows)
+    row_px = 32
+    header_px = 96
+    height_px = header_px + (rows_to_show + 1) * row_px
 
     st.dataframe(styler, use_container_width=True, height=height_px)
 
