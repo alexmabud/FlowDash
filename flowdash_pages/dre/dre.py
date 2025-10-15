@@ -329,13 +329,18 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> Dict[str, 
 # ============================== UI / Página ==============================
 
 def render_dre(caminho_banco: str):
-    st.subheader("📉 DRE — Visão Anual (12 meses)")
 
     anos = _listar_anos(caminho_banco)
-    ano = st.selectbox("Ano", options=anos, index=len(anos) - 1)
+    ano_atual = int(pd.Timestamp.today().year)
 
-    if int(ano) == START_YEAR:
-        st.caption("🔖 **YTD desde out/2025** — meses anteriores exibem apenas *Faturamento*.")
+    # garante que o ano atual esteja nas opções; se não existir nos dados, adiciona-o
+    if ano_atual not in anos:
+        anos = sorted(set(anos + [ano_atual]))
+
+    idx_default = anos.index(ano_atual) if ano_atual in anos else len(anos) - 1
+    ano = st.selectbox("Ano", options=anos, index=idx_default)
+
+    # (Aviso YTD removido a pedido)
 
     vars_dre = _load_vars(caminho_banco)
     if vars_dre.markup <= 0:
@@ -354,7 +359,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Faturamento",
         "Simples Nacional",
         "Taxa Maquineta",
-        "Imposto + Taxa Maquineta",
+        "Saída Imposto e Maquininha",
         "Receita Líquida",
         "CMV (Mercadorias)",
         "Fretes",
@@ -373,7 +378,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     columns = pd.MultiIndex.from_product([meses, ["Valores R$", "Análise Vertical"]])
     df = pd.DataFrame(index=rows, columns=columns, dtype=object)
 
-    for i, mes in enumerate(range(1, 13), start=0):
+    for i, mes in enumerate(range(1, 12+1), start=0):
         pre_start = (ano < START_YEAR) or (ano == START_YEAR and mes < START_MONTH)
 
         m = _calc_mes(db_path, ano, mes, vars_dre)
@@ -391,7 +396,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         else:
             vals = {
                 "Faturamento": m["fat"], "Simples Nacional": m["simples"], "Taxa Maquineta": m["taxa_maq"],
-                "Imposto + Taxa Maquineta": m["saida_imp_maq"],
+                "Saída Imposto e Maquininha": m["saida_imp_maq"],
                 "Receita Líquida": m["receita_liq"] if m["receita_liq"] is not None else None,
                 "CMV (Mercadorias)": m["cmv"], "Fretes": m["fretes"], "Sacolas": m["sacolas"],
                 "Fundo de Promoção": m["fundo"],
@@ -435,7 +440,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     _KEY_ROWS = [
         "Faturamento",
         "Receita Líquida",
-        "Imposto + Taxa Maquineta",
+        "Saída Imposto e Maquininha",
         "Margem de Contribuição",
         "Total CF + Empréstimos",
         "Total de Saída",
@@ -448,25 +453,42 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         subset=pd.IndexSlice[_KEY_ROWS, :]
     )
 
-    # ---- Cores específicas nas linhas ----
-    styler = styler.set_properties(
-        **{"background-color": "#1f6f3f"},
-        subset=pd.IndexSlice[["Faturamento"], :]
-    )
-    styler = styler.set_properties(
-        **{"background-color": "rgba(46, 204, 113, 0.30)"},
-        subset=pd.IndexSlice[["Receita Líquida"], :]
-    )
-    styler = styler.set_properties(
-        **{"background-color": "rgba(231, 76, 60, 0.18)"},
-        subset=pd.IndexSlice[["Simples Nacional", "Taxa Maquineta"], :]
-    )
-    # >>> vermelho mais vivo para "Imposto + Taxa Maquineta"
-    styler = styler.set_properties(
-        # vermelho vivo (quase sólido). Se preferir com transparência: rgba(255, 77, 79, 0.70)
-        **{"background-color": "#ff4d4f"},
-        subset=pd.IndexSlice[["Imposto + Taxa Maquineta"], :]
-    )
+    # ---- Cores (mantidas das suas escolhas) ----
+    styler = styler.set_properties(**{"background-color": "#1f6f3f"}, subset=pd.IndexSlice[["Faturamento"], :])
+    styler = styler.set_properties(**{"background-color": "rgba(46, 204, 113, 0.30)"}, subset=pd.IndexSlice[["Receita Líquida"], :])
+    styler = styler.set_properties(**{"background-color": "rgba(52, 152, 219, 0.18)"},
+                                   subset=pd.IndexSlice[["CMV (Mercadorias)", "Fretes", "Sacolas", "Fundo de Promoção"], :])
+    styler = styler.set_properties(**{"background-color": "#1e90ff"}, subset=pd.IndexSlice[["Margem de Contribuição"], :])
+    styler = styler.set_properties(**{"background-color": "rgba(155, 89, 182, 0.18)"},
+                                   subset=pd.IndexSlice[["Custo Fixo Mensal", "Empréstimos/Financiamentos", "Marketing", "Manutenção/Limpeza"], :])
+    styler = styler.set_properties(**{"background-color": "#8e44ad"}, subset=pd.IndexSlice[["Total CF + Empréstimos"], :])
+    styler = styler.set_properties(**{"background-color": "rgba(255, 152, 0, 0.18)"},
+                                   subset=pd.IndexSlice[["Simples Nacional", "Taxa Maquineta"], :])
+    styler = styler.set_properties(**{"background-color": "#ff9800"}, subset=pd.IndexSlice[["Saída Imposto e Maquininha"], :])
+    styler = styler.set_properties(**{"background-color": "#ff4d4f"}, subset=pd.IndexSlice[["Total de Saída"], :])
+    styler = styler.set_properties(**{"background-color": "#ff1493"}, subset=pd.IndexSlice[["EBITDA Lucro/Prejuízo"], :])
+
+    # ====== Compacto com largura um pouco maior ======
+    st.markdown("""
+    <style>
+      /* Mantém o texto em uma linha */
+      [data-testid="stDataFrame"] div[data-testid="stDataFrameContainer"] * {
+        white-space: nowrap;
+      }
+      /* Aumenta levemente o padding (altura/respiração) */
+      [data-testid="stDataFrame"] [role="gridcell"],
+      [data-testid="stDataFrame"] [role="columnheader"] {
+        padding: 8px 10px !important;
+      }
+      /* Define uma largura mínima suave para cabeçalhos e células */
+      [data-testid="stDataFrame"] [role="columnheader"] {
+        min-width: 130px !important;
+      }
+      [data-testid="stDataFrame"] [role="gridcell"] {
+        min-width: 120px !important;
+      }
+    </style>
+    """, unsafe_allow_html=True)
 
     # Altura: +1 linha para não ter scroll vertical
     rows_to_show = len(rows)
