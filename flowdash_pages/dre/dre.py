@@ -245,35 +245,6 @@ def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
         return 0.0
 
 
-    # Descobrir nomes de colunas existentes
-    date_col = _find_col(cols, ["data_compra", "Data_Compra", "data", "dt_compra", "Data_Transacao"])
-    cat_col  = _find_col(cols, ["categoria", "Categoria"])
-    val_candidates = [c for c in ["valor", "valor_total", "valor_parcela", "valor_compra", "valor_item"] if c.lower() in cols]
-    if not date_col or not cat_col or not val_candidates:
-        return 0.0
-
-    # COALESCE dinâmico com as colunas de valor disponíveis
-    coalesce_vals = "COALESCE(" + ", ".join(val_candidates + ["0"]) + ")"
-
-    # Normalização de 'Despesas / Marketing' removendo espaços
-    # Usa match exato normalizado ou LIKE Marketing
-    sql = f"""
-    SELECT SUM({coalesce_vals})
-    FROM fatura_cartao_itens
-    WHERE date({date_col}) BETWEEN ? AND ?
-      AND (
-            UPPER(REPLACE({cat_col}, ' ', '')) = 'DESPESAS/MARKETING'
-         OR UPPER({cat_col}) LIKE '%MARKETING%'
-      );
-    """
-    try:
-        with _conn(db_path) as c:
-            row = c.execute(sql, (ini, fim)).fetchone()
-            return _safe(row[0])
-    except Exception:
-        return 0.0
-
-
 # ============================== Anos disponíveis ==============================
 
 @st.cache_data(show_spinner=False)
@@ -347,7 +318,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> Dict[str, 
     fretes_rs = _query_fretes(db_path, ini, fim)
     fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
 
-    # Marketing: soma de SAÍDA + Itens de Fatura de Cartão
     mkt_saida_rs  = _query_saidas_total(db_path, ini, fim, "Despesas", "Marketing")
     mkt_cartao_rs = _query_mkt_cartao(db_path, ini, fim)
     mkt_rs = mkt_saida_rs + mkt_cartao_rs
@@ -400,7 +370,6 @@ def render_dre(caminho_banco: str):
     anos = _listar_anos(caminho_banco)
     ano = st.selectbox("Ano", options=anos, index=len(anos) - 1)
 
-    # Aviso YTD desde out/2025
     if int(ano) == START_YEAR:
         st.caption("🔖 **YTD desde out/2025** — meses anteriores exibem apenas *Faturamento*.")
 
@@ -413,8 +382,6 @@ def render_dre(caminho_banco: str):
     _render_anual(caminho_banco, int(ano), vars_dre)
 
 
-# ------------------------------ Anual (12 meses) ------------------------------
-
 def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     st.caption(f"Cada mês mostra **Valores R$** e **Análise Vertical (%)** • Ano: **{ano}**")
 
@@ -425,13 +392,11 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Taxa Maquineta",
         "Saída Imposto e Maquininha",
         "Receita Líquida",
-
         "CMV (Mercadorias)",
         "Fretes",
         "Sacolas",
         "Fundo de Promoção",
         "Margem de Contribuição",
-
         "Custo Fixo Mensal",
         "Empréstimos/Financiamentos",
         "Marketing",
@@ -442,7 +407,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     ]
 
     columns = pd.MultiIndex.from_product([meses, ["Valores R$", "Análise Vertical"]])
-    df = pd.DataFrame(index=rows, columns=columns, dtype=object)  # object para permitir None/"—"
+    df = pd.DataFrame(index=rows, columns=columns, dtype=object)
 
     for i, mes in enumerate(range(1, 13), start=0):
         pre_start = (ano < START_YEAR) or (ano == START_YEAR and mes < START_MONTH)
@@ -451,57 +416,25 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         fat = m["fat"]
 
         if pre_start:
-            # Antes de out/2025: só Faturamento; demais linhas ficam None (vira "—" na exibição)
-            vals = {
-                "Faturamento": fat,
-                "Simples Nacional": None,
-                "Taxa Maquineta": None,
-                "Saída Imposto e Maquininha": None,
-                "Receita Líquida": None,
-
-                "CMV (Mercadorias)": None,
-                "Fretes": None,
-                "Sacolas": None,
-                "Fundo de Promoção": None,
-                "Margem de Contribuição": None,
-
-                "Custo Fixo Mensal": None,
-                "Empréstimos/Financiamentos": None,
-                "Marketing": None,
-                "Manutenção/Limpeza": None,
-                "Total CF + Empréstimos": None,
-                "Total de Saída": None,
-                "EBITDA Lucro/Prejuízo": None,
-            }
-            # Valores R$
+            vals = {r: None for r in rows}
+            vals["Faturamento"] = fat
             for r in rows:
                 df.loc[r, (meses[i], "Valores R$")] = vals.get(r, None)
-            # %: só faturamento = 100% se houver, demais None
             df.loc["Faturamento", (meses[i], "Análise Vertical")] = (100.0 if fat and fat > 0 else 0.0)
             for r in rows:
                 if r != "Faturamento":
                     df.loc[r, (meses[i], "Análise Vertical")] = None
         else:
-            # Tudo positivo (sem inverter sinal)
             vals = {
-                "Faturamento": m["fat"],
-                "Simples Nacional": m["simples"],
-                "Taxa Maquineta": m["taxa_maq"],
+                "Faturamento": m["fat"], "Simples Nacional": m["simples"], "Taxa Maquineta": m["taxa_maq"],
                 "Saída Imposto e Maquininha": m["saida_imp_maq"],
                 "Receita Líquida": m["receita_liq"] if m["receita_liq"] is not None else None,
-
-                "CMV (Mercadorias)": m["cmv"],
-                "Fretes": m["fretes"],
-                "Sacolas": m["sacolas"],
+                "CMV (Mercadorias)": m["cmv"], "Fretes": m["fretes"], "Sacolas": m["sacolas"],
                 "Fundo de Promoção": m["fundo"],
                 "Margem de Contribuição": m["margem_contrib"] if m["margem_contrib"] is not None else None,
-
-                "Custo Fixo Mensal": m["fixas"],
-                "Empréstimos/Financiamentos": m["emp"],
-                "Marketing": m["mkt"],
-                "Manutenção/Limpeza": m["limp"],
-                "Total CF + Empréstimos": m["total_cf_emp"],
-                "Total de Saída": m["total_saida_oper"],
+                "Custo Fixo Mensal": m["fixas"], "Empréstimos/Financiamentos": m["emp"],
+                "Marketing": m["mkt"], "Manutenção/Limpeza": m["limp"],
+                "Total CF + Empréstimos": m["total_cf_emp"], "Total de Saída": m["total_saida_oper"],
                 "EBITDA Lucro/Prejuízo": m["ebitda"],
             }
             for r in rows:
@@ -510,14 +443,10 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             if fat > 0:
                 for r in rows:
                     v = vals.get(r, 0.0)
-                    if isinstance(v, (int, float)):
-                        df.loc[r, (meses[i], "Análise Vertical")] = (v / fat * 100.0)
-                    else:
-                        df.loc[r, (meses[i], "Análise Vertical")] = None
+                    df.loc[r, (meses[i], "Análise Vertical")] = (v / fat * 100.0) if isinstance(v, (int, float)) else None
             else:
                 df.loc[:, (meses[i], "Análise Vertical")] = 0.0
 
-    # Exibição formatada com "—" para None
     def _fmt_val(v):
         if v is None:
             return "—"
@@ -539,7 +468,28 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         df_show[(mes, "Valores R$")] = df_show[(mes, "Valores R$")].map(_fmt_val)
         df_show[(mes, "Análise Vertical")] = df_show[(mes, "Análise Vertical")].map(_fmt_pct)
 
-    st.dataframe(df_show, use_container_width=True)
+    _KEY_ROWS = [
+        "Faturamento",
+        "Receita Líquida",
+        "Saída Imposto e Maquininha",
+        "Margem de Contribuição",
+        "Total CF + Empréstimos",
+        "Total de Saída",
+        "EBITDA Lucro/Prejuízo",
+    ]
+
+    styler = df_show.style.set_properties(
+        **{"font-weight": "bold", "font-size": "1.16em"},
+        subset=pd.IndexSlice[_KEY_ROWS, :]
+    )
+
+    # Altura: mostrar +1 linha extra para eliminar qualquer scroll vertical
+    rows_to_show = len(rows)      # 17
+    row_px = 32                   # altura estimada por linha
+    header_px = 96                # cabeçalho (MultiIndex)
+    height_px = header_px + (rows_to_show + 1) * row_px  # <<< +1 linha
+
+    st.dataframe(styler, use_container_width=True, height=height_px)
 
 
 # Alias para retrocompatibilidade
