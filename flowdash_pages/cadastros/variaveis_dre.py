@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Optional, List, Tuple
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -54,7 +54,6 @@ def _connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
-    """Somente garante a existência da tabela (DDL). Não insere seeds."""
     conn.execute(_SQL_CREATE)
     conn.commit()
 
@@ -114,18 +113,30 @@ def _delete(conn: sqlite3.Connection, var_id: int):
     conn.execute("DELETE FROM dre_variaveis WHERE id = ?", (var_id,))
     conn.commit()
 
+# Helpers locais
+def _get_num(conn: sqlite3.Connection, chave: str, default: float) -> float:
+    try:
+        cur = conn.execute("SELECT valor_num FROM dre_variaveis WHERE chave = ? LIMIT 1", (chave,))
+        row = cur.fetchone()
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception:
+        pass
+    return float(default)
+
 # ============== UI ==============
 def render(db_path_pref: Optional[str] = None):
-    """Cadastros » Variáveis do DRE (4 parâmetros manuais)."""
+    """Cadastros » Variáveis do DRE (parâmetros manuais e KPIs avançados)."""
     db_path = _ensure_db_path_or_raise(db_path_pref)
     conn = _connect(db_path)
-    _ensure_table(conn)  # apenas cria a tabela se não existir (sem seeds)
+    _ensure_table(conn)
 
     st.markdown("### 🧮 Cadastros › Variáveis do DRE")
 
     with st.form("form_var_dre"):
+        # ----------------- Bloco atual (mantido) -----------------
+        st.subheader("Parâmetros Básicos")
         col1, col2 = st.columns(2)
-
         with col1:
             simples = st.number_input(
                 "Simples Nacional (%)",
@@ -153,13 +164,75 @@ def render(db_path_pref: Optional[str] = None):
                 format="%.2f"
             )
 
+        st.markdown("---")
+
+        # ----------------- KPIs avançados -----------------
+        st.subheader("KPIs Avançados (ROE/ROI/ROA/EBITDA)")
+
+        st.caption("Base Patrimonial / Investimento — usados em ROE, ROI e ROA")
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            pl = st.number_input(
+                "Patrimônio Líquido (R$)",
+                min_value=0.0, step=100.0,
+                value=_get_num(conn, "patrimonio_liquido_base", 0.0),
+                format="%.2f",
+                help="ROE = Lucro Líquido / Patrimônio Líquido"
+            )
+        with col4:
+            inv = st.number_input(
+                "Investimento Total (R$)",
+                min_value=0.0, step=100.0,
+                value=_get_num(conn, "investimento_total_base", 0.0),
+                format="%.2f",
+                help="ROI = Lucro Líquido / Investimento Total"
+            )
+        with col5:
+            atv = st.number_input(
+                "Ativos Totais (R$)",
+                min_value=0.0, step=100.0,
+                value=_get_num(conn, "ativos_totais_base", 0.0),
+                format="%.2f",
+                help="ROA = Lucro Líquido / Ativos Totais"
+            )
+
+        st.caption("Ajustes para EBITDA — como não estão nas Saídas, informe valores mensais")
+        col6, col7 = st.columns(2)
+        with col6:
+            dep = st.number_input(
+                "Depreciação Mensal (R$)",
+                min_value=0.0, step=50.0,
+                value=_get_num(conn, "depreciacao_mensal_padrao", 0.0),
+                format="%.2f",
+                help="Somada ao EBITDA se não vier das Saídas"
+            )
+        with col7:
+            amo = st.number_input(
+                "Amortização Mensal (R$)",
+                min_value=0.0, step=50.0,
+                value=_get_num(conn, "amortizacao_mensal_padrao", 0.0),
+                format="%.2f",
+                help="Somada ao EBITDA se não vier das Saídas"
+            )
+
+        # ----------------- Salvar -----------------
         if st.form_submit_button("Salvar"):
             try:
+                # Básicos
                 _upsert(conn, "aliquota_simples_nacional", "num", simples, None, "Alíquota Simples Nacional (%)")
                 _upsert(conn, "markup_medio", "num", markup, None, "Markup médio (coeficiente)")
                 _upsert(conn, "sacolas_percent", "num", sacolas, None, "Custo de sacolas sobre faturamento (%)")
                 _upsert(conn, "fundo_promocao_percent", "num", fundo, None, "Fundo de promoção (%)")
+
+                # Avançados (sem override de vendas)
+                _upsert(conn, "patrimonio_liquido_base", "num", pl, None, "Base para ROE (R$)")
+                _upsert(conn, "investimento_total_base", "num", inv, None, "Base para ROI (R$)")
+                _upsert(conn, "ativos_totais_base", "num", atv, None, "Base para ROA (R$)")
+                _upsert(conn, "depreciacao_mensal_padrao", "num", dep, None, "Depreciação mensal p/ EBITDA (R$)")
+                _upsert(conn, "amortizacao_mensal_padrao", "num", amo, None, "Amortização mensal p/ EBITDA (R$)")
+
                 st.success("Variáveis salvas.")
+                st.rerun()
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
 
@@ -167,7 +240,6 @@ def render(db_path_pref: Optional[str] = None):
 
     df = _list(conn)
     if not df.empty:
-        # Tabela amigável (com ID)
         def _fmt(row):
             if row["tipo"] == "num" and row["valor_num"] is not None:
                 return f"{row['valor_num']:.4f}".rstrip("0").rstrip(".")
@@ -180,8 +252,9 @@ def render(db_path_pref: Optional[str] = None):
         st.info("Nenhum registro em dre_variaveis ainda.")
 
     with st.expander("Excluir variável (cuidado)"):
-        if not df.empty:
-            options = [(int(r["id"]), f"ID {int(r['id'])} — {r['chave']}") for _, r in df.iterrows()]
+        df2 = _list(conn)
+        if not df2.empty:
+            options = [(int(r["id"]), f"ID {int(r['id'])} — {r['chave']}") for _, r in df2.iterrows()]
             selected = st.selectbox(
                 "Selecione para excluir",
                 options=options,
@@ -196,14 +269,3 @@ def render(db_path_pref: Optional[str] = None):
                     st.error(f"Erro ao excluir: {e}")
         else:
             st.info("Não há variáveis para excluir.")
-
-# Helpers locais
-def _get_num(conn: sqlite3.Connection, chave: str, default: float) -> float:
-    try:
-        cur = conn.execute("SELECT valor_num FROM dre_variaveis WHERE chave = ? LIMIT 1", (chave,))
-        row = cur.fetchone()
-        if row and row[0] is not None:
-            return float(row[0])
-    except Exception:
-        pass
-    return float(default)
