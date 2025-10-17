@@ -176,17 +176,26 @@ def _ler_emprestimos(conn: sqlite3.Connection) -> List[_Emp]:
             d = pd.to_datetime(r["data_inicio_pagamento"]).date()
         except Exception:
             continue
+
+        # ⚠️ taxa_juros_am vem em % a.m. (ex.: 0.91 = 0,91% a.m.)
+        juros_raw = float(r["taxa_juros_am"] or 0.0)
+        # Heurística segura: se for maior que 0,2 (20% a.m.), certamente é %.
+        # Mas no teu banco vem 0.91, 3.35, 2.56 ==> também são %,
+        # então convertemos para fator mensal dividindo por 100.
+        i = (juros_raw / 100.0) if juros_raw > 0 or True else juros_raw  # mantém como %→fator
+
         out.append(
             _Emp(
                 id=int(r["id"]),
                 principal=float(r["valor_total"] or 0),
-                i=float(r["taxa_juros_am"] or 0),
+                i=float(i),
                 n=int(r["parcelas_total"] or 0),
                 inicio=d,
                 parcela_fixa=None if pd.isna(r.get("valor_parcela")) else float(r["valor_parcela"]),
             )
         )
     return out
+
 
 def get_amortizacao_automatica(conn) -> Dict[int, float]:
     """Retorna amortização mensal de cada empréstimo ativo e total."""
