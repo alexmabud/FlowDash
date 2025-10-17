@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from typing import Optional, Tuple, Dict, List
-from dataclasses import dataclass
-from datetime import date
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
@@ -128,95 +126,6 @@ def _fmt_brl(v: float) -> str:
     except Exception:
         return "R$ 0,00"
 
-# =========================================================
-#        AMORTIZAÇÃO (PRICE) — Empréstimos do BD
-# =========================================================
-
-@dataclass
-class _Emp:
-    id: int
-    principal: float
-    i: float
-    n: int
-    inicio: date
-    parcela_fixa: Optional[float] = None
-
-def _months_between(a: date, b: date) -> int:
-    return (b.year - a.year) * 12 + (b.month - a.month)
-
-def _price_parcela(P: float, i: float, n: int) -> float:
-    if n <= 0:
-        return 0.0
-    if abs(i or 0.0) < 1e-12:
-        return P / n
-    fator = (1 + i) ** n
-    return P * i * fator / (fator - 1)
-
-def _saldo_antes(P: float, i: float, n: int, k: int, A: float) -> float:
-    if k <= 1:
-        return max(0.0, P)
-    fator = (1 + i) ** (k - 1)
-    saldo_km1 = P * fator - A * ((fator - 1) / i)
-    return max(0.0, saldo_km1)
-
-def _ler_emprestimos(conn: sqlite3.Connection) -> List[_Emp]:
-    cols = """
-        id,
-        COALESCE(valor_total, 0) AS valor_total,
-        COALESCE(taxa_juros_am, 0) AS taxa_juros_am,
-        COALESCE(parcelas_total, 0) AS parcelas_total,
-        data_inicio_pagamento,
-        COALESCE(valor_parcela, NULL) AS valor_parcela
-    """
-    df = pd.read_sql(f"SELECT {cols} FROM emprestimos_financiamentos", conn)
-
-    out: List[_Emp] = []
-    for _, r in df.iterrows():
-        try:
-            d = pd.to_datetime(r["data_inicio_pagamento"]).date()
-        except Exception:
-            continue
-
-        # ⚠️ taxa_juros_am vem em % a.m. (ex.: 0.91 = 0,91% a.m.)
-        juros_raw = float(r["taxa_juros_am"] or 0.0)
-        # Heurística segura: se for maior que 0,2 (20% a.m.), certamente é %.
-        # Mas no teu banco vem 0.91, 3.35, 2.56 ==> também são %,
-        # então convertemos para fator mensal dividindo por 100.
-        i = (juros_raw / 100.0) if juros_raw > 0 or True else juros_raw  # mantém como %→fator
-
-        out.append(
-            _Emp(
-                id=int(r["id"]),
-                principal=float(r["valor_total"] or 0),
-                i=float(i),
-                n=int(r["parcelas_total"] or 0),
-                inicio=d,
-                parcela_fixa=None if pd.isna(r.get("valor_parcela")) else float(r["valor_parcela"]),
-            )
-        )
-    return out
-
-
-def get_amortizacao_automatica(conn) -> Dict[int, float]:
-    """Retorna amortização mensal de cada empréstimo ativo e total."""
-    hoje = date.today()
-    emprestimos = _ler_emprestimos(conn)
-    amort_por_emp: Dict[int, float] = {}
-
-    for emp in emprestimos:
-        if emp.principal <= 0 or emp.n <= 0:
-            continue
-        k = _months_between(emp.inicio, hoje) + 1
-        if k < 1 or k > emp.n:
-            continue
-        A = emp.parcela_fixa if (emp.parcela_fixa or 0) > 0 else _price_parcela(emp.principal, emp.i, emp.n)
-        saldo_antes = _saldo_antes(emp.principal, emp.i, emp.n, k, A)
-        juros = saldo_antes * (emp.i or 0.0)
-        amort = max(0.0, A - juros)
-        amort_por_emp[emp.id] = round(amort, 2)
-
-    return amort_por_emp
-
 # ============== UI ==============
 def render(db_path_pref: Optional[str] = None):
     """Cadastros » Variáveis do DRE."""
@@ -226,7 +135,6 @@ def render(db_path_pref: Optional[str] = None):
 
     st.markdown("### 🧮 Cadastros › Variáveis do DRE")
 
-    # ====== ÚNICO CONTAINER (form) — ordem com dividers ======
     with st.form("form_var_dre"):
         # 1) Parâmetros Básicos
         st.subheader("Parâmetros Básicos")
@@ -270,41 +178,35 @@ def render(db_path_pref: Optional[str] = None):
                 "Ativos Totais (R$)", min_value=0.0, step=100.0,
                 value=_get_num(conn, "ativos_totais_base", 0.0)
             )
-        dep = st.number_input(
-            "Depreciação Mensal (R$)", min_value=0.0, step=50.0,
-            value=_get_num(conn, "depreciacao_mensal_padrao", 0.0)
-        )
+
+        # 3) Calculadora simples de Depreciação (visível)
+        st.subheader("Calculadora rápida de Depreciação (valor total × % a.m.)")
+        colx, coly, colz = st.columns([1, 1, 1])
+        with colx:
+            base_bens = st.number_input(
+                "Valor total dos bens (R$)",
+                min_value=0.0, step=100.0, format="%.2f",
+                key="dep_base_bens"
+            )
+        with coly:
+            taxa_dep = st.number_input(
+                "Taxa mensal (%)",
+                min_value=0.0, step=0.10, value=1.00, format="%.2f",
+                key="dep_taxa_mensal"
+            )
+        with colz:
+            estimativa = float((base_bens or 0.0) * ((taxa_dep or 0.0) / 100.0))
+            st.text_input(
+                "Depreciação estimada (R$/mês)",
+                value=_fmt_brl(estimativa),
+                disabled=True
+            )
+        st.caption("O valor acima será salvo em **depreciacao_mensal_padrao** ao clicar em **Salvar**.")
+        dep = estimativa  # valor que vamos persistir
 
         st.divider()
 
-        # 3) Amortização Automática
-        st.subheader("Amortização Automática (Empréstimos)")
-        amort_emp = get_amortizacao_automatica(conn)
-        if amort_emp:
-            cols = st.columns(2)
-            i = 0
-            for emp_id, amort in amort_emp.items():
-                with cols[i % 2]:
-                    st.text_input(
-                        f"Empréstimo ID {emp_id}",
-                        value=_fmt_brl(amort),
-                        disabled=True
-                    )
-                i += 1
-
-            col_t1, col_t2 = st.columns([1, 1])
-            with col_t1:
-                st.text_input(
-                    "💰 Total Amortização do Mês",
-                    value=_fmt_brl(sum(amort_emp.values())),
-                    disabled=True
-                )
-            with col_t2:
-                st.caption("🔁 Calculado automaticamente com base nos empréstimos ativos no mês atual.")
-        else:
-            st.info("Nenhum empréstimo ativo no mês atual.")
-
-        # Botão principal (salva somente os parâmetros/kpis)
+        # Salvar
         if st.form_submit_button("Salvar"):
             try:
                 _upsert(conn, "aliquota_simples_nacional", "num", simples, None, "Alíquota Simples Nacional (%)")
@@ -320,8 +222,6 @@ def render(db_path_pref: Optional[str] = None):
             except Exception as e:
                 st.error(f"Erro ao salvar: {e}")
 
-    
-
     # Tabela de variáveis
     df = _list(conn)
     if not df.empty:
@@ -336,5 +236,3 @@ def render(db_path_pref: Optional[str] = None):
         )
     else:
         st.info("Nenhum registro em dre_variaveis ainda.")
-
-  

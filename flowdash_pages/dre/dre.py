@@ -11,20 +11,12 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 
-# ===== NOVO: tenta importar o helper da página Variáveis do DRE =====
-try:
-    from flowdash_pages.cadastros.variaveis_dre import read_amortizacao_total as _read_amortizacao_total
-except Exception:
-    _read_amortizacao_total = None  # fallback se helper ainda não estiver disponível
-
 # ============================== Config de início do DRE ==============================
 START_YEAR = 2025
 START_MONTH = 10  # Outubro
 KPI_TITLE = "KPIs"  # título exibido acima dos cards
 
-
 # ============================== Helpers ==============================
-
 def _conn(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -63,40 +55,16 @@ def _nz_div(n: float, d: float) -> float:
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
     return (ano, mes - 1) if mes > 1 else (ano - 1, 12)
 
-# === NOVO: função para obter a amortização total conforme a competência ===
-@st.cache_data(show_spinner=False, ttl=60)
-def _amort_total_for_comp(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> float:
-    """
-    Se a competência for o mês corrente, usa a amortização calculada em Variáveis do DRE.
-    Caso contrário, usa o fallback 'amortizacao_mensal_padrao' (se existir).
-    """
-    today = date.today()
-    if _read_amortizacao_total and ano == today.year and mes == today.month:
-        try:
-            return float(_read_amortizacao_total(db_path))
-        except Exception:
-            pass
-    # fallback (histórico/competências antigas)
-    return _safe(vars_dre.amo_padrao)
-
-# === NOVO: cálculo de crescimento MTD (1º→D do mês vs 1º→D do mês anterior)
+# === Crescimento MTD (1º→D do mês vs 1º→D do mês anterior)
 def _crescimento_mtd(db_path: str, ano: int, mes: int, today: Optional[date] = None) -> float:
-    """
-    Retorna o crescimento (%) da Receita Bruta comparando o período 1..D do mês (alvo)
-    contra o período 1..D do mês anterior, onde:
-      - D = dia de 'today' se for o mês corrente; caso contrário, D = último dia do mês.
-    Para meses já encerrados, o cálculo equivale a mês-fechado vs mês-fechado.
-    """
     today = today or date.today()
     is_corrente = (ano == today.year and mes == today.month)
     D = today.day if is_corrente else monthrange(ano, mes)[1]
 
-    # período atual (1 -> D)
     ini_atual = f"{ano:04d}-{mes:02d}-01"
     fim_atual = f"{ano:04d}-{mes:02d}-{min(D, monthrange(ano, mes)[1]):02d}"
     fat_mtd, _, _ = _query_entradas(db_path, ini_atual, fim_atual)
 
-    # período anterior (1 -> D ou último dia do mês anterior, o que for menor)
     prev_ano, prev_mes = _mes_anterior(ano, mes)
     D_prev = min(D, monthrange(prev_ano, prev_mes)[1])
     ini_prev = f"{prev_ano:04d}-{prev_mes:02d}-01"
@@ -107,21 +75,19 @@ def _crescimento_mtd(db_path: str, ano: int, mes: int, today: Optional[date] = N
 
 @dataclass
 class VarsDRE:
-    # parâmetros já existentes
+    # parâmetros configuráveis
     simples: float = 0.0   # %
     markup: float = 0.0    # coef
     sacolas: float = 0.0   # %
     fundo: float = 0.0     # %
 
-    # novos parâmetros (cadastros › variáveis do DRE)
-    dep_padrao: float = 0.0     # R$/mês
-    amo_padrao: float = 0.0     # R$/mês (fallback histórico)
+    # avançados
+    dep_padrao: float = 0.0     # R$/mês (depreciação padrão)
     pl_base: float = 0.0        # patrimônio líquido
     inv_base: float = 0.0       # investimento total
     atv_base: float = 0.0       # ativos totais
 
 # ============================== Schema helpers ==============================
-
 @st.cache_data(show_spinner=False)
 def _table_cols(db_path: str, table: str) -> List[str]:
     try:
@@ -139,7 +105,6 @@ def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[
     return None
 
 # ============================== Queries (cache) ==============================
-
 @st.cache_data(show_spinner=False, ttl=300)
 def _load_vars(db_path: str) -> VarsDRE:
     q = """
@@ -151,7 +116,6 @@ def _load_vars(db_path: str) -> VarsDRE:
         'sacolas_percent',
         'fundo_promocao_percent',
         'depreciacao_mensal_padrao',
-        'amortizacao_mensal_padrao',
         'patrimonio_liquido_base',
         'investimento_total_base',
         'ativos_totais_base'
@@ -171,7 +135,6 @@ def _load_vars(db_path: str) -> VarsDRE:
         sacolas=_safe(d.get("sacolas_percent")),
         fundo=_safe(d.get("fundo_promocao_percent")),
         dep_padrao=_safe(d.get("depreciacao_mensal_padrao")),
-        amo_padrao=_safe(d.get("amortizacao_mensal_padrao")),
         pl_base=_safe(d.get("patrimonio_liquido_base")),
         inv_base=_safe(d.get("investimento_total_base")),
         atv_base=_safe(d.get("ativos_totais_base")),
@@ -179,7 +142,6 @@ def _load_vars(db_path: str) -> VarsDRE:
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int]:
-    # fat = soma Valor; tx = diferença entre Valor e valor_liquido; n = nº de linhas (cada linha = 1 venda)
     sql = """
     SELECT
       SUM(COALESCE(Valor,0)) AS fat,
@@ -269,7 +231,7 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
-    # fluxo mensal pago (R$) com obrigações tipo EMPRESTIMO (valor desembolsado no mês)
+    # desembolso de caixa do mês com EMPRESTIMO
     sql = """
     SELECT SUM(COALESCE(valor_pago_acumulado,0))
     FROM contas_a_pagar_mov
@@ -285,7 +247,6 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_divida_estoque(db_path: str) -> float:
-    # estoque (saldo em aberto) de EMPRESTIMO: Σ max(valor_evento − valor_pago_acumulado, 0)
     sql = """
     SELECT SUM(
         CASE
@@ -320,33 +281,25 @@ def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
         return 0.0
 
 # ============================== Anos disponíveis ==============================
-
 @st.cache_data(show_spinner=False)
 def _listar_anos(db_path: str) -> List[int]:
     sql_all = """
     SELECT ano FROM (
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada       WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM mercadorias   WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida         WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov WHERE length(COALESCE(competencia,'')) >= 4
-        UNION
-        SELECT CAST(substr(data_compra,1,4) AS INT) AS ano FROM fatura_cartao_itens WHERE length(COALESCE(data_compra,'')) >= 4
+        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada
+        UNION SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM mercadorias
+        UNION SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida
+        UNION SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov
+        UNION SELECT CAST(substr(data_compra,1,4) AS INT) AS ano FROM fatura_cartao_itens
     )
     WHERE ano IS NOT NULL
     ORDER BY ano;
     """
     sql_fallback = """
     SELECT ano FROM (
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada       WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM mercadorias   WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida         WHERE length(COALESCE(Data,'')) >= 4
-        UNION
-        SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov WHERE length(COALESCE(competencia,'')) >= 4
+        SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada
+        UNION SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM mercadorias
+        UNION SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM saida
+        UNION SELECT CAST(substr(competencia,1,4) AS INT) AS ano FROM contas_a_pagar_mov
     )
     WHERE ano IS NOT NULL
     ORDER BY ano;
@@ -377,7 +330,6 @@ def _listar_anos(db_path: str) -> List[int]:
     return sorted(set(anos))
 
 # ============================== Cálculo por mês ==============================
-
 @st.cache_data(show_spinner=False)
 def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str, float]:
     ini, fim, comp = _periodo_ym(ano, mes)
@@ -391,7 +343,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     mkt_rs = mkt_saida_rs + mkt_cartao_rs
 
     limp_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Manutenção/Limpeza")
-    emp_rs  = _query_cap_emprestimos(db_path, comp)  # gasto do mês com empréstimos (parcela paga no caixa)
+    emp_rs  = _query_cap_emprestimos(db_path, comp)  # parcela paga (caixa)
 
     simples_rs = fat * (vars_dre.simples / 100.0)
     fundo_rs   = fat * (vars_dre.fundo   / 100.0)
@@ -408,15 +360,12 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     total_cf_emprestimos = fixas_rs + emp_rs
     total_saida_oper     = fixas_rs + emp_rs + mkt_rs + limp_rs
 
-    # EBITDA base (dep/amort não vêm das saídas)
+    # EBITDA base
     ebitda_base = margem_contrib - total_saida_oper
 
-    # >>> NOVO: amortização extra vinda da página Variáveis do DRE (mês corrente) ou fallback
+    # EBIT: apenas depreciação (não usamos amortização)
     dep_extra = vars_dre.dep_padrao
-    amo_extra = _amort_total_for_comp(db_path, ano, mes, vars_dre)
-
-    # EBIT: subtrai depreciação/amortização
-    ebit = ebitda_base - (dep_extra + amo_extra)
+    ebit = ebitda_base - dep_extra
 
     # Lucro líquido (simplificado)
     lucro_liq = ebit
@@ -425,25 +374,18 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     rl = receita_liq
     mc_ratio = _nz_div(margem_contrib, rl)
 
-    # Contábil (existente)
     break_even_rs = (fixas_rs / mc_ratio) if mc_ratio > 0 else 0.0
     break_even_pct = _nz_div(break_even_rs, rl)
 
-    # Financeiro (fixos + empréstimos) / mc_ratio
     break_even_financeiro_rs = (total_cf_emprestimos / mc_ratio) if mc_ratio > 0 else 0.0
     break_even_financeiro_pct = _nz_div(break_even_financeiro_rs, rl)
 
     margem_seguranca_pct = _nz_div((rl - break_even_rs), rl)
 
-    # Eficiência: % da receita líquida consumida pela operação
     eficiencia_oper_pct = _nz_div(total_saida_oper, rl)
-
-    # Relação Saídas/Entradas
     rel_saida_entrada_pct = _nz_div(total_saida_oper, fat)
+    emp_pct_sobre_receita = _nz_div(emp_rs, rl) * 100.0
 
-    emp_pct_sobre_receita = _nz_div(emp_rs, rl) * 100.0  # % análise vertical
-
-    # Ticket médio
     ticket_medio = _nz_div(fat, float(n_vendas)) if n_vendas > 0 else 0.0
 
     margem_bruta_pct = _nz_div(lucro_bruto, rl)
@@ -452,7 +394,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     margem_contrib_pct = _nz_div(margem_contrib, rl)
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
 
-    # Endividamento (estoque)
     divida_estoque_rs = _query_divida_estoque(db_path)
     indice_endividamento_pct = (_nz_div(divida_estoque_rs, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0
 
@@ -498,11 +439,8 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
         "custo_fixo_sobre_receita_pct": custo_fixo_sobre_receita_pct * 100.0,
         "break_even_rs": break_even_rs,
         "break_even_pct": break_even_pct * 100.0,
-
-        # Ponto de Equilíbrio Financeiro
         "break_even_financeiro_rs": break_even_financeiro_rs,
         "break_even_financeiro_pct": break_even_financeiro_pct * 100.0,
-
         "margem_seguranca_pct": margem_seguranca_pct * 100.0,
         "eficiencia_oper_pct": eficiencia_oper_pct * 100.0,
         "rel_saida_entrada_pct": rel_saida_entrada_pct * 100.0,
@@ -514,28 +452,25 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
         # avançados
         "dep_extra": dep_extra,
-        "amo_extra": amo_extra,  # <<< agora refletindo Variáveis do DRE no mês corrente
         "roe_pct": (_nz_div(lucro_liq, vars_dre.pl_base) * 100.0) if vars_dre.pl_base > 0 else 0.0,
         "roi_pct": (_nz_div(lucro_liq, vars_dre.inv_base) * 100.0) if vars_dre.inv_base > 0 else 0.0,
         "roa_pct": (_nz_div(lucro_liq, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0,
     }
 
 # ============================== UI / Página ==============================
-
 def render_dre(caminho_banco: str):
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
-
     if ano_atual not in anos:
         anos = sorted(set(anos + [ano_atual]))
 
     idx_default = anos.index(ano_atual) if ano_atual in anos else len(anos) - 1
     ano = st.selectbox("Ano", options=anos, index=idx_default)
 
-    # Seleção de mês para o painel de KPIs (cards + chips)
     meses_labels = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
     mes_default = int(pd.Timestamp.today().month) if int(ano) == ano_atual else 12
-    mes = st.selectbox("Mês (para KPIs)", options=list(range(1,13)), index=mes_default-1, format_func=lambda m: meses_labels[m-1])
+    mes = st.selectbox("Mês (para KPIs)", options=list(range(1,13)), index=mes_default-1,
+                       format_func=lambda m: meses_labels[m-1])
 
     st.subheader("KPIs - Indicadores-chave que medem o desempenho em relação às metas.")
 
@@ -545,14 +480,10 @@ def render_dre(caminho_banco: str):
     if all(v == 0 for v in (vars_dre.simples, vars_dre.fundo, vars_dre.sacolas)) and vars_dre.markup == 0:
         st.info("ℹ️ Configure em: Cadastros › Variáveis do DRE.")
 
-    # Painel de KPIs (mês selecionado) em CARDS + CHIPS
     _render_kpis_mes_cards(caminho_banco, int(ano), int(mes), vars_dre)
-
-    # Tabela anual (com todos os KPIs e cores por categoria + cabeçalhos)
     _render_anual(caminho_banco, int(ano), vars_dre)
 
 def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> None:
-    # ====== CSS (HTML/CSS puro com <details> para abrir no clique) ======
     st.markdown(
     """
 <style>
@@ -566,7 +497,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 .fd-chip .k{opacity:.90;margin-right:6px}
 .fd-chip .v{font-weight:700;margin-right:6px}
 
-/* "?" com <details> (sem JS) */
+/* "?" com <details> */
 .fd-chip details.qwrap{display:inline-block;margin-left:2px;position:relative}
 .fd-chip details.qwrap > summary.q{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#8a8a8a;color:#fff;font-size:12px;line-height:16px;border:none;cursor:pointer;outline:none}
 .fd-chip details.qwrap > summary.q::-webkit-details-marker{display:none}
@@ -577,24 +508,19 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 @media (prefers-reduced-motion:no-preference){
   .fd-chip details.qwrap .tip{animation:fd-fade .12s ease}
 }
-@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}
+@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 
-/* cores por categoria (borda e título) */
+/* cores por categoria */
 .cap-card.k-estrut{border-left:6px solid #2ecc71}
 .cap-card.k-estrut .cap-title-xl{color:#2ecc71}
-
 .cap-card.k-margens{border-left:6px solid #3498db}
 .cap-card.k-margens .cap-title-xl{color:#3498db}
-
 .cap-card.k-efic{border-left:6px solid #9b59b6}
 .cap-card.k-efic .cap-title-xl{color:#9b59b6}
-
 .cap-card.k-fluxo{border-left:6px solid #f39c12}
 .cap-card.k-fluxo .cap-title-xl{color:#f39c12}
-
 .cap-card.k-cresc{border-left:6px solid #1abc9c}
 .cap-card.k-cresc .cap-title-xl{color:#1abc9c}
-
 .cap-card.k-avanc{border-left:6px solid #e91e63}
 .cap-card.k-avanc .cap-title-xl{color:#e91e63}
 </style>
@@ -602,43 +528,31 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     unsafe_allow_html=True,
 )
 
-    # Textos (conceito) dos KPIs
     HELP: Dict[str, str] = {
-        # Estruturais
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas.",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas.",
         "Lucro Bruto": "Receita líquida menos o CMV.",
-
-        # Margens
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV.",
-        "Margem Operacional": "Resultado operacional puro: lucro da operação antes de fatores externos, já descontando custos/despesas operacionais.",
-        "Margem Líquida": "Lucro final como % da receita líquida; quanto realmente sobra após todos os custos/despesas operacionais.",
+        "Margem Operacional": "Lucro operacional após depreciação.",
+        "Margem Líquida": "Lucro final como % da receita líquida.",
         "Margem de Contribuição": "Quanto sobra para cobrir fixos e gerar lucro.",
-
-        # Eficiência
         "Custo Fixo / Receita": "Peso dos custos fixos sobre a receita.",
         "Ponto de Equilíbrio (Contábil) (R$)": "Receita mínima para zerar o resultado considerando apenas custos fixos.",
         "Ponto de Equilíbrio Financeiro (R$)": "Receita mínima para o caixa não ficar negativo: (Custos Fixos + Empréstimos) ÷ Margem de Contribuição.",
         "Ponto de Equilíbrio (Contábil) (%)": "Percentual da receita líquida que representa o ponto de equilíbrio contábil.",
         "Ponto de Equilíbrio Financeiro (%)": "Percentual da receita líquida que representa o ponto de equilíbrio financeiro.",
         "Margem de Segurança": "Folga da receita acima do ponto de equilíbrio.",
-        "Eficiência Operacional": "Mede quanto da receita líquida é consumida pelas saídas operacionais (fixos + marketing + limpeza + empréstimos).",
-        "Relação Saídas/Entradas": "Quanto do faturamento bruto (receita bruta) é consumido pelas saídas operacionais.",
-        
-        # Fluxo/Endividamento
-        "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas de empréstimos/financiamentos.",
+        "Eficiência Operacional": "Quanto da receita líquida é consumida pelas saídas operacionais (fixos + marketing + limpeza + empréstimos).",
+        "Relação Saídas/Entradas": "Quanto do faturamento bruto é consumido pelas saídas operacionais.",
+        "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas pagas.",
         "Gasto c/ Empréstimos (%)": "Gasto com empréstimos como % da receita líquida.",
-        "Dívida (Estoque)": "Saldo devedor ainda em aberto (estoque de dívida).",
-        "Índice de Endividamento (%)": "Mede quanto do total de ativos da empresa está comprometido com dívidas.",
-
-        # Crescimento
-        "Ticket Médio": "Média de valor gasto por cliente por venda.",
+        "Dívida (Estoque)": "Saldo devedor ainda em aberto.",
+        "Índice de Endividamento (%)": "Quanto dos ativos está comprometido com dívidas.",
+        "Ticket Médio": "Média de valor por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
-        "Crescimento de Receita (m/m)": "Variação do faturamento bruto comparando o mesmo período com o mês anterior.",
-
-        # Avançados
-        "EBITDA (Caixa Oper.)": "Mostra o lucro operacional real do mês após custos variáveis e fixos (inclusive empréstimos, marketing e manutenção), sem incluir depreciação e amortização.",
-        "EBIT (Operacional)": "Lucro operacional após depreciação e amortização.",
+        "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
+        "EBITDA (Caixa Oper.)": "Lucro operacional antes de depreciação.",
+        "EBIT (Operacional)": "Lucro operacional após depreciação.",
         "Lucro Líquido": "Resultado final no modelo simplificado.",
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
         "ROI": "Retorno do lucro sobre o investimento total.",
@@ -648,33 +562,18 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     def _chip(lbl: str, val: str) -> str:
         tip = HELP.get(lbl, "")
         if tip:
-            return (
-                f'<span class="fd-chip">'
-                f'  <span class="k">{lbl}</span>'
-                f'  <span class="v">{val}</span>'
-                f'  <details class="qwrap">'
-                f'    <summary class="q" aria-label="O que é {lbl}?">?</summary>'
-                f'    <div class="tip">{tip}</div>'
-                f'  </details>'
-                f'</span>'
-            )
+            return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
+                    f'<span class="v">{val}</span>'
+                    f'<details class="qwrap"><summary class="q">?</summary><div class="tip">{tip}</div></details></span>')
         return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val}</span></span>'
 
-    # === chip unificado para R$ + % ===
     def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None) -> str:
         tip = HELP.get(help_key or lbl, "")
         val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
         if tip:
-            return (
-                f'<span class="fd-chip">'
-                f'  <span class="k">{lbl}</span>'
-                f'  <span class="v">{val_comb}</span>'
-                f'  <details class="qwrap">'
-                f'    <summary class="q" aria-label="O que é {lbl}?">?</summary>'
-                f'    <div class="tip">{tip}</div>'
-                f'  </details>'
-                f'</span>'
-            )
+            return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
+                    f'<span class="v">{val_comb}</span>'
+                    f'<details class="qwrap"><summary class="q">?</summary><div class="tip">{tip}</div></details></span>')
         return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val_comb}</span></span>'
 
     def _card(title: str, chips: List[str], cls: str) -> str:
@@ -682,23 +581,19 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     m = _calc_mes(db_path, ano, mes, vars_dre)
 
-    # Crescimento vs mês anterior (MTD com base em Receita Bruta)
     try:
         crec = _crescimento_mtd(db_path, ano, mes)
     except Exception:
         crec = 0.0
 
-    # ======= Cards =======
     cards_html: List[str] = []
 
-    # Estruturais
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", _fmt_brl(m["receita_liq"])),
         _chip("Lucro Bruto", _fmt_brl(m["lucro_bruto"])),
     ], "k-estrut"))
 
-    # Margens
     cards_html.append(_card("Margens", [
         _chip("Margem Bruta", _fmt_pct(m["margem_bruta_pct"])),
         _chip("Margem Operacional", _fmt_pct(m["margem_operacional_pct"])),
@@ -706,39 +601,30 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("Margem de Contribuição", _fmt_pct(m["margem_contrib_pct"])),
     ], "k-margens"))
 
-    # Eficiência e Gestão
     cards_html.append(_card("Eficiência e Gestão", [
         _chip("Custo Fixo / Receita", _fmt_pct(m["custo_fixo_sobre_receita_pct"])),
-
-        _chip_duo("Ponto de Equilíbrio (Contábil)",
-                  m["break_even_rs"], m["break_even_pct"],
+        _chip_duo("Ponto de Equilíbrio (Contábil)", m["break_even_rs"], m["break_even_pct"],
                   help_key="Ponto de Equilíbrio (Contábil) (R$)"),
-        _chip_duo("Ponto de Equilíbrio Financeiro",
-                  m["break_even_financeiro_rs"], m["break_even_financeiro_pct"],
+        _chip_duo("Ponto de Equilíbrio Financeiro", m["break_even_financeiro_rs"], m["break_even_financeiro_pct"],
                   help_key="Ponto de Equilíbrio Financeiro (R$)"),
-
         _chip("Margem de Segurança", _fmt_pct(m["margem_seguranca_pct"])),
         _chip("Eficiência Operacional", _fmt_pct(m["eficiencia_oper_pct"])),
         _chip("Relação Saídas/Entradas", _fmt_pct(m["rel_saida_entrada_pct"])),
     ], "k-efic"))
 
-    # Fluxo e Endividamento
     cards_html.append(_card("Fluxo e Endividamento", [
-        _chip_duo("Gasto c/ Empréstimos",
-                  m["emp"], m["emp_pct_sobre_receita"],
+        _chip_duo("Gasto c/ Empréstimos", m["emp"], m["emp_pct_sobre_receita"],
                   help_key="Gasto c/ Empréstimos (R$)"),
         _chip("Dívida (Estoque)", _fmt_brl(m["divida_estoque"])),
         _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
     ], "k-fluxo"))
 
-    # Crescimento e Vendas
     cards_html.append(_card("Crescimento e Vendas", [
         _chip("Ticket Médio", _fmt_brl(m["ticket_medio"])),
         _chip("Nº de Vendas", f"{int(m['n_vendas'])}"),
         _chip("Crescimento de Receita (m/m)", _fmt_pct(crec)),
     ], "k-cresc"))
 
-    # Avançados
     cards_html.append(_card("Avançados", [
         _chip("EBITDA (Caixa Oper.)", _fmt_brl(m["ebitda"])),
         _chip("EBIT (Operacional)", _fmt_brl(m["ebit"])),
@@ -750,13 +636,11 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     st.markdown('<div class="fd-grid">' + "".join(cards_html) + '</div>', unsafe_allow_html=True)
 
-
 def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     st.caption(f"Cada mês mostra **Valores R$** e **Análise Vertical (%)** • Ano: **{ano}**")
 
     meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
 
-    # ====== Grupos/cores ======
     CAT_BG = {
         "Estruturais": "rgba(46, 204, 113, 0.18)",
         "Margens": "rgba(52, 152, 219, 0.18)",
@@ -766,9 +650,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Avançados": "rgba(233, 30, 99, 0.18)",
         "Totais": "rgba(255, 77, 79, 0.20)",
     }
-    CAT_BG_HEADER = {
-        k: v.replace("0.18", "0.35").replace("0.20", "0.40") for k, v in CAT_BG.items()
-    }
+    CAT_BG_HEADER = {k: v.replace("0.18", "0.35").replace("0.20", "0.40") for k, v in CAT_BG.items()}
 
     rows_by_cat = {
         "Estruturais": [
@@ -779,12 +661,8 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Margem Bruta (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
         ],
         "Eficiência e Gestão": [
-            "Custo Fixo Mensal",
-            "Ponto de Equilíbrio (Contábil)",
-            "Ponto de Equilíbrio Financeiro",
-            "Margem de Segurança (%)",
-            "Eficiência Operacional (%)",
-            "Relação Saídas/Entradas (%)"
+            "Custo Fixo Mensal","Ponto de Equilíbrio (Contábil)","Ponto de Equilíbrio Financeiro",
+            "Margem de Segurança (%)","Eficiência Operacional (%)","Relação Saídas/Entradas (%)"
         ],
         "Fluxo e Endividamento": [
             "Gasto com Empréstimos/Financiamentos","Índice de Endividamento (%)"
@@ -863,18 +741,14 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Margem Operacional (%)": m["margem_operacional_pct"],
             "Margem Líquida (%)": m["margem_liquida_pct"],
             "Margem de Contribuição (%)": m["margem_contrib_pct"],
-
             "Ponto de Equilíbrio (Contábil)": m["break_even_pct"],
             "Ponto de Equilíbrio Financeiro": m["break_even_financeiro_pct"],
-
             "Margem de Segurança (%)": m["margem_seguranca_pct"],
             "Eficiência Operacional (%)": m["eficiencia_oper_pct"],
             "Relação Saídas/Entradas (%)": m["rel_saida_entrada_pct"],
-
             "Gasto com Empréstimos/Financiamentos": m["emp_pct_sobre_receita"],
             "Índice de Endividamento (%)": m["indice_endividamento_pct"],
             "Crescimento de Receita (m/m) (%)": crec_pct,
-
             "ROE (%)": m["roe_pct"],
             "ROI (%)": m["roi_pct"],
             "ROA (%)": m["roa_pct"],
@@ -941,9 +815,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Avançados": "rgba(233, 30, 99, 0.18)",
         "Totais": "rgba(255, 77, 79, 0.20)",
     }
-    CAT_BG_HEADER = {
-        k: v.replace("0.18", "0.35").replace("0.20", "0.40") for k, v in CAT_BG.items()
-    }
+    CAT_BG_HEADER = {k: v.replace("0.18", "0.35").replace("0.20", "0.40") for k, v in CAT_BG.items()}
 
     cats_order = ["Estruturais","Margens","Eficiência e Gestão","Fluxo e Endividamento","Crescimento e Vendas","Avançados","Totais"]
     rows_by_cat = {
@@ -996,29 +868,22 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         subset=pd.IndexSlice[_KEY_ROWS, :]
     )
 
-# Cores por categoria (borda e título)
     st.markdown("""
     <style>
     .cap-card.k-estrut{border-left:6px solid #2ecc71}
     .cap-card.k-estrut .cap-title-xl{color:#2ecc71}
-
     .cap-card.k-margens{border-left:6px solid #3498db}
     .cap-card.k-margens .cap-title-xl{color:#3498db}
-
     .cap-card.k-efic{border-left:6px solid #9b59b6}
     .cap-card.k-efic .cap-title-xl{color:#9b59b6}
-
     .cap-card.k-fluxo{border-left:6px solid #f39c12}
     .cap-card.k-fluxo .cap-title-xl{color:#f39c12}
-
     .cap-card.k-cresc{border-left:6px solid #1abc9c}
     .cap-card.k-cresc .cap-title-xl{color:#1abc9c}
-
     .cap-card.k-avanc{border-left:6px solid #e91e63}
     .cap-card.k-avanc .cap-title-xl{color:#e91e63}
     </style>
     """, unsafe_allow_html=True)
-
 
     rows_to_show = len(df_show.index)
     row_px = 32
@@ -1026,7 +891,6 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     height_px = header_px + (rows_to_show + 1) * row_px
 
     st.dataframe(styler, use_container_width=True, height=height_px)
-
 
 # Alias para retrocompatibilidade
 pagina_dre = render_dre
