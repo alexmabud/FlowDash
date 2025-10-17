@@ -527,40 +527,47 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     )
 
     # Textos (conceito) dos KPIs
+    # Textos (conceito) dos KPIs
     HELP: Dict[str, str] = {
         # Estruturais
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas.",
-        "Receita Líquida": "Receita efetiva da operação após impostos e taxas sobre vendas.",
-        "Lucro Bruto": "Quanto sobra da receita após o custo direto das mercadorias.",
+        "Receita Líquida": "Receita após impostos e taxas sobre as vendas.",
+        "Lucro Bruto": "Receita líquida menos o CMV.",
+
         # Margens
-        "Margem Bruta": "Lucro bruto como % da receita líquida.",
-        "Margem Operacional": "EBIT como % da receita líquida.",
-        "Margem Líquida": "Lucro líquido como % da receita líquida.",
-        "Margem de Contribuição": "Quanto contribui para cobrir fixos e gerar lucro.",
+        "Margem Bruta": "Quanto da receita líquida sobra após o CMV.",
+        "Margem Operacional": "Resultado operacional puro: lucro da operação antes de fatores externos, já descontando custos/despesas operacionais.",
+        "Margem Líquida": "Lucro final como % da receita líquida; quanto realmente sobra após todos os custos/despesas operacionais.",
+        "Margem de Contribuição": "Quanto sobra para cobrir fixos e gerar lucro.",
+
         # Eficiência
-        "Custo Fixo / Receita": "Quanto os custos fixos pesam sobre a receita.",
+        "Custo Fixo / Receita": "Peso dos custos fixos sobre a receita.",
         "Ponto de Equilíbrio (R$)": "Receita mínima, em reais, para não ter prejuízo.",
-        "Ponto de Equilíbrio (%)": "PE expresso como % da receita.",
-        "Margem de Segurança": "Folga da receita acima do PE.",
-        "Eficiência Operacional": "Parcela da receita consumida por saídas operacionais.",
-        "Relação Saídas/Entradas": "Proporção de saídas operacionais frente às entradas.",
+        "Ponto de Equilíbrio (%)": "Mostra quanto do faturamento (receita líquida) representa o ponto de equilíbrio.",
+        "Margem de Segurança": "Folga da receita acima do ponto de equilíbrio.",
+        "Eficiência Operacional": "Mede quanto da receita líquida é consumida pelas saídas operacionais (fixos + marketing + limpeza + empréstimos).",
+        "Relação Saídas/Entradas": "Quanto das entradas (receita líquida) é consumido pelas saídas da operação.",
+
         # Fluxo/Endividamento
         "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas de empréstimos/financiamentos.",
-        "Gasto c/ Empréstimos (%)": "O mesmo gasto do mês como % da receita.",
+        "Gasto c/ Empréstimos (%)": "Gasto com empréstimos como % da receita líquida.",
         "Dívida (Estoque)": "Saldo devedor ainda em aberto (estoque de dívida).",
-        "Índice de Endividamento (%)": "Dívida total em relação aos ativos totais de referência.",
+        "Índice de Endividamento (%)": "Mede quanto do total de ativos da empresa está comprometido com dívidas.",
+
         # Crescimento
-        "Ticket Médio": "Receita líquida média por venda.",
+        "Ticket Médio": "Média de valor gasto por cliente por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
         "Crescimento de Receita (m/m)": "Variação da receita vs. mês anterior.",
+
         # Avançados
-        "EBITDA (Caixa Oper.)": "Resultado operacional antes de depreciação e amortização.",
-        "EBIT (Operacional)": "Resultado operacional após depreciação e amortização.",
+        "EBITDA (Caixa Oper.)": "Mostra o lucro operacional real do mês após custos variáveis e fixos (inclusive empréstimos, marketing e manutenção), sem incluir depreciação e amortização.",
+        "EBIT (Operacional)": "Lucro operacional após depreciação e amortização.",
         "Lucro Líquido": "Resultado final no modelo simplificado.",
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
         "ROI": "Retorno do lucro sobre o investimento total.",
         "ROA": "Retorno do lucro sobre os ativos totais.",
     }
+
 
     def _chip(lbl: str, val: str) -> str:
         tip = HELP.get(lbl, "")
