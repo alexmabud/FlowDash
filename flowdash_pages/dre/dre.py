@@ -6,6 +6,7 @@ import sqlite3
 from calendar import monthrange
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Iterable, Optional
+import os
 
 import pandas as pd
 import streamlit as st
@@ -22,6 +23,32 @@ def _conn(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA busy_timeout = 5000;")
     return conn
+
+def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
+    """Resolve caminho do banco de forma resiliente.
+    - Usa o parâmetro se existir.
+    - Tenta `st.session_state['db_path']`/`['caminho_banco']`.
+    - Procura nos caminhos padrão em `data/`.
+    """
+    if pref and isinstance(pref, str) and os.path.exists(pref):
+        return pref
+    try:
+        for k in ("caminho_banco", "db_path"):
+            v = st.session_state.get(k)
+            if isinstance(v, str) and os.path.exists(v):
+                return v
+    except Exception:
+        pass
+    for p in (
+        os.path.join("data", "flowdash_data.db"),
+        os.path.join("data", "dashboard_rc.db"),
+        "dashboard_rc.db",
+        os.path.join("data", "flowdash_template.db"),
+        "./flowdash_data.db",
+    ):
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError("Nenhum banco encontrado. Defina st.session_state['db_path'].")
 
 def _periodo_ym(ano: int, mes: int) -> Tuple[str, str, str]:
     last = monthrange(ano, mes)[1]
@@ -105,7 +132,7 @@ def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[
     return None
 
 # ============================== Queries (cache) ==============================
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=5)
 def _load_vars(db_path: str) -> VarsDRE:
     q = """
     SELECT chave, COALESCE(valor_num, 0) AS v
@@ -139,6 +166,109 @@ def _load_vars(db_path: str) -> VarsDRE:
         inv_base=_safe(d.get("investimento_total_base")),
         atv_base=_safe(d.get("ativos_totais_base")),
     )
+
+def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
+    """Recalcula variáveis derivadas com base nos dados atuais, sem depender da tela de cadastro.
+
+    - Ativos Totais (calc.) = Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (JSON)
+    - PL (calc.) = max(0, Ativos Totais − Passivos Totais CAP)
+    - Depreciação mensal padrão = Imobilizado × (taxa_dep% / 100)
+    Mantém as variáveis de entrada (simples, markup, sacolas, fundo, investimento) como estão no DB.
+    """
+    try:
+        from flowdash_pages.cadastros.variaveis_dre import (
+            get_estoque_atual_estimado as _estoque_est,
+            _get_total_consolidado_bancos_caixa as _bancos_total,
+            _get_passivos_totais_cap as _cap_totais,
+            _load_ui_prefs as _load_prefs,
+        )
+    except Exception:
+        return vars_dre
+
+    try:
+        # dados auxiliares
+        estoque_atual = float(_estoque_est(db_path) or 0.0)
+        with _conn(db_path) as c_local:
+            bancos_total, _ = _bancos_total(c_local, db_path)
+        passivos_totais, _ = _cap_totais(db_path)
+
+        # preferências JSON para imobilizado e taxa depreciação
+        prefs = _load_prefs(db_path)
+        imobilizado = _safe(prefs.get("pl_imobilizado_valor_total"))
+        taxa_dep = _safe(prefs.get("dep_taxa_mensal_percent_live"))
+
+        ativos_totais = float(bancos_total or 0.0) + float(estoque_atual or 0.0) + float(imobilizado or 0.0)
+        pl_calc = ativos_totais - float(passivos_totais or 0.0)
+        pl_calc_nn = pl_calc if pl_calc > 0 else 0.0
+        dep_padrao = float(imobilizado) * (float(taxa_dep) / 100.0)
+
+        return VarsDRE(
+            simples=vars_dre.simples,
+            markup=vars_dre.markup,
+            sacolas=vars_dre.sacolas,
+            fundo=vars_dre.fundo,
+            dep_padrao=dep_padrao,
+            pl_base=pl_calc_nn,
+            inv_base=vars_dre.inv_base,
+            atv_base=ativos_totais,
+        )
+    except Exception:
+        return vars_dre
+
+def _persist_overrides_to_db(db_path: str, vars_dre: "VarsDRE") -> None:
+    """Grava em dre_variaveis os derivados recalculados (ativos_totais_base, patrimonio_liquido_base, depreciacao_mensal_padrao).
+    Aplica threshold para evitar escrita desnecessária.
+    """
+    try:
+        sql_create = (
+            "CREATE TABLE IF NOT EXISTS dre_variaveis (\n"
+            "    id INTEGER PRIMARY KEY AUTOINCREMENT,\n"
+            "    chave TEXT NOT NULL UNIQUE,\n"
+            "    tipo  TEXT NOT NULL CHECK (tipo IN ('num','text','bool')),\n"
+            "    valor_num  REAL,\n"
+            "    valor_text TEXT,\n"
+            "    descricao  TEXT,\n"
+            "    updated_at TEXT NOT NULL DEFAULT (datetime('now'))\n"
+            ");"
+        )
+
+        def _get_current(c: sqlite3.Connection, chave: str) -> float:
+            try:
+                row = c.execute("SELECT valor_num FROM dre_variaveis WHERE chave=? LIMIT 1", (chave,)).fetchone()
+                return float(row[0]) if row and row[0] is not None else 0.0
+            except Exception:
+                return 0.0
+
+        def _upsert_num(c: sqlite3.Connection, chave: str, val: float, desc: str) -> None:
+            c.execute(
+                """
+                INSERT INTO dre_variaveis (chave, tipo, valor_num, descricao)
+                VALUES (?,?,?,?)
+                ON CONFLICT(chave) DO UPDATE SET
+                    tipo=excluded.tipo,
+                    valor_num=excluded.valor_num,
+                    descricao=excluded.descricao,
+                    updated_at=datetime('now')
+                """,
+                (chave, "num", float(val or 0.0), desc.strip()),
+            )
+
+        with _conn(db_path) as c:
+            c.execute(sql_create)
+            # Threshold de mudança para evitar escrita constante
+            eps = 0.005
+            targets = [
+                ("ativos_totais_base", vars_dre.atv_base, "Ativos Totais (calc.) — usado no DRE"),
+                ("patrimonio_liquido_base", vars_dre.pl_base, "Patrimônio Líquido (calc.) — usado no DRE"),
+                ("depreciacao_mensal_padrao", vars_dre.dep_padrao, "Depreciação mensal p/ EBITDA (R$)"),
+            ]
+            for chave, novo, desc in targets:
+                atual = _get_current(c, chave)
+                if abs(float(novo or 0.0) - float(atual or 0.0)) > eps:
+                    _upsert_num(c, chave, float(novo or 0.0), desc)
+            c.commit()
+    except Exception:
+        pass
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int]:
@@ -458,7 +588,8 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     }
 
 # ============================== UI / Página ==============================
-def render_dre(caminho_banco: str):
+def render_dre(caminho_banco: Optional[str]):
+    caminho_banco = _ensure_db_path_or_raise(caminho_banco)
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
     if ano_atual not in anos:
@@ -475,6 +606,10 @@ def render_dre(caminho_banco: str):
     st.subheader("KPIs - Indicadores-chave que medem o desempenho em relação às metas.")
 
     vars_dre = _load_vars(caminho_banco)
+    # sobrescreve dinamicamente os derivados para refletirem o estado atual do banco
+    vars_dre = _vars_dynamic_overrides(caminho_banco, vars_dre)
+    # persiste no DB para manter consistência entre páginas
+    _persist_overrides_to_db(caminho_banco, vars_dre)
     if vars_dre.markup <= 0:
         st.warning("⚠️ Markup médio não configurado (ou 0). CMV estimado será 0.")
     if all(v == 0 for v in (vars_dre.simples, vars_dre.fundo, vars_dre.sacolas)) and vars_dre.markup == 0:
