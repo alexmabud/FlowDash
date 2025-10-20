@@ -639,11 +639,10 @@ def render(db_path_pref: Optional[str] = None):
         # Cálculos (ativos / PL)
         ativos_totais_preview = float(bancos_total_preview or 0.0) + float(estoque_atual_est_calc or 0.0) + float(imobilizado_valor_input or 0.0)
         pl_preview = float(ativos_totais_preview) - float(passivos_totais_preview or 0.0)
-        pl_preview_nn = _nonneg(pl_preview)
 
         # Persistências no DB (somente as 8)
         _upsert_allowed(conn, "ativos_totais_base", "num", ativos_totais_preview, None, "Ativos Totais (calc.) — usado no DRE")
-        _upsert_allowed(conn, "patrimonio_liquido_base", "num", pl_preview_nn, None, "Patrimônio Líquido (calc.) — usado no DRE")
+        _upsert_allowed(conn, "patrimonio_liquido_base", "num", pl_preview, None, "Patrimônio Líquido (calc.) — usado no DRE")
 
         def _ativos_calc_green():
             _green_label("Ativos Totais (calc.) — USADO NO DRE")
@@ -660,7 +659,7 @@ def render(db_path_pref: Optional[str] = None):
             _green_label("Patrimônio Líquido (calc.) — USADO NO DRE")
             st.text_input(
                 "Patrimônio Líquido (calc.) — USADO NO DRE",
-                value=_fmt_brl(pl_preview_nn),
+                value=_fmt_brl(pl_preview),
                 disabled=True,
                 key="vi_txt_pl_calc_persist",
                 label_visibility="collapsed",
@@ -754,7 +753,8 @@ def render(db_path_pref: Optional[str] = None):
             default=fundo_default,
             min_value=0.0, step=0.01, format="%.2f",
             label_visibility="collapsed",
-            help="Percentual do faturamento destinado a fundo de promoção. Usado no DRE e persistido no DB."
+            help="Percentual do faturamento destinado a fundo de promoção. Usado no DRE e persistido no DB.",
+            on_change=_on_change_upsert_num("fundo_promocao_percent", "fundo_promocao_percent_live", "Fundo de promoção (%)", db_path)
         )
         _upsert_allowed(conn, "fundo_promocao_percent", "num", fundo, None, "Fundo de promoção (%)")
 
@@ -766,7 +766,8 @@ def render(db_path_pref: Optional[str] = None):
             default=sacolas_default,
             min_value=0.0, step=0.01, format="%.2f",
             label_visibility="collapsed",
-            help="Percentual médio gasto com sacolas sobre a receita. Usado no DRE e persistido no DB."
+            help="Percentual médio gasto com sacolas sobre a receita. Usado no DRE e persistido no DB.",
+            on_change=_on_change_upsert_num("sacolas_percent", "sacolas_percent_live", "Custo de sacolas (%)", db_path)
         )
         _upsert_allowed(conn, "sacolas_percent", "num", sacolas, None, "Custo de sacolas (%)")
 
@@ -778,7 +779,8 @@ def render(db_path_pref: Optional[str] = None):
             default=markup_default,
             min_value=0.0, step=0.1, format="%.2f",
             label_visibility="collapsed",
-            help="Coeficiente médio de precificação (Preço/CMV). Usado para estimar CMV quando não há custo unitário. Persistido no DB."
+            help="Coeficiente médio de precificação (Preço/CMV). Usado para estimar CMV quando não há custo unitário. Persistido no DB.",
+            on_change=_on_change_upsert_num("markup_medio", "markup_medio_live", "Markup médio (coeficiente)", db_path)
         )
         _upsert_allowed(conn, "markup_medio", "num", markup, None, "Markup médio (coeficiente)")
 
@@ -790,7 +792,8 @@ def render(db_path_pref: Optional[str] = None):
             default=simples_default,
             min_value=0.0, step=0.01, format="%.2f",
             label_visibility="collapsed",
-            help="Alíquota efetiva média de tributos no Simples sobre a receita. Usado no DRE e persistido no DB."
+            help="Alíquota efetiva média de tributos no Simples sobre a receita. Usado no DRE e persistido no DB.",
+            on_change=_on_change_upsert_num("aliquota_simples_nacional", "aliquota_simples_nacional_live", "Alíquota Simples Nacional (%)", db_path)
         )
         _upsert_allowed(conn, "aliquota_simples_nacional", "num", simples, None, "Alíquota Simples Nacional (%)")
 
