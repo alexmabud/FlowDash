@@ -6,6 +6,7 @@ import os
 import json
 import sqlite3
 from typing import Optional, Tuple, List, Callable, Dict, Any
+import html as _html
 from datetime import date, datetime
 
 import pandas as pd
@@ -266,10 +267,34 @@ def _fmt_brl(v: float) -> str:
         return "R$ 0,00"
 
 def _green_label(text: str) -> None:
-    st.markdown(f'<span style="color:#2ecc71;font-weight:700">{text}</span>', unsafe_allow_html=True)
+    # Removido: não renderiza títulos verdes para permitir tooltip padrão nos widgets
+    return
+
+def _title_with_help(text: str, help_msg: str) -> None:
+    import html as _html
+    safe_help = _html.escape(help_msg or "")
+    st.markdown(
+        f'<span style="color:#ccc;font-weight:600">{_html.escape(text)}</span> '
+        f'<span style="color:#888;cursor:help" title="{safe_help}">?</span>',
+        unsafe_allow_html=True,
+    )
+
+def _green_title_with_help(text: str, help_msg: str) -> None:
+    safe_help = _html.escape(help_msg or "")
+    st.markdown(
+        f'<span style="color:#2ecc71;font-weight:700">{_html.escape(text)}</span> '
+        f'<span style="color:#888;cursor:help" title="{safe_help}">?</span>',
+        unsafe_allow_html=True,
+    )
 
 # ===== Helpers de widgets (evitam warnings e mantêm estado) =====
 def number_input_state(label: str, key: str, default: float, **kwargs) -> float:
+    # Garante que o rótulo permaneça visível para exibir tooltip padrão
+    if 'label_visibility' in kwargs:
+        try:
+            kwargs.pop('label_visibility', None)
+        except Exception:
+            pass
     if key in st.session_state:
         return st.number_input(label, key=key, **kwargs)
     else:
@@ -645,37 +670,31 @@ def render(db_path_pref: Optional[str] = None):
         _upsert_allowed(conn, "patrimonio_liquido_base", "num", pl_preview, None, "Patrimônio Líquido (calc.) — usado no DRE")
 
         def _ativos_calc_green():
-            _green_label("Ativos Totais (calc.) — USADO NO DRE")
             st.text_input(
-                "Ativos Totais (calc.) — USADO NO DRE",
+                "Ativos Totais - Utilizado no DRE",
                 value=_fmt_brl(ativos_totais_preview),
                 disabled=True,
                 key="vi_txt_ativos_totais_calc_green",
-                label_visibility="collapsed",
                 help="Soma de Bancos+Caixas + Estoque atual (estimado) + Imobilizado. Persistido no DB como 'ativos_totais_base'."
             )
 
         def _pl_calc_green():
-            _green_label("Patrimônio Líquido (calc.) — USADO NO DRE")
             st.text_input(
-                "Patrimônio Líquido (calc.) — USADO NO DRE",
+                "Patrimônio Líquido - Utilizado no DRE",
                 value=_fmt_brl(pl_preview),
                 disabled=True,
                 key="vi_txt_pl_calc_persist",
-                label_visibility="collapsed",
                 help="Ativos Totais − Passivos Totais (CAP). Persistido no DB como 'patrimonio_liquido_base'."
             )
 
         # Investimento Base (DB)
         investimento_default = _nonneg(_get_num(conn, "investimento_total_base", 0.0))
         def _invest_input():
-            _green_label("Investimento Total Base (R$)")
             val = number_input_state(
-                "Investimento Total Base (R$)",
+                "Investimento Total Base (R$) - Utilizado no DRE",
                 key="investimento_total_base_live",
                 default=investimento_default,
                 min_value=0.0, step=100.0, format="%.2f",
-                label_visibility="collapsed",
                 help="Aportes/reformas/capital investido acumulado. Usado para ROI. Persistido no DB como 'investimento_total_base'.",
                 on_change=_on_change_upsert_num("investimento_total_base", "investimento_total_base_live", "Investimento Total Base (R$)", db_path),
             )
@@ -729,13 +748,12 @@ def render(db_path_pref: Optional[str] = None):
 
         _upsert_allowed(conn, "depreciacao_mensal_padrao", "num", estimativa, None, "Depreciação mensal p/ EBITDA (R$)")
 
-        _green_label("Depreciação mensal padrão (R$/mês)")
+        _green_label("Depreciação mensal padrão (R$/mês) - Utilizado no DRE")
         st.text_input(
-            "Depreciação mensal padrão (R$/mês)",
+            "Depreciação mensal padrão (R$/mês) - Utilizado no DRE",
             value=_fmt_brl(estimativa),
             disabled=True,
             key="vi_txt_dep_estimativa",
-            label_visibility="collapsed",
             help="Valor em R$/mês usado no DRE para EBIT/EBITDA. Persistido no DB como 'depreciacao_mensal_padrao'."
         )
 
@@ -745,10 +763,10 @@ def render(db_path_pref: Optional[str] = None):
     with st.container():
         st.subheader("Parâmetros Básicos")
 
-        _green_label("Fundo de promoção (%)")
+        _green_label("Fundo de promoção (%) - Utilizado no DRE")
         fundo_default = _nonneg(_get_num(conn, "fundo_promocao_percent", 1.00))
         fundo = number_input_state(
-            "Fundo de promoção (%)",
+            "Fundo de promoção (%) - Utilizado no DRE",
             key="fundo_promocao_percent_live",
             default=fundo_default,
             min_value=0.0, step=0.01, format="%.2f",
@@ -758,10 +776,10 @@ def render(db_path_pref: Optional[str] = None):
         )
         _upsert_allowed(conn, "fundo_promocao_percent", "num", fundo, None, "Fundo de promoção (%)")
 
-        _green_label("Sacolas (%)")
+        _green_label("Sacolas (%) - Utilizado no DRE")
         sacolas_default = _nonneg(_get_num(conn, "sacolas_percent", 1.20))
         sacolas = number_input_state(
-            "Sacolas (%)",
+            "Sacolas (%) - Utilizado no DRE",
             key="sacolas_percent_live",
             default=sacolas_default,
             min_value=0.0, step=0.01, format="%.2f",
@@ -771,10 +789,10 @@ def render(db_path_pref: Optional[str] = None):
         )
         _upsert_allowed(conn, "sacolas_percent", "num", sacolas, None, "Custo de sacolas (%)")
 
-        _green_label("Markup médio (coeficiente)")
+        _green_label("Markup médio)")
         markup_default = _nonneg(_get_num(conn, "markup_medio", 2.40))
         markup = number_input_state(
-            "Markup médio (coeficiente)",
+            "Markup médio - Utilizado no DRE",
             key="markup_medio_live",
             default=markup_default,
             min_value=0.0, step=0.1, format="%.2f",
@@ -784,10 +802,10 @@ def render(db_path_pref: Optional[str] = None):
         )
         _upsert_allowed(conn, "markup_medio", "num", markup, None, "Markup médio (coeficiente)")
 
-        _green_label("Simples Nacional (%)")
+        _green_label("Simples Nacional (%) - Utilizado no DRE")
         simples_default = _nonneg(_get_num(conn, "aliquota_simples_nacional", 4.32))
         simples = number_input_state(
-            "Simples Nacional (%)",
+            "Simples Nacional (%) - Utilizado no DRE",
             key="aliquota_simples_nacional_live",
             default=simples_default,
             min_value=0.0, step=0.01, format="%.2f",
