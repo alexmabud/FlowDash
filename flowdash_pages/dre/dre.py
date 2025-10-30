@@ -275,7 +275,7 @@ def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int
     sql = """
     SELECT
       SUM(COALESCE(Valor,0)) AS fat,
-      SUM(COALESCE(Valor,0) - COALESCE(valor_liquido,0)) AS tx,
+      SUM(COALESCE(Valor,0) - COALESCE(valor_liquido, COALESCE(Valor,0))) AS tx,
       COUNT(*) AS n
     FROM entrada
     WHERE date(Data) BETWEEN ? AND ?;
@@ -469,11 +469,10 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
 
     mkt_saida_rs  = _query_saidas_total(db_path, ini, fim, "Despesas", "Marketing")
-    mkt_cartao_rs = _query_mkt_cartao(db_path, ini, fim)
-    mkt_rs = mkt_saida_rs + mkt_cartao_rs
+    mkt_rs = mkt_saida_rs
 
     limp_rs = _query_saidas_total(db_path, ini, fim, "Despesas", "Manutenção/Limpeza")
-    emp_rs  = _query_cap_emprestimos(db_path, comp)  # parcela paga (caixa)
+    emp_rs  = _query_saidas_total(db_path, ini, fim, "Empréstimos e Financiamentos")
 
     simples_rs = fat * (vars_dre.simples / 100.0)
     fundo_rs   = fat * (vars_dre.fundo   / 100.0)
