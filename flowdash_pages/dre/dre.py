@@ -816,6 +816,17 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     def _cat_header(cat: str) -> str:
         return f"◆ {cat}"
 
+    # Garantir linha "Marketing" em Estruturais na grade anual (idempotente)
+    try:
+        estr = rows_by_cat.get("Estruturais", [])
+        if isinstance(estr, list) and "Marketing" not in estr:
+            for i, item in enumerate(estr):
+                if "Fundo de Promo" in item:
+                    estr.insert(i + 1, "Marketing")
+                    break
+    except Exception:
+        pass
+
     ordered_rows: List[str] = []
     for cat in cats_order:
         ordered_rows.append(_cat_header(cat))
@@ -981,6 +992,17 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Total CF + Empréstimos","Total de Saída"
         ],
     }
+
+    # Garantir linha "Marketing" em Estruturais na grade anual (styler) (idempotente)
+    try:
+        estr = rows_by_cat.get("Estruturais", [])
+        if isinstance(estr, list) and "Marketing" not in estr:
+            for i, item in enumerate(estr):
+                if "Fundo de Promo" in item:
+                    estr.insert(i + 1, "Marketing")
+                    break
+    except Exception:
+        pass
 
     for cat in cats_order:
         header = f"◆ {cat}"
