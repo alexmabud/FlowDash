@@ -667,11 +667,11 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 )
 
     HELP: Dict[str, str] = {
-        "Receita Bruta": "Total vendido no período, antes de impostos e taxas.",
-        "Receita Líquida": "Receita após impostos e taxas sobre as vendas.",
-        "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias).",
-        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção.",
-        "Lucro Bruto": "Receita líquida menos o CMV.",
+        "Receita Bruta": "Total vendido no período, antes de impostos e taxas. | Serve para: medir o volume total de vendas antes de qualquer dedução (base para metas e sazonalidade).",
+        "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
+        "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
+        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção. | Serve para: somar os custos que variam com a venda (base da Margem de Contribuição e do Ponto de Equilíbrio).",
+        "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
         "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV.",
         "Margem Operacional": "Lucro operacional após depreciação.",
