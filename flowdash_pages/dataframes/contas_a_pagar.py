@@ -10,7 +10,10 @@ import html
 from textwrap import dedent
 from datetime import date
 
+import numpy as np
+from dateutil import parser as date_parser
 import pandas as pd
+from pandas.api.types import is_datetime64_dtype
 import streamlit as st
 
 # ===================== Descoberta de DB (segura) =====================
@@ -74,6 +77,85 @@ def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
 def _month_year_label(y: int, m: int) -> str:
     meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
     return f"{meses[m-1]}/{y}"
+
+
+def _coerce_datetime_series(values: pd.Series) -> pd.Series:
+    """Padroniza conversão de datas evitando avisos de formato misto."""
+    if not isinstance(values, pd.Series):
+        values = pd.Series(values)
+
+    orig_name = values.name
+
+    if values.empty:
+        return pd.Series(pd.NaT, index=values.index, dtype="datetime64[ns]")
+
+    if isinstance(values.dtype, pd.DatetimeTZDtype):
+        return values.dt.tz_convert(None)
+    if is_datetime64_dtype(values):
+        return values.astype("datetime64[ns]")
+
+    series = values.astype("object").copy()
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+    # Normaliza strings e remove valores vazios/NaT/None
+    str_mask = series.apply(lambda x: isinstance(x, str))
+    if str_mask.any():
+        cleaned = series.loc[str_mask].str.strip()
+        cleaned = cleaned.replace({"": None})
+        lower = cleaned.fillna("").str.lower()
+        cleaned.loc[lower.isin({"nat", "none", "nan"})] = None
+        series.loc[str_mask] = cleaned
+
+    # Converte números de série do Excel (5 dígitos a partir de 1899-12-30)
+    num_values = pd.to_numeric(series, errors="coerce")
+    num_array = num_values.to_numpy(dtype=float, copy=False)
+    excel_mask = np.isfinite(num_array)
+    excel_mask &= (num_array >= 10000) & (num_array < 100000)
+    excel_mask &= np.isclose(np.mod(num_array, 1), 0.0, atol=1e-6)
+    excel_mask = pd.Series(excel_mask, index=series.index)
+
+    if excel_mask.any():
+        excel_days = (
+            pd.Series(num_array, index=series.index)
+            .loc[excel_mask]
+            .round()
+            .astype(int)
+        )
+        excel_dates = pd.Timestamp("1899-12-30") + pd.to_timedelta(excel_days, unit="D")
+        result.loc[excel_mask] = excel_dates
+        series.loc[excel_mask] = None
+
+    # Tenta formatos conhecidos explicitamente
+    str_mask = series.apply(lambda x: isinstance(x, str))
+    known_formats = ("%d/%m/%Y", "%d/%m/%y", "%Y-%m-%d", "%d-%m-%Y", "%d-%m-%y")
+    for fmt in known_formats:
+        fmt_mask = str_mask & result.isna()
+        if not fmt_mask.any():
+            break
+        parsed = pd.to_datetime(series.loc[fmt_mask], format=fmt, errors="coerce")
+        good = parsed.notna()
+        if good.any():
+            good_idx = parsed.index[good]
+            result.loc[good_idx] = parsed.loc[good_idx]
+            str_mask.loc[good_idx] = False
+            series.loc[good_idx] = None
+
+    # Fallback com dayfirst para qualquer outro valor
+    remaining_mask = result.isna()
+    if remaining_mask.any():
+        for idx, val in series.loc[remaining_mask].items():
+            if isinstance(val, str) and val:
+                try:
+                    parsed_dt = date_parser.parse(val, dayfirst=True)
+                except (ValueError, TypeError, OverflowError):
+                    continue
+                ts = pd.Timestamp(parsed_dt)
+                if ts.tz is not None:
+                    ts = ts.tz_convert(None)
+                result.at[idx] = ts
+
+    result.name = orig_name
+    return result
 
 
 # ===================== Loaders básicos =====================
@@ -160,7 +242,7 @@ def _pick_due_col(df: pd.DataFrame) -> Optional[str]:
 
 def _parse_competencia(series: pd.Series) -> pd.Series:
     s = series.astype(str).str.strip().str.replace("/", "-", regex=False)
-    return pd.to_datetime(s, errors="coerce")
+    return _coerce_datetime_series(s)
 
 def _best_due_series(df: pd.DataFrame) -> pd.Series:
     order = ["competencia","vencimento","data_vencimento","data_evento","data_fatura","data"]
@@ -168,7 +250,7 @@ def _best_due_series(df: pd.DataFrame) -> pd.Series:
     best_count = -1
     for c in order:
         if c in df.columns:
-            dt = _parse_competencia(df[c]) if c.lower() == "competencia" else pd.to_datetime(df[c], errors="coerce")
+            dt = _parse_competencia(df[c]) if c.lower() == "competencia" else _coerce_datetime_series(df[c])
             n = int(dt.notna().sum())
             if n > best_count:
                 best, best_count = dt, n
@@ -248,7 +330,7 @@ def _build_fixed_panel_status(
     if due_col.lower() == "competencia":
         df["_dt"] = _parse_competencia(df[due_col])
     else:
-        df["_dt"] = pd.to_datetime(df[due_col], errors="coerce")
+        df["_dt"] = _coerce_datetime_series(df[due_col])
 
     m_mes = df["_dt"].dt.month.eq(ref_month) & df["_dt"].dt.year.eq(ref_year)
 
@@ -474,7 +556,7 @@ def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
                 if due_col.lower() == "competencia":
                     mv["_venc"] = _parse_competencia(mv[due_col])
                 else:
-                    mv["_venc"] = pd.to_datetime(mv[due_col], errors="coerce")
+                    mv["_venc"] = _coerce_datetime_series(mv[due_col])
             else:
                 mv["_venc"] = pd.NaT
 
@@ -509,7 +591,7 @@ def _cards_view(db: DB, ref_year: int, ref_month: int) -> pd.DataFrame:
             if comp_col.lower() == "competencia":
                 f["_comp"] = _parse_competencia(f[comp_col])
             else:
-                f["_comp"] = pd.to_datetime(f[comp_col], errors="coerce")
+                f["_comp"] = _coerce_datetime_series(f[comp_col])
         else:
             f["_comp"] = pd.NaT
         is_mes = f["_comp"].dt.month.eq(ref_month) & f["_comp"].dt.year.eq(ref_year)
