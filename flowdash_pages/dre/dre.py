@@ -670,7 +670,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas.",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas.",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias).",
+        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção.",
         "Lucro Bruto": "Receita líquida menos o CMV.",
+        "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV.",
         "Margem Operacional": "Lucro operacional após depreciação.",
         "Margem Líquida": "Lucro final como % da receita líquida.",
@@ -725,12 +727,22 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     except Exception:
         crec = 0.0
 
+    fixas_rs = m.get("fixas")
+    if fixas_rs is None:
+        try:
+            ini, fim, _ = _periodo_ym(ano, mes)
+            fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
+        except Exception:
+            fixas_rs = 0.0
+    fixas_rs = _safe(fixas_rs)
+
     cards_html: List[str] = []
 
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", _fmt_brl(m["receita_liq"])),
         _chip("CMV", _fmt_brl(m["cmv"])),                 # <- chip CMV adicionado
+        _chip("Total de Variáveis (R$)", _fmt_brl(m["total_var"])),
         _chip("Lucro Bruto", _fmt_brl(m["lucro_bruto"])),
     ], "k-estrut"))
 
@@ -738,10 +750,12 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("Margem Bruta", _fmt_pct(m["margem_bruta_pct"])),
         _chip("Margem Operacional", _fmt_pct(m["margem_operacional_pct"])),
         _chip("Margem Líquida", _fmt_pct(m["margem_liquida_pct"])),
-        _chip("Margem de Contribuição", _fmt_pct(m["margem_contrib_pct"])),
+        _chip_duo("Margem de Contribuição", m["margem_contrib"], m["margem_contrib_pct"],
+                  help_key="Margem de Contribuição"),
     ], "k-margens"))
 
     cards_html.append(_card("Eficiência e Gestão", [
+        _chip("Custo Fixo Mensal (R$)", _fmt_brl(fixas_rs)),
         _chip("Custo Fixo / Receita", _fmt_pct(m["custo_fixo_sobre_receita_pct"])),
         _chip_duo("Ponto de Equilíbrio (Contábil)", m["break_even_rs"], m["break_even_pct"],
                   help_key="Ponto de Equilíbrio (Contábil) (R$)"),
@@ -817,6 +831,17 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Total CF + Empréstimos","Total de Saída"
         ],
     }
+
+    # Garantir "Custo Fixo Mensal" na primeira posição da seção Eficiência e Gestão (idempotente)
+    try:
+        efic = rows_by_cat.get("Eficiência e Gestão", [])
+        if isinstance(efic, list):
+            efic = [item for item in efic if item != "Custo Fixo Mensal"]
+            efic.insert(0, "Custo Fixo Mensal")
+            rows_by_cat["Eficiência e Gestão"] = efic
+    except Exception:
+        pass
+
     cats_order = ["Estruturais","Margens","Eficiência e Gestão","Fluxo e Endividamento","Crescimento e Vendas","Avançados","Totais"]
 
     def _cat_header(cat: str) -> str:
@@ -845,6 +870,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         pre_start = (ano < START_YEAR) or (ano == START_YEAR and mes < START_MONTH)
         m = _calc_mes(db_path, ano, mes, vars_dre)
         fat = m["fat"]
+        fixas_rs = _safe(m.get("fixas"))
 
         try:
             crec_pct = _crescimento_mtd(db_path, ano, mes)
@@ -872,7 +898,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Fundo de Promoção": m["fundo"],
             "Margem de Contribuição": m["margem_contrib"],
 
-            "Custo Fixo Mensal": m["fixas"],
+            "Custo Fixo Mensal": fixas_rs,
             "Gasto com Empréstimos/Financiamentos": m["emp"],
             "Marketing": m["mkt"],
             "Manutenção/Limpeza": m["limp"],
@@ -948,7 +974,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
 
     _KEY_ROWS = [
         "Faturamento","Receita Líquida","Saída Imposto e Maquininha",
-        "Margem de Contribuição",
+        "Margem de Contribuição","Custo Fixo Mensal",
         "Ponto de Equilíbrio (Contábil)",
         "Ponto de Equilíbrio Financeiro",
         "Gasto com Empréstimos/Financiamentos",
