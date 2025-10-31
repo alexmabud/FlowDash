@@ -359,14 +359,21 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
     SELECT SUM(COALESCE(Valor,0))
     FROM saida
     WHERE date(Data) BETWEEN ? AND ?
-      AND TRIM(UPPER(COALESCE(Categoria,''))) = 'DESPESAS'
-      AND TRIM(UPPER(COALESCE(Sub_Categoria,''))) IN (?, ?, ?)
+      AND TRIM(UPPER(COALESCE(Categoria,''))) IN (?, ?)
+      AND TRIM(UPPER(COALESCE(Sub_Categoria,''))) IN (?, ?, ?, ?)
     """
 
     fixos_total = _sum(fixos_sql, [])
     extras_total = _sum(
         extras_sql,
-        ["MARKETING", "MANUTENÇÃO/LIMPEZA", "MANUTENCAO/LIMPEZA"],
+        [
+            "DESPESAS",
+            "OUTROS",
+            "MARKETING",
+            "MANUTENÇÃO/LIMPEZA",
+            "MANUTENCAO/LIMPEZA",
+            "OUTROS",
+        ],
     )
 
     return fixos_total + extras_total
