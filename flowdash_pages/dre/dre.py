@@ -306,67 +306,70 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
     """Soma custos/despesas operacionais do mês excluindo itens financeiros e não operacionais."""
     ini, fim, _ = _periodo_ym(ano, mes)
 
-    inclusion_blocks = [
-        "Categoria COLLATE NOCASE LIKE '%custos fix%'",
-        "Sub_Categoria COLLATE NOCASE LIKE '%custos fix%'",
-        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%custos fix%'",
-        "Categoria COLLATE NOCASE LIKE '%desp% operac%'",
-        "Sub_Categoria COLLATE NOCASE LIKE '%desp% operac%'",
-        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%desp% operac%'",
-        "Categoria COLLATE NOCASE LIKE '%desp% fixa%'",
-        "Sub_Categoria COLLATE NOCASE LIKE '%desp% fixa%'",
-        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%desp% fixa%'",
-        "Categoria COLLATE NOCASE LIKE '%extra%'",
-        "Sub_Categoria COLLATE NOCASE LIKE '%extra%'",
-        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%extra%'",
-        "Categoria COLLATE NOCASE LIKE '%comiss%'",
-        "Sub_Categoria COLLATE NOCASE LIKE '%comiss%'",
-        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%comiss%'",
-    ]
-
-    inclusion_sql = " OR ".join(f"({cond})" for cond in inclusion_blocks)
-
     excluded_tokens = (
-        "juro",
-        "juros",
-        "tarifa",
-        "banc",
-        "iof",
-        "emprest",
-        "aporte",
-        "aportes",
-        "retirada",
-        "retiradas",
-        "imobiliz",
-        "invest",
-        "amortiz",
-        "principal",
+        "JURO",
+        "JUROS",
+        "TARIFA",
+        "BANC",
+        "IOF",
+        "EMPREST",
+        "FINANC",
+        "PARCELA",
+        "PRINCIPAL",
+        "APORTE",
+        "RETIRADA",
+        "IMOBILIZ",
+        "INVEST",
+        "AMORTIZ",
+        "MAQUIN",
+        "CARTAO",
+        "CARTÃO",
     )
     exclusion_checks = []
     exclusion_args: List[str] = []
     for token in excluded_tokens:
-        exclusion_checks.append("instr(lower(COALESCE(Sub_Categoria,'')), ?) > 0")
-        exclusion_checks.append("instr(lower(COALESCE(Descricao,'')), ?) > 0")
-        exclusion_args.extend([token, token])
+        upper_token = token.upper()
+        exclusion_checks.append("instr(UPPER(TRIM(COALESCE(Categoria,''))), ?) > 0")
+        exclusion_args.append(upper_token)
+        exclusion_checks.append("instr(UPPER(TRIM(COALESCE(Sub_Categoria,''))), ?) > 0")
+        exclusion_args.append(upper_token)
 
-    sql = f"""
+    exclusion_clause = ""
+    if exclusion_checks:
+        exclusion_clause = " AND NOT (" + " OR ".join(exclusion_checks) + ")"
+
+    def _sum(sql_base: str, extra_params: List[str]) -> float:
+        sql = sql_base + exclusion_clause + ";"
+        params = [ini, fim] + list(extra_params) + exclusion_args
+        try:
+            with _conn(db_path) as c:
+                row = c.execute(sql, params).fetchone()
+                return _safe(row[0])
+        except Exception:
+            return 0.0
+
+    fixos_sql = """
     SELECT SUM(COALESCE(Valor,0))
     FROM saida
     WHERE date(Data) BETWEEN ? AND ?
-      AND (
-        {inclusion_sql}
-      )
+      AND TRIM(UPPER(COALESCE(Categoria,''))) = 'CUSTOS FIXOS'
     """
-    if exclusion_checks:
-        sql += "      AND NOT (" + " OR ".join(exclusion_checks) + ")\n"
-    sql += ";"
 
-    try:
-        with _conn(db_path) as c:
-            row = c.execute(sql, (ini, fim, *exclusion_args)).fetchone()
-            return _safe(row[0])
-    except Exception:
-        return 0.0
+    extras_sql = """
+    SELECT SUM(COALESCE(Valor,0))
+    FROM saida
+    WHERE date(Data) BETWEEN ? AND ?
+      AND TRIM(UPPER(COALESCE(Categoria,''))) = 'DESPESAS'
+      AND TRIM(UPPER(COALESCE(Sub_Categoria,''))) IN (?, ?, ?)
+    """
+
+    fixos_total = _sum(fixos_sql, [])
+    extras_total = _sum(
+        extras_sql,
+        ["MARKETING", "MANUTENÇÃO/LIMPEZA", "MANUTENCAO/LIMPEZA"],
+    )
+
+    return fixos_total + extras_total
 
 
 @st.cache_data(show_spinner=False, ttl=60)
