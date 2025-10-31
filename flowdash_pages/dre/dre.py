@@ -306,19 +306,25 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
     """Soma custos/despesas operacionais do mês excluindo itens financeiros e não operacionais."""
     ini, fim, _ = _periodo_ym(ano, mes)
 
-    inclusions = [
-        "Categoria COLLATE NOCASE = 'Custos Fixos Operacionais'",
-        "Sub_Categoria COLLATE NOCASE = 'Custos Fixos Operacionais'",
-        "Categoria COLLATE NOCASE = 'Despesas Operacionais Extras'",
-        "Sub_Categoria COLLATE NOCASE = 'Despesas Operacionais Extras'",
-        "Categoria COLLATE NOCASE = 'Comissão Funcionário'",
-        "Categoria COLLATE NOCASE = 'Comissao Funcionario'",
-        "Sub_Categoria COLLATE NOCASE = 'Comissão Funcionário'",
-        "Sub_Categoria COLLATE NOCASE = 'Comissao Funcionario'",
-        "(COALESCE(Sub_Categoria,'') <> '' AND Sub_Categoria LIKE '%Comiss%Func%' COLLATE NOCASE)",
-        "(COALESCE(Descricao,'') <> '' AND Descricao LIKE '%Comiss%Func%' COLLATE NOCASE)",
+    inclusion_blocks = [
+        "Categoria COLLATE NOCASE LIKE '%custos fix%'",
+        "Sub_Categoria COLLATE NOCASE LIKE '%custos fix%'",
+        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%custos fix%'",
+        "Categoria COLLATE NOCASE LIKE '%desp% operac%'",
+        "Sub_Categoria COLLATE NOCASE LIKE '%desp% operac%'",
+        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%desp% operac%'",
+        "Categoria COLLATE NOCASE LIKE '%desp% fixa%'",
+        "Sub_Categoria COLLATE NOCASE LIKE '%desp% fixa%'",
+        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%desp% fixa%'",
+        "Categoria COLLATE NOCASE LIKE '%extra%'",
+        "Sub_Categoria COLLATE NOCASE LIKE '%extra%'",
+        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%extra%'",
+        "Categoria COLLATE NOCASE LIKE '%comiss%'",
+        "Sub_Categoria COLLATE NOCASE LIKE '%comiss%'",
+        "COALESCE(Sub_Categorias_saida,'') COLLATE NOCASE LIKE '%comiss%'",
     ]
-    inclusion_sql = " OR ".join(inclusions)
+
+    inclusion_sql = " OR ".join(f"({cond})" for cond in inclusion_blocks)
 
     excluded_tokens = (
         "juro",
@@ -557,7 +563,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     total_saida_oper     = total_oper_fixo_extra + total_var
 
     # EBITDA base
-    ebitda_base = margem_contrib - total_oper_fixo_extra
+    ebitda_base = lucro_bruto - total_saida_oper
 
     # EBIT: apenas depreciação (não usamos amortização)
     dep_extra = vars_dre.dep_padrao
@@ -735,7 +741,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
         "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção. | Serve para: somar os custos que variam com a venda (base da Margem de Contribuição e do Ponto de Equilíbrio).",
-        "Total de Saída Operacional (R$)": "Serve para: mostrar quanto a operação gasta no mês (fixos + variáveis + extras), excluindo despesas financeiras e itens não operacionais. Base para EBITDA, eficiência e margens.",
+        "Total de Saída Operacional (R$)": "Total de despesas operacionais (fixas e variáveis). | Serve para: mostrar quanto a operação gasta no mês (fixos + variáveis + extras), excluindo despesas financeiras e itens não operacionais. Base para EBITDA, eficiência e margens.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
         "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
@@ -760,8 +766,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Ticket Médio": "Média de valor por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
         "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
-        "EBITDA (Caixa Oper.)": "Lucro operacional antes de depreciação.",
-        "EBIT (Operacional)": "Lucro operacional após depreciação.",
+        "EBITDA": "Lucro operacional antes de juros, impostos, depreciação e amortização. | Serve para: avaliar a geração de caixa das operações, sem efeitos financeiros ou contábeis.",
+        "EBIT": "Lucro operacional após depreciação.",
         "Lucro Líquido": "Resultado final no modelo simplificado.",
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
         "ROI": "Retorno do lucro sobre o investimento total.",
@@ -849,8 +855,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     ], "k-cresc"))
 
     cards_html.append(_card("Avançados", [
-        _chip("EBITDA (Caixa Oper.)", _fmt_brl(m["ebitda"])),
-        _chip("EBIT (Operacional)", _fmt_brl(m["ebit"])),
+        _chip("EBITDA", _fmt_brl(m["ebitda"])),
+        _chip("EBIT", _fmt_brl(m["ebit"])),
         _chip("Lucro Líquido", _fmt_brl(m["lucro_liq"])),
         _chip("ROE", _fmt_pct(m["roe_pct"])),
         _chip("ROI", _fmt_pct(m["roi_pct"])),
@@ -895,7 +901,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
         ],
         "Avançados": [
-            "EBIT (Operacional)","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
+            "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
         ],
         "Totais": [
             "Total CF + Empréstimos","Total de Saída"
@@ -980,7 +986,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ponto de Equilíbrio Financeiro": m["break_even_financeiro_rs"],
             "Ticket Médio": m["ticket_medio"],
 
-            "EBIT (Operacional)": m["ebit"],
+            "EBIT": m["ebit"],
             "EBITDA Lucro/Prejuízo": m["ebitda"],
             "Lucro Líquido": m["lucro_liq"],
         }
@@ -1050,7 +1056,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Ponto de Equilíbrio (Contábil)",
         "Ponto de Equilíbrio Financeiro",
         "Gasto com Empréstimos/Financiamentos",
-        "EBIT (Operacional)","EBITDA Lucro/Prejuízo","Lucro Líquido",
+        "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido",
         "Total de Saída Operacional (R$)","Total CF + Empréstimos","Total de Saída"
     ]
 
@@ -1091,7 +1097,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
         ],
         "Avançados": [
-            "EBIT (Operacional)","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
+            "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
         ],
         "Totais": [
             "Total CF + Empréstimos","Total de Saída"
