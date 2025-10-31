@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 # flowdash_pages/dre/dre.py
 from __future__ import annotations
 
@@ -477,12 +477,16 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     simples_rs = fat * (vars_dre.simples / 100.0)
     fundo_rs   = fat * (vars_dre.fundo   / 100.0)
     sacolas_rs = fat * (vars_dre.sacolas / 100.0)
-    cmv_rs     = (fat / vars_dre.markup) if vars_dre.markup > 0 else 0.0
+
+    # ===== CMV corrigido: faturamento ÷ markup + frete de compra (mercadorias)
+    base_cmv = (fat / vars_dre.markup) if vars_dre.markup > 0 else 0.0
+    cmv_rs   = base_cmv + fretes_rs
 
     saida_imp_maq   = simples_rs + taxa_maq_rs
     receita_liq     = fat - saida_imp_maq
 
-    total_var       = cmv_rs + fretes_rs + sacolas_rs + fundo_rs
+    # total_var NÃO soma frete novamente (já incluso no CMV)
+    total_var       = cmv_rs + sacolas_rs + fundo_rs
     margem_contrib  = receita_liq - total_var
     lucro_bruto     = receita_liq - cmv_rs
 
@@ -642,7 +646,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 @media (prefers-reduced-motion:no-preference){
   .fd-chip details.qwrap .tip{animation:fd-fade .12s ease}
 }
-@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}
 
 /* cores por categoria */
 .cap-card.k-estrut{border-left:6px solid #2ecc71}
@@ -665,6 +669,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     HELP: Dict[str, str] = {
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas.",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas.",
+        "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias).",
         "Lucro Bruto": "Receita líquida menos o CMV.",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV.",
         "Margem Operacional": "Lucro operacional após depreciação.",
@@ -725,6 +730,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", _fmt_brl(m["receita_liq"])),
+        _chip("CMV", _fmt_brl(m["cmv"])),                 # <- chip CMV adicionado
         _chip("Lucro Bruto", _fmt_brl(m["lucro_bruto"])),
     ], "k-estrut"))
 
@@ -859,7 +865,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Taxa Maquineta": m["taxa_maq"],
             "Saída Imposto e Maquininha": m["saida_imp_maq"],
             "Receita Líquida": m["receita_liq"],
-            "CMV (Mercadorias)": m["cmv"],
+            "CMV (Mercadorias)": m["cmv"],          # <- tabela usa CMV corrigido
             "Lucro Bruto": m["lucro_bruto"],
             "Fretes": m["fretes"],
             "Sacolas": m["sacolas"],
