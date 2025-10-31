@@ -301,6 +301,68 @@ def _query_fretes(db_path: str, ini: str, fim: str) -> float:
     except Exception:
         return 0.0
 
+
+def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
+    """Soma custos/despesas operacionais do mês excluindo itens financeiros e não operacionais."""
+    ini, fim, _ = _periodo_ym(ano, mes)
+
+    inclusions = [
+        "Categoria COLLATE NOCASE = 'Custos Fixos Operacionais'",
+        "Sub_Categoria COLLATE NOCASE = 'Custos Fixos Operacionais'",
+        "Categoria COLLATE NOCASE = 'Despesas Operacionais Extras'",
+        "Sub_Categoria COLLATE NOCASE = 'Despesas Operacionais Extras'",
+        "Categoria COLLATE NOCASE = 'Comissão Funcionário'",
+        "Categoria COLLATE NOCASE = 'Comissao Funcionario'",
+        "Sub_Categoria COLLATE NOCASE = 'Comissão Funcionário'",
+        "Sub_Categoria COLLATE NOCASE = 'Comissao Funcionario'",
+        "(COALESCE(Sub_Categoria,'') <> '' AND Sub_Categoria LIKE '%Comiss%Func%' COLLATE NOCASE)",
+        "(COALESCE(Descricao,'') <> '' AND Descricao LIKE '%Comiss%Func%' COLLATE NOCASE)",
+    ]
+    inclusion_sql = " OR ".join(inclusions)
+
+    excluded_tokens = (
+        "juro",
+        "juros",
+        "tarifa",
+        "banc",
+        "iof",
+        "emprest",
+        "aporte",
+        "aportes",
+        "retirada",
+        "retiradas",
+        "imobiliz",
+        "invest",
+        "amortiz",
+        "principal",
+    )
+    exclusion_checks = []
+    exclusion_args: List[str] = []
+    for token in excluded_tokens:
+        exclusion_checks.append("instr(lower(COALESCE(Sub_Categoria,'')), ?) > 0")
+        exclusion_checks.append("instr(lower(COALESCE(Descricao,'')), ?) > 0")
+        exclusion_args.extend([token, token])
+
+    sql = f"""
+    SELECT SUM(COALESCE(Valor,0))
+    FROM saida
+    WHERE date(Data) BETWEEN ? AND ?
+      AND (
+        {inclusion_sql}
+      )
+    """
+    if exclusion_checks:
+        sql += "      AND NOT (" + " OR ".join(exclusion_checks) + ")\n"
+    sql += ";"
+
+    try:
+        with _conn(db_path) as c:
+            row = c.execute(sql, (ini, fim, *exclusion_args)).fetchone()
+            return _safe(row[0])
+    except Exception:
+        return 0.0
+
+
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_saidas_total(db_path: str, ini: str, fim: str,
                         categoria: str, subcat: str | None = None) -> float:
@@ -490,11 +552,12 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     margem_contrib  = receita_liq - total_var
     lucro_bruto     = receita_liq - cmv_rs
 
+    total_oper_fixo_extra = compute_total_saida_operacional(ano, mes, db_path)
     total_cf_emprestimos = fixas_rs + emp_rs
-    total_saida_oper     = fixas_rs + emp_rs + mkt_rs + limp_rs
+    total_saida_oper     = total_oper_fixo_extra + total_var
 
     # EBITDA base
-    ebitda_base = margem_contrib - total_saida_oper
+    ebitda_base = margem_contrib - total_oper_fixo_extra
 
     # EBIT: apenas depreciação (não usamos amortização)
     dep_extra = vars_dre.dep_padrao
@@ -550,6 +613,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
         "limp": limp_rs,
         "total_cf_emp": total_cf_emprestimos,
         "total_saida_oper": total_saida_oper,
+        "total_oper_fixo_extra": total_oper_fixo_extra,
 
         # lucros/caixa
         "ebitda": ebitda_base,
@@ -671,6 +735,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
         "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção. | Serve para: somar os custos que variam com a venda (base da Margem de Contribuição e do Ponto de Equilíbrio).",
+        "Total de Saída Operacional (R$)": "Serve para: mostrar quanto a operação gasta no mês (fixos + variáveis + extras), excluindo despesas financeiras e itens não operacionais. Base para EBITDA, eficiência e margens.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
         "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
@@ -746,6 +811,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("Receita Líquida", _fmt_brl(m["receita_liq"])),
         _chip("CMV", _fmt_brl(m["cmv"])),                 # <- chip CMV adicionado
         _chip("Total de Variáveis (R$)", _fmt_brl(m["total_var"])),
+        _chip("Total de Saída Operacional (R$)", _fmt_brl(m["total_saida_oper"])),
         _chip("Lucro Bruto", _fmt_brl(m["lucro_bruto"])),
     ], "k-estrut"))
 
@@ -812,7 +878,8 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     rows_by_cat = {
         "Estruturais": [
             "Faturamento","Simples Nacional","Taxa Maquineta","Saída Imposto e Maquininha","Receita Líquida",
-            "CMV (Mercadorias)","Lucro Bruto","Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
+            "CMV (Mercadorias)","Total de Variáveis (R$)","Total de Saída Operacional (R$)","Lucro Bruto",
+            "Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
         ],
         "Margens": [
             "Margem Bruta (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
@@ -895,6 +962,8 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Saída Imposto e Maquininha": m["saida_imp_maq"],
             "Receita Líquida": m["receita_liq"],
             "CMV (Mercadorias)": m["cmv"],          # <- tabela usa CMV corrigido
+            "Total de Variáveis (R$)": m["total_var"],
+            "Total de Saída Operacional (R$)": m["total_saida_oper"],
             "Lucro Bruto": m["lucro_bruto"],
             "Fretes": m["fretes"],
             "Sacolas": m["sacolas"],
@@ -982,7 +1051,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         "Ponto de Equilíbrio Financeiro",
         "Gasto com Empréstimos/Financiamentos",
         "EBIT (Operacional)","EBITDA Lucro/Prejuízo","Lucro Líquido",
-        "Total CF + Empréstimos","Total de Saída"
+        "Total de Saída Operacional (R$)","Total CF + Empréstimos","Total de Saída"
     ]
 
     styler = df_show.style
@@ -1001,7 +1070,8 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
     rows_by_cat = {
         "Estruturais": [
             "Faturamento","Simples Nacional","Taxa Maquineta","Saída Imposto e Maquininha","Receita Líquida",
-            "CMV (Mercadorias)","Lucro Bruto","Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
+            "CMV (Mercadorias)","Total de Variáveis (R$)","Total de Saída Operacional (R$)","Lucro Bruto",
+            "Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
         ],
         "Margens": [
             "Margem Bruta (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
