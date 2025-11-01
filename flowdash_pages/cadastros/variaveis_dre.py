@@ -220,6 +220,8 @@ _ALLOWED_KEYS = {
     "sacolas_percent",
     "markup_medio",
     "aliquota_simples_nacional",
+    "pl_imobilizado_valor_total",
+    "dep_taxa_mensal_percent_live",
 }
 
 def _upsert_allowed(conn: sqlite3.Connection, chave: str, tipo: str,
@@ -339,6 +341,8 @@ def _preload_session_from_sources(conn: sqlite3.Connection, db_path: Optional[st
         "sacolas_percent_live": ("sacolas_percent", "num"),
         "markup_medio_live": ("markup_medio", "num"),
         "aliquota_simples_nacional_live": ("aliquota_simples_nacional", "num"),
+        "pl_imobilizado_valor_total": ("pl_imobilizado_valor_total", "num"),
+        "dep_taxa_mensal_percent_live": ("dep_taxa_mensal_percent_live", "num"),
     }
     for key_widget, (db_key, tipo) in mapping_db.items():
         try:
@@ -653,13 +657,15 @@ def render(db_path_pref: Optional[str] = None):
 
         # Imobilizado (persistência via JSON)
         imobilizado_valor_input = number_input_state(
-            "Valor total dos bens (R$) — Imobilizado",
+            "Valor total dos bens (R$) – Imobilizado",
             key="pl_imobilizado_valor_total",
             default=0.0,
             min_value=0.0, step=100.0, format="%.2f",
             help="Somatório do imobilizado (fachada, mobiliário, TI, etc.). Entra nos Ativos Totais. Persistido em arquivo (não no banco).",
-            on_change=_on_change_persist("pl_imobilizado_valor_total", db_path=db_path),
+            on_change=_on_change_upsert_num("pl_imobilizado_valor_total", "pl_imobilizado_valor_total", "Valor total dos bens (R$) – Imobilizado", db_path),
         )
+        _upsert_allowed(conn, "pl_imobilizado_valor_total", "num", imobilizado_valor_input, None, "Valor total dos bens (R$) – Imobilizado")
+        _persist_keys_to_json(["pl_imobilizado_valor_total"], db_path)
 
         # Cálculos (ativos / PL)
         ativos_totais_preview = float(bancos_total_preview or 0.0) + float(estoque_atual_est_calc or 0.0) + float(imobilizado_valor_input or 0.0)
@@ -740,8 +746,10 @@ def render(db_path_pref: Optional[str] = None):
             default=0.0,
             min_value=0.0, step=0.10, format="%.2f",
             help="Percentual mensal estimado para depreciação do imobilizado. Persistido em arquivo (não no DB).",
-            on_change=_on_change_persist("dep_taxa_mensal_percent_live", db_path=db_path),
+            on_change=_on_change_upsert_num("dep_taxa_mensal_percent_live", "dep_taxa_mensal_percent_live", "Taxa mensal (%)", db_path),
         )
+        _upsert_allowed(conn, "dep_taxa_mensal_percent_live", "num", taxa_dep, None, "Taxa mensal (%)")
+        _persist_keys_to_json(["dep_taxa_mensal_percent_live"], db_path)
 
         imobilizado_valor = float(st.session_state.get("pl_imobilizado_valor_total", 0.0) or 0.0)
         estimativa = float(imobilizado_valor * ((taxa_dep or 0.0) / 100.0))
