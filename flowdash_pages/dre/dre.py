@@ -584,7 +584,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
     # KPIs
     rl = receita_liq
-    ebitda_pct = (ebitda_base / rl * 100.0) if rl > 0 else None
     mc_ratio = _nz_div(margem_contrib, rl)
 
     break_even_rs = (fixas_rs / mc_ratio) if mc_ratio > 0 else 0.0
@@ -634,7 +633,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
         # lucros/caixa
         "ebitda": ebitda_base,
-        "ebitda_pct": ebitda_pct,
         "ebit": ebit,
         "lucro_liq": lucro_liq,
         "lucro_bruto": lucro_bruto,
@@ -716,7 +714,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 .fd-chip{display:inline-flex;align-items:center;border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.05);padding:6px 10px;border-radius:9999px;margin:4px 6px 0 0;font-size:.92rem;line-height:1;position:relative}
 .fd-chip .k{opacity:.90;margin-right:6px}
 .fd-chip .v{font-weight:700;margin-right:6px}
-.fd-chip .sub{display:block;font-size:.78rem;opacity:.75;margin-top:2px}
 
 /* "?" com <details> */
 .fd-chip details.qwrap{display:inline-block;margin-left:2px;position:relative}
@@ -779,8 +776,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Ticket Médio": "Média de valor por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
         "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
-        "EBITDA": "Lucro operacional antes de juros, impostos, depreciação e amortização. | Serve para: comparar eficiência operacional ao longo do tempo; a % é EBITDA ÷ Receita Líquida.",
-        "EBITDA (Caixa Oper.)": "Lucro operacional antes de juros, impostos, depreciação e amortização. | Serve para: comparar eficiência operacional ao longo do tempo; a % é EBITDA ÷ Receita Líquida.",
+        "EBITDA": "Lucro operacional antes de juros, impostos, depreciação e amortização. | Serve para: avaliar a geração de caixa das operações, sem efeitos financeiros ou contábeis.",
         "EBIT": "Lucro operacional após depreciação.",
         "Lucro Líquido": "Resultado final no modelo simplificado.",
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
@@ -805,23 +801,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
                     f'<details class="qwrap"><summary class="q">?</summary><div class="tip">{tip}</div></details></span>')
         return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val_comb}</span></span>'
 
-    def _chip_val_pct(lbl: str, val_rs: float, pct_val: Optional[float], help_key: Optional[str] = None) -> str:
-        tip = HELP.get(help_key or lbl, "")
-        val_str = _fmt_brl(val_rs)
-        if pct_val is None or pd.isna(pct_val):
-            pct_str = "—"
-        else:
-            pct_str = f"{float(pct_val):.2f}%".replace(".", ",")
-        pct_line = f"{pct_str} da Receita Líquida"
-        body = (f'<span class="fd-chip"><span class="k">{lbl}</span>'
-                f'<span class="v">{val_str}</span>'
-                f'<span class="sub">{pct_line}</span>')
-        if tip:
-            body += (f'<details class="qwrap"><summary class="q">?</summary>'
-                     f'<div class="tip">{tip}</div></details></span>')
-        else:
-            body += '</span>'
-        return body
     def _card(title: str, chips: List[str], cls: str) -> str:
         return f'<div class="cap-card {cls}"><div class="cap-title-xl">{title}</div><div class="fd-card-body">{"".join(chips)}</div></div>'
 
@@ -886,7 +865,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     ], "k-cresc"))
 
     cards_html.append(_card("Avançados", [
-        _chip_val_pct("EBITDA (Caixa Oper.)", m["ebitda"], m.get("ebitda_pct"), help_key="EBITDA"),
+        _chip("EBITDA", _fmt_brl(m["ebitda"])),
         _chip("EBIT", _fmt_brl(m["ebit"])),
         _chip("Lucro Líquido", _fmt_brl(m["lucro_liq"])),
         _chip("ROE", _fmt_pct(m["roe_pct"])),
@@ -932,7 +911,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
         ],
         "Avançados": [
-            "EBIT","EBITDA (Caixa Oper.)","EBITDA (%)","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
+            "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
         ],
         "Totais": [
             "Total CF + Empréstimos","Total de Saída"
@@ -1018,7 +997,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ticket Médio": m["ticket_medio"],
 
             "EBIT": m["ebit"],
-            "EBITDA (Caixa Oper.)": m["ebitda"],
+            "EBITDA Lucro/Prejuízo": m["ebitda"],
             "Lucro Líquido": m["lucro_liq"],
         }
 
@@ -1035,7 +1014,6 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Gasto com Empréstimos/Financiamentos": m["emp_pct_sobre_receita"],
             "Índice de Endividamento (%)": m["indice_endividamento_pct"],
             "Crescimento de Receita (m/m) (%)": crec_pct,
-            "EBITDA (%)": m["ebitda_pct"],
             "ROE (%)": m["roe_pct"],
             "ROI (%)": m["roi_pct"],
             "ROA (%)": m["roa_pct"],
@@ -1082,47 +1060,17 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
         df_show[(mes, "Valores R$")] = df_show[(mes, "Valores R$")].map(_fmt_val)
         df_show[(mes, "Análise Vertical")] = df_show[(mes, "Análise Vertical")].map(_fmt_pct_cell)
 
-    if "EBITDA (%)" in df_show.index:
-        for mes in meses:
-            col = (mes, "Análise Vertical")
-            raw_val = df.loc["EBITDA (%)", col]
-            if raw_val is None or pd.isna(raw_val):
-                df_show.loc["EBITDA (%)", col] = "—"
-            else:
-                df_show.loc["EBITDA (%)", col] = f"{float(raw_val):.2f}%".replace(".", ",")
-
-
     _KEY_ROWS = [
         "Faturamento","Receita Líquida","Saída Imposto e Maquininha",
         "Margem de Contribuição","Custo Fixo Mensal",
         "Ponto de Equilíbrio (Contábil)",
         "Ponto de Equilíbrio Financeiro",
         "Gasto com Empréstimos/Financiamentos",
-        "EBIT","EBITDA (Caixa Oper.)","EBITDA (%)","Lucro Líquido",
+        "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido",
         "Total de Saída Operacional (R$)","Total CF + Empréstimos","Total de Saída"
     ]
 
     styler = df_show.style
-
-    def _colorize_ebitda_pct(val: object) -> str:
-        if isinstance(val, str) and val.endswith("%"):
-            num_str = val.replace("%", "").replace(",", ".").strip()
-            try:
-                num = float(num_str)
-            except ValueError:
-                return ""
-            if num >= 10:
-                return "color:#2ecc71;font-weight:700;"
-            if num >= 5:
-                return "color:#f39c12;font-weight:700;"
-            return "color:#e74c3c;font-weight:700;"
-        return ""
-
-    if "EBITDA (%)" in df_show.index:
-        styler = styler.applymap(
-            _colorize_ebitda_pct,
-            subset=pd.IndexSlice[["EBITDA (%)"], pd.IndexSlice[:, "Análise Vertical"]]
-        )
     CAT_BG = {
         "Estruturais": "rgba(46, 204, 113, 0.18)",
         "Margens": "rgba(52, 152, 219, 0.18)",
@@ -1159,7 +1107,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
         ],
         "Avançados": [
-            "EBIT","EBITDA (Caixa Oper.)","EBITDA (%)","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
+            "EBIT","EBITDA Lucro/Prejuízo","Lucro Líquido","ROE (%)","ROI (%)","ROA (%)"
         ],
         "Totais": [
             "Total CF + Empréstimos","Total de Saída"
