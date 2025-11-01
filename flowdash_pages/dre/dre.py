@@ -5,35 +5,12 @@ from __future__ import annotations
 import sqlite3
 from calendar import monthrange
 from dataclasses import dataclass
-from typing import Dict, Tuple, List, Iterable, Optional, Any
+from typing import Dict, Tuple, List, Iterable, Optional
 import os
 
 import pandas as pd
 import streamlit as st
 from datetime import date
-
-DEBUG_LOGS: List[Dict[str, Any]] = []
-
-
-def _debug_log(label: str, payload: Any) -> None:
-    """Collect debug information safely for later display."""
-    def _sanitize(value: Any) -> Any:
-        basic_types = (str, int, float, bool, type(None))
-        if isinstance(value, basic_types):
-            return value
-        if isinstance(value, dict):
-            return {str(k): _sanitize(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple, set)):
-            return [_sanitize(v) for v in value]
-        try:
-            return repr(value)
-        except Exception:
-            return "<unrepresentable>"
-
-    try:
-        DEBUG_LOGS.append({"label": label, "data": _sanitize(payload)})
-    except Exception as exc:
-        print(f"[DRE DEBUG] failed to log {label}: {exc}")
 
 # ============================== Config de início do DRE ==============================
 START_YEAR = 2025
@@ -53,30 +30,15 @@ def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
     - Tenta `st.session_state['db_path']`/`['caminho_banco']`.
     - Procura nos caminhos padrão em `data/`.
     """
-    searched_candidates: List[str] = []
-    if pref and isinstance(pref, str):
-        exists_pref = os.path.exists(pref)
-        searched_candidates.append(pref)
-        _debug_log(
-            "_ensure_db_path_or_raise.pref",
-            {"input": pref, "abs": os.path.abspath(pref), "exists": exists_pref},
-        )
-        if exists_pref:
-            return pref
+    if pref and isinstance(pref, str) and os.path.exists(pref):
+        return pref
     try:
         for k in ("caminho_banco", "db_path"):
             v = st.session_state.get(k)
-            if isinstance(v, str):
-                exists_v = os.path.exists(v)
-                searched_candidates.append(v)
-                _debug_log(
-                    "_ensure_db_path_or_raise.session_state",
-                    {"key": k, "value": v, "abs": os.path.abspath(v), "exists": exists_v},
-                )
-                if exists_v:
-                    return v
-    except Exception as exc:
-        _debug_log("_ensure_db_path_or_raise.session_state_error", {"error": repr(exc)})
+            if isinstance(v, str) and os.path.exists(v):
+                return v
+    except Exception:
+        pass
     for p in (
         os.path.join("data", "flowdash_data.db"),
         os.path.join("data", "dashboard_rc.db"),
@@ -84,15 +46,8 @@ def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
         os.path.join("data", "flowdash_template.db"),
         "./flowdash_data.db",
     ):
-        exists_p = os.path.exists(p)
-        searched_candidates.append(p)
-        _debug_log(
-            "_ensure_db_path_or_raise.search_path",
-            {"candidate": p, "abs": os.path.abspath(p), "exists": exists_p},
-        )
-        if exists_p:
+        if os.path.exists(p):
             return p
-    _debug_log("_ensure_db_path_or_raise.not_found", {"searched": searched_candidates, "cwd": os.getcwd()})
     raise FileNotFoundError("Nenhum banco encontrado. Defina st.session_state['db_path'].")
 
 def _periodo_ym(ano: int, mes: int) -> Tuple[str, str, str]:
@@ -166,8 +121,7 @@ def _table_cols(db_path: str, table: str) -> List[str]:
         with _conn(db_path) as c:
             rows = c.execute(f"PRAGMA table_info('{table}')").fetchall()
             return [str(r[1]).lower() for r in rows]
-    except Exception as exc:
-        _debug_log("_table_cols.error", {"error": repr(exc), "table": table, "db_path": db_path})
+    except Exception:
         return []
 
 def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[str]:
@@ -180,7 +134,6 @@ def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[
 # ============================== Queries (cache) ==============================
 @st.cache_data(show_spinner=False, ttl=5)
 def _load_vars(db_path: str) -> VarsDRE:
-    _debug_log("_load_vars.start", {"db_path": db_path, "cwd": os.getcwd()})
     q = """
     SELECT chave, COALESCE(valor_num, 0) AS v
       FROM dre_variaveis
@@ -199,15 +152,11 @@ def _load_vars(db_path: str) -> VarsDRE:
     try:
         with _conn(db_path) as c:
             df = pd.read_sql(q, c)
-            _debug_log(
-                "_load_vars.df",
-                {"shape": list(df.shape), "head": df.head(5).to_dict(orient="records")},
-            )
             d = {r["chave"]: float(r["v"] or 0) for _, r in df.iterrows()}
-    except Exception as exc:
-        _debug_log("_load_vars.error", {"error": repr(exc)})
+    except Exception:
+        pass
 
-    vars_dre_obj = VarsDRE(
+    return VarsDRE(
         simples=_safe(d.get("aliquota_simples_nacional")),
         markup=_safe(d.get("markup_medio")),
         sacolas=_safe(d.get("sacolas_percent")),
@@ -217,8 +166,6 @@ def _load_vars(db_path: str) -> VarsDRE:
         inv_base=_safe(d.get("investimento_total_base")),
         atv_base=_safe(d.get("ativos_totais_base")),
     )
-    _debug_log("_load_vars.result", vars(vars_dre_obj))
-    return vars_dre_obj
 
 def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
     """Recalcula variáveis derivadas com base nos dados atuais, sem depender da tela de cadastro.
@@ -228,7 +175,6 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
     - Depreciação mensal padrão = Imobilizado × (taxa_dep% / 100)
     Mantém as variáveis de entrada (simples, markup, sacolas, fundo, investimento) como estão no DB.
     """
-    _debug_log("_vars_dynamic_overrides.start", {"db_path": db_path, "base_vars": vars(vars_dre)})
     try:
         from flowdash_pages.cadastros.variaveis_dre import (
             get_estoque_atual_estimado as _estoque_est,
@@ -236,8 +182,7 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
             _get_passivos_totais_cap as _cap_totais,
             _load_ui_prefs as _load_prefs,
         )
-    except Exception as exc:
-        _debug_log("_vars_dynamic_overrides.import_error", {"error": repr(exc)})
+    except Exception:
         return vars_dre
 
     try:
@@ -257,7 +202,7 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
         pl_calc_nn = pl_calc if pl_calc > 0 else 0.0
         dep_padrao = float(imobilizado) * (float(taxa_dep) / 100.0)
 
-        result = VarsDRE(
+        return VarsDRE(
             simples=vars_dre.simples,
             markup=vars_dre.markup,
             sacolas=vars_dre.sacolas,
@@ -267,10 +212,7 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
             inv_base=vars_dre.inv_base,
             atv_base=ativos_totais,
         )
-        _debug_log("_vars_dynamic_overrides.result", vars(result))
-        return result
-    except Exception as exc:
-        _debug_log("_vars_dynamic_overrides.error", {"error": repr(exc)})
+    except Exception:
         return vars_dre
 
 def _persist_overrides_to_db(db_path: str, vars_dre: "VarsDRE") -> None:
@@ -325,8 +267,8 @@ def _persist_overrides_to_db(db_path: str, vars_dre: "VarsDRE") -> None:
                 if abs(float(novo or 0.0) - float(atual or 0.0)) > eps:
                     _upsert_num(c, chave, float(novo or 0.0), desc)
             c.commit()
-    except Exception as exc:
-        _debug_log("_persist_overrides_to_db.error", {"error": repr(exc), "db_path": db_path})
+    except Exception:
+        pass
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int]:
@@ -338,15 +280,11 @@ def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int
     FROM entrada
     WHERE date(Data) BETWEEN ? AND ?;
     """
-    _debug_log("_query_entradas.start", {"db_path": db_path, "ini": ini, "fim": fim})
     try:
         with _conn(db_path) as c:
             row = c.execute(sql, (ini, fim)).fetchone()
-            result = (_safe(row[0]), _safe(row[1]), int(row[2] or 0))
-            _debug_log("_query_entradas.result", {"row": row, "result": result})
-            return result
-    except Exception as exc:
-        _debug_log("_query_entradas.error", {"error": repr(exc), "db_path": db_path, "ini": ini, "fim": fim})
+            return _safe(row[0]), _safe(row[1]), int(row[2] or 0)
+    except Exception:
         return 0.0, 0.0, 0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -356,15 +294,11 @@ def _query_fretes(db_path: str, ini: str, fim: str) -> float:
     FROM mercadorias
     WHERE date(Data) BETWEEN ? AND ?;
     """
-    _debug_log("_query_fretes.start", {"db_path": db_path, "ini": ini, "fim": fim})
     try:
         with _conn(db_path) as c:
             row = c.execute(sql, (ini, fim)).fetchone()
-            result = _safe(row[0])
-            _debug_log("_query_fretes.result", {"row": row, "result": result})
-            return result
-    except Exception as exc:
-        _debug_log("_query_fretes.error", {"error": repr(exc), "db_path": db_path, "ini": ini, "fim": fim})
+            return _safe(row[0])
+    except Exception:
         return 0.0
 
 
@@ -411,11 +345,7 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
             with _conn(db_path) as c:
                 row = c.execute(sql, params).fetchone()
                 return _safe(row[0])
-        except Exception as exc:
-            _debug_log(
-                "compute_total_saida_operacional.sum_error",
-                {"error": repr(exc), "sql": sql_base, "params": params},
-            )
+        except Exception:
             return 0.0
 
     fixos_sql = """
@@ -446,20 +376,12 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
         ],
     )
 
-    _debug_log(
-        "compute_total_saida_operacional.result",
-        {"ano": ano, "mes": mes, "fixos_total": fixos_total, "extras_total": extras_total},
-    )
     return fixos_total + extras_total
 
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_saidas_total(db_path: str, ini: str, fim: str,
                         categoria: str, subcat: str | None = None) -> float:
-    _debug_log(
-        "_query_saidas_total.start",
-        {"db_path": db_path, "ini": ini, "fim": fim, "categoria": categoria, "subcat": subcat},
-    )
     def _sum_with_sub(subcol: str) -> float:
         if subcat:
             sql = f"""
@@ -491,58 +413,28 @@ def _query_saidas_total(db_path: str, ini: str, fim: str,
         WHERE UPPER(COALESCE({subcol},''))=UPPER(?)
           AND date(Data) BETWEEN ? AND ?;
         """
-        try:
-            with _conn(db_path) as c:
-                row = c.execute(sql, (subcat, ini, fim)).fetchone()
-                return _safe(row[0])
-        except Exception as exc:
-            _debug_log(
-                "compute_total_saida_operacional.sum_only_error",
-                {"error": repr(exc), "sql": sql, "params": (subcat, ini, fim)},
-            )
-            return 0.0
+        with _conn(db_path) as c:
+            row = c.execute(sql, (subcat, ini, fim)).fetchone()
+            return _safe(row[0])
 
     try:
         total = _sum_with_sub("Sub_Categoria")
         if total == 0.0 and subcat:
             only = _sum_only_sub("Sub_Categoria")
             if only > 0.0:
-                _debug_log(
-                    "_query_saidas_total.fallback_only",
-                    {"subcol": "Sub_Categoria", "only": only},
-                )
                 return only
-        _debug_log(
-            "_query_saidas_total.result",
-            {"subcol": "Sub_Categoria", "total": total},
-        )
         return total
     except Exception:
-        _debug_log(
-            "_query_saidas_total.error_primary",
-            {"db_path": db_path, "ini": ini, "fim": fim, "categoria": categoria, "subcat": subcat},
-        )
+        pass
 
     try:
         total = _sum_with_sub("Sub_Categorias_saida")
         if total == 0.0 and subcat:
             only = _sum_only_sub("Sub_Categorias_saida")
             if only > 0.0:
-                _debug_log(
-                    "_query_saidas_total.fallback_only",
-                    {"subcol": "Sub_Categorias_saida", "only": only},
-                )
                 return only
-        _debug_log(
-            "_query_saidas_total.result",
-            {"subcol": "Sub_Categorias_saida", "total": total},
-        )
         return total
-    except Exception as exc:
-        _debug_log(
-            "_query_saidas_total.error_secondary",
-            {"error": repr(exc), "db_path": db_path, "ini": ini, "fim": fim, "categoria": categoria, "subcat": subcat},
-        )
+    except Exception:
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -554,15 +446,11 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
     WHERE tipo_obrigacao = 'EMPRESTIMO'
       AND competencia = ?;
     """
-    _debug_log("_query_cap_emprestimos.start", {"db_path": db_path, "competencia": competencia})
     try:
         with _conn(db_path) as c:
             row = c.execute(sql, (competencia,)).fetchone()
-            result = _safe(row[0])
-            _debug_log("_query_cap_emprestimos.result", {"row": row, "result": result})
-            return result
-    except Exception as exc:
-        _debug_log("_query_cap_emprestimos.error", {"error": repr(exc), "db_path": db_path, "competencia": competencia})
+            return _safe(row[0])
+    except Exception:
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -578,15 +466,11 @@ def _query_divida_estoque(db_path: str) -> float:
     FROM contas_a_pagar_mov
     WHERE tipo_obrigacao = 'EMPRESTIMO';
     """
-    _debug_log("_query_divida_estoque.start", {"db_path": db_path})
     try:
         with _conn(db_path) as c:
             row = c.execute(sql).fetchone()
-            result = _safe(row[0])
-            _debug_log("_query_divida_estoque.result", {"row": row, "result": result})
-            return result
-    except Exception as exc:
-        _debug_log("_query_divida_estoque.error", {"error": repr(exc), "db_path": db_path})
+            return _safe(row[0])
+    except Exception:
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -597,21 +481,16 @@ def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
     WHERE date(data_compra) BETWEEN ? AND ?
       AND categoria = 'Despesas / Marketing';
     """
-    _debug_log("_query_mkt_cartao.start", {"db_path": db_path, "ini": ini, "fim": fim})
     try:
         with _conn(db_path) as c:
             row = c.execute(sql, (ini, fim)).fetchone()
-            result = _safe(row[0])
-            _debug_log("_query_mkt_cartao.result", {"row": row, "result": result})
-            return result
-    except Exception as exc:
-        _debug_log("_query_mkt_cartao.error", {"error": repr(exc), "db_path": db_path, "ini": ini, "fim": fim})
+            return _safe(row[0])
+    except Exception:
         return 0.0
 
 # ============================== Anos disponíveis ==============================
 @st.cache_data(show_spinner=False)
 def _listar_anos(db_path: str) -> List[int]:
-    _debug_log("_listar_anos.start", {"db_path": db_path})
     sql_all = """
     SELECT ano FROM (
         SELECT CAST(substr(Data,1,4) AS INT) AS ano FROM entrada
@@ -637,38 +516,30 @@ def _listar_anos(db_path: str) -> List[int]:
     try:
         with _conn(db_path) as c:
             rows = c.execute(sql_all).fetchall()
-            _debug_log("_listar_anos.rows_all", {"count": len(rows)})
             for r in rows:
                 try:
                     anos.append(int(r[0]))
                 except Exception:
                     pass
-    except Exception as exc:
-        _debug_log("_listar_anos.error_all", {"error": repr(exc)})
+    except Exception:
         try:
             with _conn(db_path) as c:
                 rows = c.execute(sql_fallback).fetchall()
-                _debug_log("_listar_anos.rows_fallback", {"count": len(rows)})
                 for r in rows:
                     try:
                         anos.append(int(r[0]))
                     except Exception:
                         pass
-        except Exception as exc:
-            _debug_log("_listar_anos.error_fallback", {"error": repr(exc)})
+        except Exception:
+            pass
 
     if not anos:
         anos = [pd.Timestamp.today().year]
-    _debug_log("_listar_anos.result", {"anos": sorted(set(anos))})
     return sorted(set(anos))
 
 # ============================== Cálculo por mês ==============================
 @st.cache_data(show_spinner=False)
 def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str, float]:
-    _debug_log(
-        "_calc_mes.start",
-        {"db_path": db_path, "ano": ano, "mes": mes, "vars": vars(vars_dre)},
-    )
     ini, fim, comp = _periodo_ym(ano, mes)
 
     fat, taxa_maq_rs, n_vendas = _query_entradas(db_path, ini, fim)
@@ -738,7 +609,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     divida_estoque_rs = _query_divida_estoque(db_path)
     indice_endividamento_pct = (_nz_div(divida_estoque_rs, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0
 
-    result = {
+    return {
         # básicos/estruturais
         "fat": fat,
         "simples": simples_rs,
@@ -798,40 +669,10 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
         "roi_pct": (_nz_div(lucro_liq, vars_dre.inv_base) * 100.0) if vars_dre.inv_base > 0 else 0.0,
         "roa_pct": (_nz_div(lucro_liq, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0,
     }
-    core_keys = ["fat", "receita_liq", "cmv", "total_var", "lucro_bruto"]
-    _debug_log(
-        "_calc_mes.result_subset",
-        {k: result.get(k) for k in core_keys},
-    )
-    none_values = {k: v for k, v in result.items() if v is None}
-    if none_values:
-        _debug_log("_calc_mes.none_values", none_values)
-    _debug_log("_calc_mes.result_summary", {"keys": sorted(result.keys())})
-    return result
 
 # ============================== UI / Página ==============================
-
 def render_dre(caminho_banco: Optional[str]):
-    DEBUG_LOGS.clear()
-    _debug_log("render_dre.call", {"param_caminho_banco": caminho_banco})
-    cwd_value = os.getcwd()
-    _debug_log("render_dre.cwd", {"cwd": cwd_value})
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
-    resolved_db_path = os.path.abspath(caminho_banco)
-    db_exists = os.path.exists(caminho_banco)
-    db_accessible = os.access(caminho_banco, os.R_OK)
-    path_context = {
-        "cwd": cwd_value,
-        "resolved_db_path": resolved_db_path,
-        "db_exists": db_exists,
-        "db_accessible": db_accessible,
-        "db_dir": os.path.dirname(resolved_db_path),
-    }
-    _debug_log("render_dre.path_context_initial", path_context)
-    session_keys = sorted(list(st.session_state.keys()))
-    session_focus_before = {k: st.session_state.get(k) for k in ("ano", "mes", "perfil", "db_path", "caminho_banco")}
-    _debug_log("render_dre.session_state_initial", {"keys": session_keys, "focus": session_focus_before})
-
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
     if ano_atual not in anos:
@@ -844,82 +685,22 @@ def render_dre(caminho_banco: Optional[str]):
     mes_default = int(pd.Timestamp.today().month) if int(ano) == ano_atual else 12
     mes = st.selectbox("Mês (para KPIs)", options=list(range(1,13)), index=mes_default-1,
                        format_func=lambda m: meses_labels[m-1])
-    _debug_log("render_dre.selected_period", {"ano": ano, "mes": mes})
 
     st.subheader("KPIs - Indicadores-chave que medem o desempenho em relação às metas.")
 
     vars_dre = _load_vars(caminho_banco)
+    # sobrescreve dinamicamente os derivados para refletirem o estado atual do banco
     vars_dre = _vars_dynamic_overrides(caminho_banco, vars_dre)
+    # persiste no DB para manter consistência entre páginas
     _persist_overrides_to_db(caminho_banco, vars_dre)
-    _debug_log("render_dre.vars_dre_after_overrides", vars(vars_dre))
     if vars_dre.markup <= 0:
         st.warning("⚠️ Markup médio não configurado (ou 0). CMV estimado será 0.")
     if all(v == 0 for v in (vars_dre.simples, vars_dre.fundo, vars_dre.sacolas)) and vars_dre.markup == 0:
-        st.info("ℹ️ Configure em: Cadastros > Variáveis do DRE.")
+        st.info("ℹ️ Configure em: Cadastros › Variáveis do DRE.")
 
     _render_kpis_mes_cards(caminho_banco, int(ano), int(mes), vars_dre)
     _render_anual(caminho_banco, int(ano), vars_dre)
 
-    session_focus_after = {k: st.session_state.get(k) for k in ("ano", "mes", "perfil", "db_path", "caminho_banco")}
-    _debug_log("render_dre.session_state_after", session_focus_after)
-    path_compare = {
-        "cwd": cwd_value,
-        "db_dir": os.path.dirname(resolved_db_path),
-        "resolved_db_path": resolved_db_path,
-        "db_exists": db_exists,
-        "db_accessible": db_accessible,
-    }
-    _debug_log("render_dre.path_context_final", path_compare)
-
-    session_state_dump = {k: repr(st.session_state.get(k)) for k in session_keys}
-    focus_none = {k: v for k, v in session_focus_after.items() if v in (None, "", [], {}, ())}
-
-    core_kpis = None
-    calc_none = None
-    load_vars_info = None
-    for log in DEBUG_LOGS:
-        if log["label"] == "_calc_mes.result_subset":
-            core_kpis = log["data"]
-        if log["label"] == "_calc_mes.none_values":
-            calc_none = log["data"]
-        if log["label"] == "_load_vars.df":
-            load_vars_info = log["data"]
-
-    logs_table = pd.DataFrame(
-        [{"label": log["label"], "data": repr(log["data"])} for log in DEBUG_LOGS]
-    )
-
-    with st.expander("Diagnóstico DRE (temporário)", expanded=True):
-        st.write("Contexto de caminhos e acesso ao banco", path_compare)
-        if not db_exists or not db_accessible:
-            st.error("Banco de dados inacessível ou ausente no caminho resolvido acima.")
-        st.write("Session state (foco)", session_focus_after)
-        if focus_none:
-            st.warning(f"Valores possivelmente problemáticos no session_state: {focus_none}")
-        st.write("Session state completo (repr)", session_state_dump)
-        st.write(
-            "Comparação os.getcwd() x pasta do banco",
-            {
-                "cwd": cwd_value,
-                "db_dir": os.path.dirname(resolved_db_path),
-                "iguais": os.path.abspath(cwd_value) == os.path.abspath(os.path.dirname(resolved_db_path)),
-            },
-        )
-
-        if core_kpis:
-            st.write("KPIs usados nos chips (resultado do _calc_mes)", core_kpis)
-            st.write({"shape": (1, len(core_kpis))})
-            st.dataframe(pd.DataFrame([core_kpis]))
-        if calc_none:
-            st.error(f"Chaves com valor None em _calc_mes: {calc_none}")
-        if load_vars_info:
-            st.write("Variáveis carregadas do banco (shape/head)", {"shape": load_vars_info.get("shape")})
-            st.dataframe(pd.DataFrame(load_vars_info.get("head", [])))
-
-        if not logs_table.empty:
-            st.write("Logs coletados (últimos registros)", logs_table.tail(30))
-
-        st.write("Total de logs coletados", len(DEBUG_LOGS))
 def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> None:
     st.markdown(
     """
@@ -945,7 +726,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 @media (prefers-reduced-motion:no-preference){
   .fd-chip details.qwrap .tip{animation:fd-fade .12s ease}
 }
-@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}
+@keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 
 /* cores por categoria */
 .cap-card.k-estrut{border-left:6px solid #2ecc71}
@@ -1390,5 +1171,3 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
 
 # Alias para retrocompatibilidade
 pagina_dre = render_dre
-
-#vamos ver se agora funciona
