@@ -828,6 +828,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cmv_rs = m.get("cmv")
     total_variaveis = m.get("total_var")
     lucro_bruto = m.get("lucro_bruto")
+    total_saida_operacional = m.get("total_saida_oper")
 
     def _ratio(num, den):
         if den in (None, 0) or num is None:
@@ -850,6 +851,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     perc_cmv = _ratio(cmv_rs, receita_liq)
     perc_total_var = _ratio(total_variaveis, receita_liq)
     perc_lucro_bruto = _ratio(lucro_bruto, receita_liq)
+    perc_total_saida_oper = _ratio(total_saida_operacional, receita_liq)
+    if perc_total_saida_oper is not None:
+        try:
+            if float(receita_liq) <= 0:
+                perc_total_saida_oper = None
+        except (TypeError, ValueError):
+            perc_total_saida_oper = None
 
     receita_liq_display = formatar_moeda(receita_liq)
     if perc_receita_liq is not None:
@@ -875,12 +883,18 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{lucro_bruto_display} | {formatar_percentual(perc_lucro_bruto, casas=1)} da Receita Líquida"
         )
 
+    total_saida_oper_display = formatar_moeda(total_saida_operacional)
+    if perc_total_saida_oper is not None:
+        total_saida_oper_display = (
+            f"{total_saida_oper_display} | {formatar_percentual(perc_total_saida_oper, casas=1)} da Receita Líquida"
+        )
+
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", receita_liq_display),
         _chip("CMV", cmv_display),                 # <- chip CMV adicionado
         _chip("Total de Variáveis (R$)", total_var_display),
-        _chip("Total de Saída Operacional (R$)", _fmt_brl(m["total_saida_oper"])),
+        _chip("Total de Saída Operacional (R$)", total_saida_oper_display),
         _chip("Lucro Bruto", lucro_bruto_display),
     ], "k-estrut"))
 
