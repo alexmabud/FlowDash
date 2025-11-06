@@ -11,6 +11,7 @@ import os
 import pandas as pd
 import streamlit as st
 from datetime import date
+from utils import formatar_moeda, formatar_percentual
 
 # ============================== Config de início do DRE ==============================
 START_YEAR = 2025
@@ -822,13 +823,65 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     cards_html: List[str] = []
 
+    receita_bruta = m.get("fat")
+    receita_liq = m.get("receita_liq")
+    cmv_rs = m.get("cmv")
+    total_variaveis = m.get("total_var")
+    lucro_bruto = m.get("lucro_bruto")
+
+    def _ratio(num, den):
+        if den in (None, 0) or num is None:
+            return None
+        try:
+            if pd.isna(num) or pd.isna(den):
+                return None
+        except Exception:
+            pass
+        try:
+            num_f = float(num)
+            den_f = float(den)
+        except (TypeError, ValueError):
+            return None
+        if den_f == 0:
+            return None
+        return num_f / den_f
+
+    perc_receita_liq = _ratio(receita_liq, receita_bruta)
+    perc_cmv = _ratio(cmv_rs, receita_liq)
+    perc_total_var = _ratio(total_variaveis, receita_liq)
+    perc_lucro_bruto = _ratio(lucro_bruto, receita_liq)
+
+    receita_liq_display = formatar_moeda(receita_liq)
+    if perc_receita_liq is not None:
+        receita_liq_display = (
+            f"{receita_liq_display} | {formatar_percentual(perc_receita_liq, casas=1)} da Receita Bruta"
+        )
+
+    cmv_display = formatar_moeda(cmv_rs)
+    if perc_cmv is not None:
+        cmv_display = (
+            f"{cmv_display} | {formatar_percentual(perc_cmv, casas=1)} da Receita Líquida"
+        )
+
+    total_var_display = formatar_moeda(total_variaveis)
+    if perc_total_var is not None:
+        total_var_display = (
+            f"{total_var_display} | {formatar_percentual(perc_total_var, casas=1)} da Receita Líquida"
+        )
+
+    lucro_bruto_display = formatar_moeda(lucro_bruto)
+    if perc_lucro_bruto is not None:
+        lucro_bruto_display = (
+            f"{lucro_bruto_display} | {formatar_percentual(perc_lucro_bruto, casas=1)} da Receita Líquida"
+        )
+
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
-        _chip("Receita Líquida", _fmt_brl(m["receita_liq"])),
-        _chip("CMV", _fmt_brl(m["cmv"])),                 # <- chip CMV adicionado
-        _chip("Total de Variáveis (R$)", _fmt_brl(m["total_var"])),
+        _chip("Receita Líquida", receita_liq_display),
+        _chip("CMV", cmv_display),                 # <- chip CMV adicionado
+        _chip("Total de Variáveis (R$)", total_var_display),
         _chip("Total de Saída Operacional (R$)", _fmt_brl(m["total_saida_oper"])),
-        _chip("Lucro Bruto", _fmt_brl(m["lucro_bruto"])),
+        _chip("Lucro Bruto", lucro_bruto_display),
     ], "k-estrut"))
 
     cards_html.append(_card("Margens", [
