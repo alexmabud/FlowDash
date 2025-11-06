@@ -581,7 +581,8 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     ebit = ebitda_base - dep_extra # Cálculo do EBIT
 
     # Lucro líquido (simplificado)
-    lucro_liq = ebit
+    gasto_emprestimos = emp_rs
+    lucro_liq = ebit - (gasto_emprestimos or 0)
 
     # KPIs
     rl = receita_liq
