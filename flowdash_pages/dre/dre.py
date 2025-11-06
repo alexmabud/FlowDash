@@ -573,7 +573,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     total_saida_oper     = total_oper_fixo_extra + total_var
 
     # EBITDA base
-    ebitda_base = receita_liq - total_saida_oper
+    ebitda_base = margem_contrib - total_saida_oper  # ALTERAÇÃO EBITDA (solicitado)
 
     # EBIT: apenas depreciação (não usamos amortização)
     dep_extra = vars_dre.dep_padrao
