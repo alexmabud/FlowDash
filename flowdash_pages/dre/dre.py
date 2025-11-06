@@ -577,8 +577,8 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     ebitda_base = margem_contrib - total_saida_oper  # ALTERAÇÃO EBITDA (solicitado)
 
     # EBIT: apenas depreciação (não usamos amortização)
-    dep_extra = vars_dre.dep_padrao
-    ebit = ebitda_base - dep_extra
+    dep_extra = vars_dre.dep_padrao # Depreciação
+    ebit = ebitda_base - dep_extra # Cálculo do EBIT
 
     # Lucro líquido (simplificado)
     lucro_liq = ebit
@@ -602,7 +602,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     ticket_medio = _nz_div(fat, float(n_vendas)) if n_vendas > 0 else 0.0
 
     margem_bruta_pct = _nz_div(lucro_bruto, rl)
-    margem_operacional_pct = _nz_div(ebit, rl)
+    margem_operacional_pct = _nz_div(ebit, rl) # <-- Cálculo correto aqui
     margem_liquida_pct = _nz_div(lucro_liq, rl)
     margem_contrib_pct = _nz_div(margem_contrib, rl)
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
@@ -757,7 +757,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
-        "Margem Operacional": "Lucro operacional após depreciação.",
+        "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
         "Margem Líquida": "Lucro final como % da receita líquida.",
         "Margem de Contribuição": "Quanto sobra para cobrir fixos e gerar lucro. | Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
         "Margem de Contribuição (%)": "Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
