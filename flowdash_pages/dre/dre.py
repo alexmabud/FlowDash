@@ -134,9 +134,15 @@ def _fmt_brl(v: float) -> str:
 
 def _fmt_pct(v: float, casas: int = 1) -> str:
     try:
-        return f"{float(v):.{casas}f}%"
-    except Exception:
+        val = float(v)
+    except (TypeError, ValueError):
         return "—"
+    try:
+        if callable(formatar_percentual):
+            return formatar_percentual(val / 100.0, casas=casas)
+    except Exception:
+        pass
+    return f"{val:.{casas}f}%"
 
 def _escape_tooltip(text: Optional[str]) -> str:
     if not text:
@@ -156,6 +162,12 @@ def _safe(v) -> float:
 
 def _nz_div(n: float, d: float) -> float:
     return (n / d) if d not in (0, None) else 0.0
+
+def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
+    den_val = _safe(den)
+    if den_val == 0:
+        return 0.0
+    return (_safe(num) / den_val) * 100.0
 
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
     return (ano, mes - 1) if mes > 1 else (ano - 1, 12)
@@ -978,7 +990,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete de compra), sacolas %, fundo de promoção % (+ comissão variável %, se existir). Não incluir Simples/taxas da maquininha se a Receita Líquida já estiver líquida dessas deduções.",
         "Total de Saída Operacional (R$)": "OPEX: despesas operacionais do mês (fixas + de operação), sem juros/IOF, CAPEX e depreciação. Base para EBITDA, eficiência e margens.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
-        "Custo Fixo Mensal (R$)": "Somatório das despesas fixas do mês (aluguel, folha, encargos, utilidades etc.). | Serve para: acompanhar o nível absoluto de custos fixos. Para cores, use as faixas do indicador Custo Fixo / Receita (%).",
+        "Custos Fixos": "Somatório das despesas fixas do mês (aluguel, folha, encargos, utilidades etc.). | Serve para: acompanhar o nível absoluto de custos fixos. Para cores, use as faixas do indicador Custo Fixo / Receita (%).\nPercentual da Receita Líquida comprometido com os custos fixos do mês. | Serve para: avaliar o peso da estrutura fixa sobre as vendas.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
@@ -986,7 +998,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Margem de Contribuição": "Receita Líquida − Total de Variáveis (CMV, sacolas, fundo de promoção, comissões variáveis…). | Serve para: mostrar quanto das vendas sobra para cobrir as despesas operacionais e gerar lucro. Obs.: se a Receita Líquida já está líquida de Simples/taxas de cartão, não inclua esses itens novamente nos variáveis.",
         "Margem de Contribuição (%)": "Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
         "Margem de Contribuição (R$)": "Serve para: mostrar, em reais, quanto sobra das vendas após todos os custos variáveis; valor que efetivamente contribui para cobrir despesas fixas e lucro.",
-        "Custo Fixo / Receita (%)": "Percentual da Receita Líquida comprometido com os custos fixos do mês. | Serve para: avaliar o peso da estrutura fixa sobre as vendas.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%",
         "Ponto de Equilíbrio (Contábil) (R$ | %)": "Venda mínima para cobrir os custos fixos (sem despesas financeiras). Mostrado em R$ e como % da Receita Líquida. | Serve para: indicar a partir de qual receita o negócio começa a gerar lucro operacional.\n\n🟢 Menor ou igual a 85% da RL · 🟡 Entre 85% e 95% da RL · 🔴 Maior que 95% da RL",
         "Ponto de Equilíbrio Financeiro (R$ | %)": "Venda mínima para cobrir custos fixos + gasto com empréstimos. Mostrado em R$ e como % da Receita Líquida. | Serve para: mostrar se a operação cobre também o serviço da dívida.\n\n🟢 Menor ou igual a 95% da RL · 🟡 Entre 95% e 105% da RL · 🔴 Maior que 105% da RL",
         "Ponto de Equilíbrio (Contábil) (%)": "Percentual da receita líquida que representa o ponto de equilíbrio contábil.",
@@ -1031,15 +1042,35 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
                     f'<span class="v">{val}</span>{tip_html}</span>')
         return f'<span class="fd-chip"><span class="k">{lbl_display}</span><span class="v">{val}</span></span>'
 
+    def _linha_reais_pct(valor_reais: Optional[float], pct: Optional[float], base_txt: str) -> str:
+        return f"{formatar_moeda(_safe(valor_reais))} | {_fmt_pct(_safe(pct))} da {base_txt}"
+
+    def _linha_pct(pct: Optional[float], base_txt: str) -> str:
+        return f"{_fmt_pct(_safe(pct))} da {base_txt}"
+
+    def _rl_suffix_only(val: Optional[float]) -> Optional[str]:
+        try:
+            ratio = float(val) / 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+        try:
+            return f"{formatar_percentual(ratio, casas=1)} da Receita Líquida"
+        except Exception:
+            return f"{ratio * 100:.1f}% da Receita Líquida"
+
     def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None,
-                  status_emoji: Optional[str] = None, extra_tip: Optional[str] = None) -> str:
+                  status_emoji: Optional[str] = None, extra_tip: Optional[str] = None,
+                  pct_base_txt: Optional[str] = None) -> str:
         tip_key = help_key or lbl
         tip = HELP.get(tip_key, "")
         if extra_tip:
             tip = f"{tip}\n\n{extra_tip}" if tip else extra_tip
         if tip_key in TOOLTIP_STRIP_HEADER_KEYS:
             tip = _strip_prefix_before_bullets(tip)
-        val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
+        if pct_base_txt:
+            val_comb = _linha_reais_pct(val_rs, val_pct, pct_base_txt)
+        else:
+            val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
         lbl_display = f"{status_emoji} {lbl}" if status_emoji else lbl
         tip_html = _build_tip_html(_escape_tooltip(tip))
         if tip_html:
@@ -1166,11 +1197,10 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{lucro_bruto_display} | {formatar_percentual(perc_lucro_bruto, casas=1)} da Receita Líquida"
         )
 
-    total_saida_oper_display = formatar_moeda(total_saida_operacional)
-    if perc_total_saida_oper is not None:
-        total_saida_oper_display = (
-            f"{total_saida_oper_display} | {formatar_percentual(perc_total_saida_oper, casas=1)} da Receita Líquida"
-        )
+    total_saida_oper_pct_val = (perc_total_saida_oper * 100.0) if perc_total_saida_oper is not None else None
+    if total_saida_oper_pct_val is None:
+        total_saida_oper_pct_val = _derive_pct(total_saida_operacional_val, receita_liq_val)
+    total_saida_oper_display = _linha_reais_pct(total_saida_operacional_val, total_saida_oper_pct_val, "Receita Líquida")
 
     perc_rl_rb_pct = (perc_receita_liq * 100.0) if perc_receita_liq is not None else None
     receita_liq_status = _chip_status("receita_liquida_sobre_bruta", perc_rl_rb_pct)
@@ -1179,7 +1209,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     status_cmv = _chip_status("cmv_percentual", cmv_pct_val)
     total_var_pct_val = (perc_total_var * 100.0) if perc_total_var is not None else None
     status_total_var = _chip_status("total_variaveis_percentual", total_var_pct_val)
-    total_saida_oper_pct_val = (perc_total_saida_oper * 100.0) if perc_total_saida_oper is not None else None
     status_total_saida_oper = _chip_status("total_saida_oper_percentual", total_saida_oper_pct_val)
     status_lucro_bruto = _chip_status("lucro_bruto", lucro_bruto, receita_liq)
 
@@ -1213,24 +1242,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         except Exception:
             return None
 
-    def _pct_with_rl_suffix(val: Optional[float]) -> Optional[str]:
-        pct_text = _pct_label(val)
-        if not pct_text:
-            return None
-        return f"{pct_text} | da Receita Líquida"
-
-    def _rl_suffix_only(val: Optional[float]) -> Optional[str]:
-        pct_text = _pct_label(val)
-        if not pct_text:
-            return None
-        return f"{pct_text} da Receita Líquida"
-
-    def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
-        den_val = _safe(den)
-        if den_val == 0:
-            return 0.0
-        return (_safe(num) / den_val) * 100.0
-
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", receita_liq_display, status_emoji=_status_or_none(receita_liq_status),
@@ -1248,9 +1259,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               extra_tip=FAIXAS_HELP["lucro_bruto"]),
     ], "k-estrut"))
 
-    margem_bruta_display = _pct_with_rl_suffix(margem_bruta_pct_val) or _fmt_pct(margem_bruta_pct_val)
-    margem_operacional_display = _pct_with_rl_suffix(margem_operacional_pct_val) or _fmt_pct(margem_operacional_pct_val)
-    margem_liquida_display = _pct_with_rl_suffix(margem_liquida_pct_val) or _fmt_pct(margem_liquida_pct_val)
+    margem_bruta_display = _linha_pct(margem_bruta_pct_val, "Receita Líquida")
+    margem_operacional_display = _linha_pct(margem_operacional_pct_val, "Receita Líquida")
+    margem_liquida_display = _linha_pct(margem_liquida_pct_val, "Receita Líquida")
 
     mc_value_display = _fmt_brl(m["margem_contrib"])
     mc_suffix = _rl_suffix_only(m["margem_contrib_pct"])
@@ -1272,22 +1283,25 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               extra_tip=FAIXAS_HELP["margem_contribuicao"]),
     ], "k-margens"))
 
+    custo_fixo_pct_display_val = _safe(custo_fixo_rl_pct_val)
+    custos_fixos_display = _linha_reais_pct(fixas_rs, custo_fixo_pct_display_val, "Receita Líquida")
+
     cards_html.append(_card("Eficiência e Gestão", [
-        _chip("Custo Fixo Mensal (R$)", _fmt_brl(fixas_rs),
-              status_emoji=custo_fixo_status),
-        _chip("Custo Fixo / Receita (%)", _fmt_pct(custo_fixo_rl_pct_val),
+        _chip("Custos Fixos", custos_fixos_display,
               status_emoji=custo_fixo_status),
         _chip_duo("Ponto de Equilíbrio (Contábil)", break_even_rs_val, break_even_pct_val,
                   help_key="Ponto de Equilíbrio (Contábil) (R$ | %)",
-                  status_emoji=pe_contabil_status),
+                  status_emoji=pe_contabil_status,
+                  pct_base_txt="Receita Líquida"),
         _chip_duo("Ponto de Equilíbrio Financeiro", break_even_financeiro_rs_val, break_even_financeiro_pct_val,
                   help_key="Ponto de Equilíbrio Financeiro (R$ | %)",
-                  status_emoji=pe_financeiro_status),
-        _chip("Margem de Segurança (%)", _fmt_pct(margem_seguranca_pct_val),
+                  status_emoji=pe_financeiro_status,
+                  pct_base_txt="Receita Líquida"),
+        _chip("Margem de Segurança (%)", _linha_pct(margem_seguranca_pct_val, "Receita Líquida"),
               status_emoji=margem_seguranca_status),
-        _chip("Eficiência Operacional (%)", _fmt_pct(eficiencia_oper_pct_val),
+        _chip("Eficiência Operacional (%)", _linha_pct(eficiencia_oper_pct_val, "Receita Líquida"),
               status_emoji=eficiencia_oper_status),
-        _chip("Relação Saídas/Entradas (%)", _fmt_pct(relacao_saidas_entradas_pct_val),
+        _chip("Relação Saídas/Entradas (%)", _linha_pct(relacao_saidas_entradas_pct_val, "Receita Bruta"),
               status_emoji=relacao_saidas_status),
     ], "k-efic"))
 
