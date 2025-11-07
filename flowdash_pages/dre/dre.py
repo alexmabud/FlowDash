@@ -1423,3 +1423,4 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
 
 # Alias para retrocompatibilidade
 pagina_dre = render_dre
+### corrigindo commit anterior que removeu o alias acima
