@@ -1149,7 +1149,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         pct_text = _pct_label(val)
         if not pct_text:
             return None
-        return f"{pct_text} | {pct_text} da Receita Líquida"
+        return f"{pct_text} | da Receita Líquida"
 
     def _rl_suffix_only(val: Optional[float]) -> Optional[str]:
         pct_text = _pct_label(val)
