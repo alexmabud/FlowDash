@@ -27,16 +27,30 @@ START_MONTH = 10  # Outubro
 KPI_TITLE = "KPIs"  # título exibido acima dos cards
 
 FAIXAS_HELP = {
-    "receita_liq_rb": "Receita Líquida (% da Receita Bruta): 🟢 ≥ 92% · 🟡 88–92% · 🔴 &lt; 88%",
-    "cmv": "CMV (% da Receita Líquida): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
-    "total_var": "Total de Variáveis (% Receita Líquida): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
-    "total_saida_oper": "Total de Saída Operacional (% Receita Líquida): 🟢 ≤ 25% · 🟡 25–30% · 🔴 > 30%",
-    "lucro_bruto": "Lucro Bruto (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
-    "margem_bruta": "Margem Bruta (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
-    "margem_ebitda_pct": "Margem EBITDA (% da RL): 🟢 ≥ 10% · 🟡 5–10% · 🔴 < 5%",
-    "margem_operacional": "Margem Operacional (EBIT, %): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
-    "margem_liquida": "Margem Líquida (%): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
-    "margem_contribuicao": "Margem de Contribuição (%): 🔴 < 35% · 🟡 35–45% · 🟢 ≥ 45%",
+    "receita_liq_rb": "Receita Líquida (% da Receita Bruta): 🟢 Maior ou igual a 92% · 🟡 Entre 88% e 92% · 🔴 Menor que 88%",
+    "cmv": "CMV (% da Receita Líquida): 🟢 Menor ou igual a 50% · 🟡 Entre 50% e 60% · 🔴 Maior que 60%",
+    "total_var": "Total de Variáveis (% Receita Líquida): 🟢 Menor ou igual a 50% · 🟡 Entre 50% e 60% · 🔴 Maior que 60%",
+    "total_saida_oper": "Total de Saída Operacional (% Receita Líquida): 🟢 Menor ou igual a 25% · 🟡 Entre 25% e 30% · 🔴 Maior que 30%",
+    "lucro_bruto": "Lucro Bruto (%): 🔴 Menor que 45% · 🟡 Entre 45% e 50% · 🟢 Maior ou igual a 50%",
+    "margem_bruta": "Margem Bruta (%): 🔴 Menor que 45% · 🟡 Entre 45% e 50% · 🟢 Maior ou igual a 50%",
+    "margem_ebitda_pct": "Margem EBITDA (% da RL): 🟢 Maior ou igual a 10% · 🟡 Entre 5% e 10% · 🔴 Menor que 5%",
+    "margem_operacional": "Margem Operacional (EBIT, %): 🔴 Menor que 5% · 🟡 Entre 5% e 10% · 🟢 Maior ou igual a 10%",
+    "margem_liquida": "Margem Líquida (%): 🔴 Menor que 5% · 🟡 Entre 5% e 10% · 🟢 Maior ou igual a 10%",
+    "margem_contribuicao": "Margem de Contribuição (%): 🔴 Menor que 35% · 🟡 Entre 35% e 45% · 🟢 Maior ou igual a 45%",
+}
+
+TOOLTIP_STRIP_HEADER_KEYS = {
+    "Receita Líquida",
+    "CMV",
+    "Total de Variáveis (R$)",
+    "Total de Saída Operacional (R$)",
+    "Lucro Bruto",
+    "Margem Bruta",
+    "Margem Operacional",
+    "Margem Líquida",
+    "Margem de Contribuição",
+    "EBITDA",
+    "EBIT",
 }
 
 # ============================== Helpers ==============================
@@ -170,6 +184,21 @@ _KPI_FAIXAS: Dict[str, List] = {
         (lambda v: v is not None and v < 35, "🔴"),
     ],
 }
+
+def _strip_prefix_before_bullets(text: str) -> str:
+    """Remove cabeçalho antes das bolinhas em tooltips específicos."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    out = []
+    for ln in lines:
+        if ("🟢" in ln) or ("🟡" in ln) or ("🔴" in ln):
+            idxs = [i for i in (ln.find("🟢"), ln.find("🟡"), ln.find("🔴")) if i != -1]
+            cut = min(idxs) if idxs else -1
+            out.append(ln[cut:].strip() if cut >= 0 else ln.strip())
+        else:
+            out.append(ln)
+    return "\n".join(out)
 
 def _avaliar_indicador_local(ind_key: str, valor=None, base=None) -> _KPIStatusResult:
     def _to_float(v):
@@ -932,27 +961,30 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         tip = HELP.get(lbl, "")
         if extra_tip:
             tip = f"{tip}\n\n{extra_tip}" if tip else extra_tip
-        if status_emoji:
-            val = f"{status_emoji} {val}"
+        if lbl in TOOLTIP_STRIP_HEADER_KEYS:
+            tip = _strip_prefix_before_bullets(tip)
+        lbl_display = f"{status_emoji} {lbl}" if status_emoji else lbl
         tip_html = _build_tip_html(_escape_tooltip(tip))
         if tip_html:
-            return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
+            return (f'<span class="fd-chip"><span class="k">{lbl_display}</span>'
                     f'<span class="v">{val}</span>{tip_html}</span>')
-        return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val}</span></span>'
+        return f'<span class="fd-chip"><span class="k">{lbl_display}</span><span class="v">{val}</span></span>'
 
     def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None,
                   status_emoji: Optional[str] = None, extra_tip: Optional[str] = None) -> str:
-        tip = HELP.get(help_key or lbl, "")
+        tip_key = help_key or lbl
+        tip = HELP.get(tip_key, "")
         if extra_tip:
             tip = f"{tip}\n\n{extra_tip}" if tip else extra_tip
+        if tip_key in TOOLTIP_STRIP_HEADER_KEYS:
+            tip = _strip_prefix_before_bullets(tip)
         val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
-        if status_emoji:
-            val_comb = f"{status_emoji} {val_comb}"
+        lbl_display = f"{status_emoji} {lbl}" if status_emoji else lbl
         tip_html = _build_tip_html(_escape_tooltip(tip))
         if tip_html:
-            return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
+            return (f'<span class="fd-chip"><span class="k">{lbl_display}</span>'
                     f'<span class="v">{val_comb}</span>{tip_html}</span>')
-        return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val_comb}</span></span>'
+        return f'<span class="fd-chip"><span class="k">{lbl_display}</span><span class="v">{val_comb}</span></span>'
 
     def _card(title: str, chips: List[str], cls: str) -> str:
         return f'<div class="cap-card {cls}"><div class="cap-title-xl">{title}</div><div class="fd-card-body">{"".join(chips)}</div></div>'
