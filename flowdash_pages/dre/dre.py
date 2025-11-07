@@ -67,23 +67,24 @@ def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
     - Procura nos caminhos padrão em `data/`.
     """
     if pref and isinstance(pref, str) and os.path.exists(pref):
-        return pref
+        return os.path.abspath(pref)
     try:
         for k in ("caminho_banco", "db_path"):
             v = st.session_state.get(k)
             if isinstance(v, str) and os.path.exists(v):
-                return v
+                return os.path.abspath(v)
     except Exception:
         pass
-    for p in (
-        os.path.join("data", "flowdash_data.db"),
-        os.path.join("data", "dashboard_rc.db"),
+    candidates = [
         "dashboard_rc.db",
-        os.path.join("data", "flowdash_template.db"),
+        os.path.join("data", "dashboard_rc.db"),
+        os.path.join("data", "flowdash_data.db"),
         "./flowdash_data.db",
-    ):
+        os.path.join("data", "flowdash_template.db"),
+    ]
+    for p in candidates:
         if os.path.exists(p):
-            return p
+            return os.path.abspath(p)
     raise FileNotFoundError("Nenhum banco encontrado. Defina st.session_state['db_path'].")
 
 def _periodo_ym(ano: int, mes: int) -> Tuple[str, str, str]:
@@ -833,6 +834,14 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
+    db_resolved = os.path.abspath(caminho_banco)
+    prev = st.session_state.get("db_path")
+    if prev != db_resolved:
+        st.session_state["db_path"] = db_resolved
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
     if ano_atual not in anos:
