@@ -446,9 +446,6 @@ def compute_total_saida_operacional(ano: int, mes: int, db_path: str) -> float:
         "IMOBILIZ",
         "INVEST",
         "AMORTIZ",
-        "MAQUIN",
-        "CARTAO",
-        "CARTÃO",
     )
     exclusion_checks = []
     exclusion_args: List[str] = []
@@ -694,7 +691,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     lucro_bruto     = receita_liq - cmv_rs
 
     total_oper_fixo_extra = compute_total_saida_operacional(ano, mes, db_path)
-    total_cf_emprestimos = fixas_rs + emp_rs
+    total_cf_emprestimos = total_oper_fixo_extra + emp_rs
     total_saida_oper     = total_oper_fixo_extra + total_var
 
     # EBITDA base
@@ -712,7 +709,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     rl = receita_liq
     mc_ratio = _nz_div(margem_contrib, rl)
 
-    break_even_rs = (fixas_rs / mc_ratio) if mc_ratio > 0 else 0.0
+    break_even_rs = (total_oper_fixo_extra / mc_ratio) if mc_ratio > 0 else 0.0
     break_even_pct = _nz_div(break_even_rs, rl)
 
     break_even_financeiro_rs = (total_cf_emprestimos / mc_ratio) if mc_ratio > 0 else 0.0
@@ -720,8 +717,8 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
     margem_seguranca_pct = _nz_div((rl - break_even_rs), rl)
 
-    eficiencia_oper_pct = _nz_div(total_saida_oper, rl)
-    rel_saida_entrada_pct = _nz_div(total_saida_oper, fat)
+    eficiencia_oper_pct = _nz_div(total_oper_fixo_extra, rl)
+    rel_saida_entrada_pct = _nz_div(total_oper_fixo_extra, fat)
     emp_pct_sobre_receita = _nz_div(emp_rs, rl) * 100.0
 
     ticket_medio = _nz_div(fat, float(n_vendas)) if n_vendas > 0 else 0.0
@@ -880,15 +877,15 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas. | Serve para: medir o volume total de vendas antes de qualquer dedução (base para metas e sazonalidade).",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
-        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete), Sacolas e Fundo de Promoção. | Serve para: somar os custos que variam com a venda (base da Margem de Contribuição e do Ponto de Equilíbrio).",
-        "Total de Saída Operacional (R$)": "Total de despesas operacionais (fixas e variáveis). | Serve para: mostrar quanto a operação gasta no mês (fixos + variáveis + extras), excluindo despesas financeiras e itens não operacionais. Base para EBITDA, eficiência e margens.",
+        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete de compra), sacolas %, fundo de promoção % (+ comissão variável %, se existir). Não incluir Simples/taxas da maquininha se a Receita Líquida já estiver líquida dessas deduções.",
+        "Total de Saída Operacional (R$)": "OPEX: despesas operacionais do mês (fixas + de operação), sem juros/IOF, CAPEX e depreciação. Base para EBITDA, eficiência e margens.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
         "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
         "Margem Líquida": "Lucro líquido dividido pela Receita Líquida. | Serve para: indicar a rentabilidade total do negócio, mostrando quanto sobra de cada real vendido depois de todos os custos, despesas operacionais, financeiras e tributos sobre o faturamento.",
-        "Margem de Contribuição": "Quanto sobra para cobrir fixos e gerar lucro. | Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
+        "Margem de Contribuição": "Receita Líquida − Total de Variáveis. Não inclua taxas de cartão/Simples aqui se a RL já veio líquida.",
         "Margem de Contribuição (%)": "Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
         "Margem de Contribuição (R$)": "Serve para: mostrar, em reais, quanto sobra das vendas após todos os custos variáveis; valor que efetivamente contribui para cobrir despesas fixas e lucro.",
         "Custo Fixo / Receita": "Peso dos custos fixos sobre a receita.",
@@ -897,7 +894,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Ponto de Equilíbrio (Contábil) (%)": "Percentual da receita líquida que representa o ponto de equilíbrio contábil.",
         "Ponto de Equilíbrio Financeiro (%)": "Percentual da receita líquida que representa o ponto de equilíbrio financeiro.",
         "Margem de Segurança": "Folga da receita acima do ponto de equilíbrio.",
-        "Eficiência Operacional": "Quanto da receita líquida é consumida pelas saídas operacionais (fixos + marketing + limpeza + empréstimos).",
+        "Eficiência Operacional": "OPEX ÷ Receita Líquida — mede o peso das despesas operacionais sobre a receita; sem custos variáveis, juros/IOF, CAPEX e depreciação.",
         "Relação Saídas/Entradas": "Quanto do faturamento bruto é consumido pelas saídas operacionais.",
         "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas pagas.",
         "Gasto c/ Empréstimos (%)": "Gasto com empréstimos como % da receita líquida.",
@@ -975,7 +972,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cmv_rs = m.get("cmv")
     total_variaveis = m.get("total_var")
     lucro_bruto = m.get("lucro_bruto")
-    total_saida_operacional = m.get("total_saida_oper")
+    total_saida_operacional = m.get("total_oper_fixo_extra")  # usar somente OPEX nos chips
 
 
     def _ratio(num, den):
@@ -1234,7 +1231,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Receita Líquida": m["receita_liq"],
             "CMV (Mercadorias)": m["cmv"],          # <- tabela usa CMV corrigido
             "Total de Variáveis (R$)": m["total_var"],
-            "Total de Saída Operacional (R$)": m["total_saida_oper"],
+            "Total de Saída Operacional (R$)": m["total_oper_fixo_extra"],
             "Lucro Bruto": m["lucro_bruto"],
             "Fretes": m["fretes"],
             "Sacolas": m["sacolas"],
