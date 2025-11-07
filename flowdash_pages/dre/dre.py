@@ -7,6 +7,7 @@ from calendar import monthrange
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Iterable, Optional
 import os
+import math
 
 import pandas as pd
 import streamlit as st
@@ -52,6 +53,36 @@ TOOLTIP_STRIP_HEADER_KEYS = {
     "EBITDA",
     "EBIT",
 }
+
+# --- helpers de status (Eficiência & Gestão) ---
+def eg_status_dot(metric: str, pct_value) -> str:
+    """
+    Retorna '🟢', '🟡' ou '🔴' conforme a métrica e o valor em percentual (0-100).
+    Se pct_value for None/NaN, retorna '⚪' (sem status).
+    metric ∈ {'custo_fixo_rl','pe_contabil','pe_financeiro','margem_seguranca','eficiencia_operacional','relacao_saidas_entradas'}
+    """
+    try:
+        v = float(pct_value)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(v):
+        return "⚪"
+
+    if metric == "custo_fixo_rl":  # Custo Fixo / Receita (%)
+        return "🟢" if v <= 40 else ("🟡" if v <= 50 else "🔴")
+    if metric == "pe_contabil":  # PE Contábil (% da RL)
+        return "🟢" if v <= 85 else ("🟡" if v <= 95 else "🔴")
+    if metric == "pe_financeiro":  # PE Financeiro (% da RL)
+        return "🟢" if v <= 95 else ("🟡" if v <= 105 else "🔴")
+    if metric == "margem_seguranca":  # Margem de Segurança (%)
+        return "🟢" if v >= 25 else ("🟡" if v >= 15 else "🔴")
+    if metric == "eficiencia_operacional":  # OPEX / Receita Líquida (%)
+        return "🟢" if v <= 45 else ("🟡" if v <= 50 else "🔴")
+    if metric == "relacao_saidas_entradas":  # OPEX / Receita Bruta (%)
+        return "🟢" if v <= 40 else ("🟡" if v <= 48 else "🔴")
+
+    # métrica desconhecida → neutro
+    return "⚪"
 
 # ============================== Helpers ==============================
 def _conn(db_path: str) -> sqlite3.Connection:
@@ -947,7 +978,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete de compra), sacolas %, fundo de promoção % (+ comissão variável %, se existir). Não incluir Simples/taxas da maquininha se a Receita Líquida já estiver líquida dessas deduções.",
         "Total de Saída Operacional (R$)": "OPEX: despesas operacionais do mês (fixas + de operação), sem juros/IOF, CAPEX e depreciação. Base para EBITDA, eficiência e margens.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
-        "Custo Fixo Mensal (R$)": "Soma das saídas classificadas como Custos Fixos no mês (aluguel, energia, internet etc.).",
+        "Custo Fixo Mensal (R$)": "Somatório das despesas fixas do mês (aluguel, folha, encargos, utilidades etc.). | Serve para: acompanhar o nível absoluto de custos fixos. Para cores, use as faixas do indicador Custo Fixo / Receita (%).",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
@@ -955,14 +986,14 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Margem de Contribuição": "Receita Líquida − Total de Variáveis (CMV, sacolas, fundo de promoção, comissões variáveis…). | Serve para: mostrar quanto das vendas sobra para cobrir as despesas operacionais e gerar lucro. Obs.: se a Receita Líquida já está líquida de Simples/taxas de cartão, não inclua esses itens novamente nos variáveis.",
         "Margem de Contribuição (%)": "Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
         "Margem de Contribuição (R$)": "Serve para: mostrar, em reais, quanto sobra das vendas após todos os custos variáveis; valor que efetivamente contribui para cobrir despesas fixas e lucro.",
-        "Custo Fixo / Receita": "Peso dos custos fixos sobre a receita.",
-        "Ponto de Equilíbrio (Contábil) (R$)": "Receita mínima para zerar o resultado considerando apenas custos fixos.",
-        "Ponto de Equilíbrio Financeiro (R$)": "Receita mínima para o caixa não ficar negativo: (Custos Fixos + Empréstimos) ÷ Margem de Contribuição.",
+        "Custo Fixo / Receita (%)": "Percentual da Receita Líquida comprometido com os custos fixos do mês. | Serve para: avaliar o peso da estrutura fixa sobre as vendas.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%",
+        "Ponto de Equilíbrio (Contábil) (R$ | %)": "Venda mínima para cobrir os custos fixos (sem despesas financeiras). Mostrado em R$ e como % da Receita Líquida. | Serve para: indicar a partir de qual receita o negócio começa a gerar lucro operacional.\n\n🟢 Menor ou igual a 85% da RL · 🟡 Entre 85% e 95% da RL · 🔴 Maior que 95% da RL",
+        "Ponto de Equilíbrio Financeiro (R$ | %)": "Venda mínima para cobrir custos fixos + gasto com empréstimos. Mostrado em R$ e como % da Receita Líquida. | Serve para: mostrar se a operação cobre também o serviço da dívida.\n\n🟢 Menor ou igual a 95% da RL · 🟡 Entre 95% e 105% da RL · 🔴 Maior que 105% da RL",
         "Ponto de Equilíbrio (Contábil) (%)": "Percentual da receita líquida que representa o ponto de equilíbrio contábil.",
         "Ponto de Equilíbrio Financeiro (%)": "Percentual da receita líquida que representa o ponto de equilíbrio financeiro.",
-        "Margem de Segurança": "Folga da receita acima do ponto de equilíbrio.",
-        "Eficiência Operacional": "OPEX ÷ Receita Líquida — mede o peso das despesas operacionais sobre a receita; sem custos variáveis, juros/IOF, CAPEX e depreciação.",
-        "Relação Saídas/Entradas": "Quanto do faturamento bruto é consumido pelas saídas operacionais.",
+        "Margem de Segurança (%)": "Quanto a receita está acima do Ponto de Equilíbrio Contábil. | Serve para: medir a folga de vendas antes de entrar no prejuízo.\n\n🟢 Maior ou igual a 25% · 🟡 Entre 15% e 25% · 🔴 Menor que 15%",
+        "Eficiência Operacional (%)": "Total de Saída Operacional (fixos + variáveis operacionais, sem despesas financeiras) sobre a Receita Líquida. | Serve para: medir o consumo operacional das vendas.\n\n🟢 Menor ou igual a 45% · 🟡 Entre 45% e 50% · 🔴 Maior que 50%",
+        "Relação Saídas/Entradas (%)": "Total de Saída Operacional sobre a Receita Bruta. | Serve para: comparar o nível de despesas operacionais diretamente com o faturamento bruto.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 48% · 🔴 Maior que 48%",
         "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas pagas.",
         "Gasto c/ Empréstimos (%)": "Gasto com empréstimos como % da receita líquida.",
         "Dívida (Estoque)": "Saldo devedor ainda em aberto.",
@@ -1043,6 +1074,43 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     total_variaveis = m.get("total_var")
     lucro_bruto = m.get("lucro_bruto")
     total_saida_operacional = m.get("total_oper_fixo_extra")  # usar somente OPEX nos chips
+
+    receita_bruta_val = _safe(receita_bruta)
+    receita_liq_val = _safe(receita_liq)
+    total_saida_operacional_val = _safe(total_saida_operacional)
+    break_even_rs_val = _safe(m.get("break_even_rs"))
+    break_even_financeiro_rs_val = _safe(m.get("break_even_financeiro_rs"))
+
+    custo_fixo_rl_pct_val = m.get("custo_fixo_sobre_receita_pct")
+    if custo_fixo_rl_pct_val is None:
+        custo_fixo_rl_pct_val = _derive_pct(fixas_rs, receita_liq_val)
+
+    break_even_pct_val = m.get("break_even_pct")
+    if break_even_pct_val is None:
+        break_even_pct_val = _derive_pct(break_even_rs_val, receita_liq_val)
+
+    break_even_financeiro_pct_val = m.get("break_even_financeiro_pct")
+    if break_even_financeiro_pct_val is None:
+        break_even_financeiro_pct_val = _derive_pct(break_even_financeiro_rs_val, receita_liq_val)
+
+    margem_seguranca_pct_val = m.get("margem_seguranca_pct")
+    if margem_seguranca_pct_val is None:
+        margem_seguranca_pct_val = _derive_pct(receita_liq_val - break_even_rs_val, receita_liq_val)
+
+    eficiencia_oper_pct_val = m.get("eficiencia_oper_pct")
+    if eficiencia_oper_pct_val is None:
+        eficiencia_oper_pct_val = _derive_pct(total_saida_operacional_val, receita_liq_val)
+
+    relacao_saidas_entradas_pct_val = m.get("rel_saida_entrada_pct")
+    if relacao_saidas_entradas_pct_val is None:
+        relacao_saidas_entradas_pct_val = _derive_pct(total_saida_operacional_val, receita_bruta_val)
+
+    custo_fixo_status = eg_status_dot("custo_fixo_rl", custo_fixo_rl_pct_val)
+    pe_contabil_status = eg_status_dot("pe_contabil", break_even_pct_val)
+    pe_financeiro_status = eg_status_dot("pe_financeiro", break_even_financeiro_pct_val)
+    margem_seguranca_status = eg_status_dot("margem_seguranca", margem_seguranca_pct_val)
+    eficiencia_oper_status = eg_status_dot("eficiencia_operacional", eficiencia_oper_pct_val)
+    relacao_saidas_status = eg_status_dot("relacao_saidas_entradas", relacao_saidas_entradas_pct_val)
 
 
     def _ratio(num, den):
@@ -1157,6 +1225,12 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             return None
         return f"{pct_text} da Receita Líquida"
 
+    def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
+        den_val = _safe(den)
+        if den_val == 0:
+            return 0.0
+        return (_safe(num) / den_val) * 100.0
+
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", receita_liq_display, status_emoji=_status_or_none(receita_liq_status),
@@ -1199,15 +1273,22 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     ], "k-margens"))
 
     cards_html.append(_card("Eficiência e Gestão", [
-        _chip("Custo Fixo Mensal (R$)", _fmt_brl(fixas_rs)),
-        _chip("Custo Fixo / Receita", _fmt_pct(m["custo_fixo_sobre_receita_pct"])),
-        _chip_duo("Ponto de Equilíbrio (Contábil)", m["break_even_rs"], m["break_even_pct"],
-                  help_key="Ponto de Equilíbrio (Contábil) (R$)"),
-        _chip_duo("Ponto de Equilíbrio Financeiro", m["break_even_financeiro_rs"], m["break_even_financeiro_pct"],
-                  help_key="Ponto de Equilíbrio Financeiro (R$)"),
-        _chip("Margem de Segurança", _fmt_pct(m["margem_seguranca_pct"])),
-        _chip("Eficiência Operacional", _fmt_pct(m["eficiencia_oper_pct"])),
-        _chip("Relação Saídas/Entradas", _fmt_pct(m["rel_saida_entrada_pct"])),
+        _chip("Custo Fixo Mensal (R$)", _fmt_brl(fixas_rs),
+              status_emoji=custo_fixo_status),
+        _chip("Custo Fixo / Receita (%)", _fmt_pct(custo_fixo_rl_pct_val),
+              status_emoji=custo_fixo_status),
+        _chip_duo("Ponto de Equilíbrio (Contábil)", break_even_rs_val, break_even_pct_val,
+                  help_key="Ponto de Equilíbrio (Contábil) (R$ | %)",
+                  status_emoji=pe_contabil_status),
+        _chip_duo("Ponto de Equilíbrio Financeiro", break_even_financeiro_rs_val, break_even_financeiro_pct_val,
+                  help_key="Ponto de Equilíbrio Financeiro (R$ | %)",
+                  status_emoji=pe_financeiro_status),
+        _chip("Margem de Segurança (%)", _fmt_pct(margem_seguranca_pct_val),
+              status_emoji=margem_seguranca_status),
+        _chip("Eficiência Operacional (%)", _fmt_pct(eficiencia_oper_pct_val),
+              status_emoji=eficiencia_oper_status),
+        _chip("Relação Saídas/Entradas (%)", _fmt_pct(relacao_saidas_entradas_pct_val),
+              status_emoji=relacao_saidas_status),
     ], "k-efic"))
 
     cards_html.append(_card("Fluxo e Endividamento", [
