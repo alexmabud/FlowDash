@@ -27,9 +27,8 @@ START_MONTH = 10  # Outubro
 KPI_TITLE = "KPIs"  # título exibido acima dos cards
 
 FAIXAS_HELP = {
-    "receita_liq_crescimento": "Receita Líquida (crescimento YoY): 🔴 < 0% · 🟡 0%–5% · 🟢 > 5%",
-    "receita_liq_meta": "Receita Líquida (% da meta): 🔴 < 90% · 🟡 90%–100% · 🟢 > 100%",
-    "cmv": "CMV (% Receita Bruta): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
+    "receita_liq_rb": "Receita Líquida (% da Receita Bruta): 🟢 ≥ 92% · 🟡 88–92% · 🔴 &lt; 88%",
+    "cmv": "CMV (% da Receita Líquida): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
     "total_var": "Total de Variáveis (% Receita Líquida): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
     "total_saida_oper": "Total de Saída Operacional (% Receita Líquida): 🟢 ≤ 25% · 🟡 25–30% · 🔴 > 30%",
     "lucro_bruto": "Lucro Bruto (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
@@ -119,15 +118,10 @@ class _KPIStatusResult:
     emoji: str = "⚪"
 
 _KPI_FAIXAS: Dict[str, List] = {
-    "receita_liquida_crescimento": [
-        (lambda v: v is not None and v > 5, "🟢"),
-        (lambda v: v is not None and 0 <= v <= 5, "🟡"),
-        (lambda v: v is not None and v < 0, "🔴"),
-    ],
-    "receita_liquida_meta": [
-        (lambda v: v is not None and v > 100, "🟢"),
-        (lambda v: v is not None and 90 <= v <= 100, "🟡"),
-        (lambda v: v is not None and v < 90, "🔴"),
+    "receita_liquida_sobre_bruta": [
+        (lambda v: v is not None and v >= 92, "🟢"),
+        (lambda v: v is not None and 88 <= v < 92, "🟡"),
+        (lambda v: v is not None and v < 88, "🔴"),
     ],
     "cmv_percentual": [
         (lambda v: v is not None and v <= 50, "🟢"),
@@ -983,16 +977,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     lucro_bruto = m.get("lucro_bruto")
     total_saida_operacional = m.get("total_saida_oper")
 
-    receita_liq_crescimento_pct = None
-    try:
-        prev_ano = ano - 1
-        if prev_ano > 0:
-            m_prev = _calc_mes(db_path, prev_ano, mes, vars_dre)
-            receita_liq_prev = m_prev.get("receita_liq")
-            if receita_liq_prev not in (None, 0):
-                receita_liq_crescimento_pct = _nz_div((receita_liq or 0) - receita_liq_prev, receita_liq_prev) * 100.0
-    except Exception:
-        receita_liq_crescimento_pct = None
 
     def _ratio(num, den):
         if den in (None, 0) or num is None:
@@ -1053,13 +1037,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{total_saida_oper_display} | {formatar_percentual(perc_total_saida_oper, casas=1)} da Receita Líquida"
         )
 
-    receita_liq_meta_pct = m.get("receita_liq_meta_pct")
-    receita_liq_tip_key = "receita_liq_crescimento"
-    if receita_liq_meta_pct not in (None, ""):
-        receita_liq_status = _chip_status("receita_liquida_meta", receita_liq_meta_pct)
-        receita_liq_tip_key = "receita_liq_meta"
-    else:
-        receita_liq_status = _chip_status("receita_liquida_crescimento", receita_liq_crescimento_pct)
+    perc_rl_rb_pct = (perc_receita_liq * 100.0) if perc_receita_liq is not None else None
+    receita_liq_status = _chip_status("receita_liquida_sobre_bruta", perc_rl_rb_pct)
+    receita_liq_tip_key = "receita_liq_rb"
     cmv_pct_val = (perc_cmv * 100.0) if perc_cmv is not None else None
     status_cmv = _chip_status("cmv_percentual", cmv_pct_val)
     total_var_pct_val = (perc_total_var * 100.0) if perc_total_var is not None else None
