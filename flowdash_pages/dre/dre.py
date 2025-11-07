@@ -12,11 +12,32 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 from utils import formatar_moeda, formatar_percentual
+import importlib
+
+_avaliar_indicador_externo = None
+try:
+    _kpi_status_mod = importlib.import_module("utils.kpi_status")
+    _avaliar_indicador_externo = getattr(_kpi_status_mod, "avaliar_indicador", None)
+except Exception:
+    _avaliar_indicador_externo = None
 
 # ============================== Config de início do DRE ==============================
 START_YEAR = 2025
 START_MONTH = 10  # Outubro
 KPI_TITLE = "KPIs"  # título exibido acima dos cards
+
+FAIXAS_HELP = {
+    "receita_liq_crescimento": "Receita Líquida (crescimento YoY): 🔴 < 0% · 🟡 0%–5% · 🟢 > 5%",
+    "receita_liq_meta": "Receita Líquida (% da meta): 🔴 < 90% · 🟡 90%–100% · 🟢 > 100%",
+    "cmv": "CMV (% Receita Bruta): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
+    "total_var": "Total de Variáveis (% Receita Líquida): 🟢 ≤ 50% · 🟡 50–60% · 🔴 > 60%",
+    "total_saida_oper": "Total de Saída Operacional (% Receita Líquida): 🟢 ≤ 25% · 🟡 25–30% · 🔴 > 30%",
+    "lucro_bruto": "Lucro Bruto (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
+    "margem_bruta": "Margem Bruta (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
+    "margem_operacional": "Margem Operacional (EBIT, %): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
+    "margem_liquida": "Margem Líquida (%): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
+    "margem_contribuicao": "Margem de Contribuição (%): 🔴 < 35% · 🟡 35–45% · 🟢 ≥ 45%",
+}
 
 # ============================== Helpers ==============================
 def _conn(db_path: str) -> sqlite3.Connection:
@@ -71,6 +92,16 @@ def _fmt_pct(v: float, casas: int = 1) -> str:
     except Exception:
         return "—"
 
+def _escape_tooltip(text: Optional[str]) -> str:
+    if not text:
+        return ""
+    escaped = (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+    return escaped.replace("\n", "<br/>")
+
 def _safe(v) -> float:
     try:
         return float(v or 0)
@@ -82,6 +113,105 @@ def _nz_div(n: float, d: float) -> float:
 
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
     return (ano, mes - 1) if mes > 1 else (ano - 1, 12)
+
+@dataclass
+class _KPIStatusResult:
+    emoji: str = "⚪"
+
+_KPI_FAIXAS: Dict[str, List] = {
+    "receita_liquida_crescimento": [
+        (lambda v: v is not None and v > 5, "🟢"),
+        (lambda v: v is not None and 0 <= v <= 5, "🟡"),
+        (lambda v: v is not None and v < 0, "🔴"),
+    ],
+    "receita_liquida_meta": [
+        (lambda v: v is not None and v > 100, "🟢"),
+        (lambda v: v is not None and 90 <= v <= 100, "🟡"),
+        (lambda v: v is not None and v < 90, "🔴"),
+    ],
+    "cmv_percentual": [
+        (lambda v: v is not None and v <= 50, "🟢"),
+        (lambda v: v is not None and 50 < v <= 60, "🟡"),
+        (lambda v: v is not None and v > 60, "🔴"),
+    ],
+    "total_variaveis_percentual": [
+        (lambda v: v is not None and v <= 50, "🟢"),
+        (lambda v: v is not None and 50 < v <= 60, "🟡"),
+        (lambda v: v is not None and v > 60, "🔴"),
+    ],
+    "total_saida_oper_percentual": [
+        (lambda v: v is not None and v <= 25, "🟢"),
+        (lambda v: v is not None and 25 < v <= 30, "🟡"),
+        (lambda v: v is not None and v > 30, "🔴"),
+    ],
+    "lucro_bruto": [
+        (lambda v: v is not None and v >= 50, "🟢"),
+        (lambda v: v is not None and 45 <= v < 50, "🟡"),
+        (lambda v: v is not None and v < 45, "🔴"),
+    ],
+    "margem_bruta": [
+        (lambda v: v is not None and v >= 50, "🟢"),
+        (lambda v: v is not None and 45 <= v < 50, "🟡"),
+        (lambda v: v is not None and v < 45, "🔴"),
+    ],
+    "margem_operacional": [
+        (lambda v: v is not None and v >= 10, "🟢"),
+        (lambda v: v is not None and 5 <= v < 10, "🟡"),
+        (lambda v: v is not None and v < 5, "🔴"),
+    ],
+    "margem_liquida": [
+        (lambda v: v is not None and v >= 10, "🟢"),
+        (lambda v: v is not None and 5 <= v < 10, "🟡"),
+        (lambda v: v is not None and v < 5, "🔴"),
+    ],
+    "margem_contribuicao": [
+        (lambda v: v is not None and v >= 45, "🟢"),
+        (lambda v: v is not None and 35 <= v < 45, "🟡"),
+        (lambda v: v is not None and v < 35, "🔴"),
+    ],
+}
+
+def _avaliar_indicador_local(ind_key: str, valor=None, base=None) -> _KPIStatusResult:
+    def _to_float(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    val = _to_float(valor)
+    if ind_key == "lucro_bruto":
+        if valor is None or base in (None, 0):
+            val = None
+        else:
+            try:
+                val = (float(valor) / float(base)) * 100.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                val = None
+    if val is None:
+        return _KPIStatusResult()
+    bands = _KPI_FAIXAS.get(ind_key)
+    if not bands:
+        return _KPIStatusResult()
+    for check, emoji in bands:
+        if check(val):
+            return _KPIStatusResult(emoji=emoji)
+    return _KPIStatusResult()
+
+def _chip_status(ind_key: str, valor=None, base=None) -> str:
+    if valor is None and (base is None or base == 0):
+        return "⚪"
+    if _avaliar_indicador_externo is not None:
+        try:
+            res = _avaliar_indicador_externo(ind_key, valor, base)
+            if res is not None:
+                emoji = getattr(res, "emoji", None)
+                if emoji is None and isinstance(res, dict):
+                    emoji = res.get("emoji")
+                if emoji:
+                    return emoji
+        except Exception:
+            pass
+    return _avaliar_indicador_local(ind_key, valor, base).emoji
 
 # === Crescimento MTD (1º→D do mês vs 1º→D do mês anterior)
 def _crescimento_mtd(db_path: str, ano: int, mes: int, today: Optional[date] = None) -> float:
@@ -717,16 +847,20 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 .fd-chip .k{opacity:.90;margin-right:6px}
 .fd-chip .v{font-weight:700;margin-right:6px}
 
-/* "?" com <details> */
-.fd-chip details.qwrap{display:inline-block;margin-left:2px;position:relative}
-.fd-chip details.qwrap > summary.q{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#8a8a8a;color:#fff;font-size:12px;line-height:16px;border:none;cursor:pointer;outline:none}
-.fd-chip details.qwrap > summary.q::-webkit-details-marker{display:none}
-.fd-chip details.qwrap[open] > summary.q{background:#9a9a9a}
+/* "?" tooltip */
+.fd-chip .qwrap{display:inline-flex;margin-left:2px;position:relative}
+.fd-chip .qwrap .q{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:#8a8a8a;color:#fff;font-size:12px;line-height:16px;border:none;cursor:pointer;outline:none}
+.fd-chip .qwrap:focus .q,
+.fd-chip .qwrap:focus-within .q,
+.fd-chip .qwrap:hover .q{background:#9a9a9a}
+.fd-chip .qwrap{outline:none}
 
-/* tooltip */
-.fd-chip details.qwrap .tip{position:absolute;left:0;top:calc(100% + 8px);background:rgba(25,25,25,.98);color:#fff;border:1px solid rgba(255,255,255,0.08);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.28);padding:8px 10px;max-width:360px;min-width:240px;z-index:20;font-size:.86rem}
+.fd-chip .qwrap .tip{position:absolute;left:0;top:calc(100% + 8px);background:rgba(25,25,25,.98);color:#fff;border:1px solid rgba(255,255,255,0.08);border-radius:10px;box-shadow:0 6px 20px rgba(0,0,0,.28);padding:8px 10px;max-width:360px;min-width:240px;z-index:20;font-size:.86rem;visibility:hidden;opacity:0;transition:opacity .12s ease,transform .12s ease;transform:translateY(-4px)}
+.fd-chip .qwrap:hover .tip,
+.fd-chip .qwrap:focus .tip,
+.fd-chip .qwrap:focus-within .tip{visibility:visible;opacity:1;transform:translateY(0)}
 @media (prefers-reduced-motion:no-preference){
-  .fd-chip details.qwrap .tip{animation:fd-fade .12s ease}
+  .fd-chip .qwrap .tip{animation:fd-fade .12s ease}
 }
 @keyframes fd-fade{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 
@@ -786,21 +920,39 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "ROA": "Retorno do lucro sobre os ativos totais.",
     }
 
-    def _chip(lbl: str, val: str) -> str:
+    def _build_tip_html(tip_text: str) -> str:
+        if not tip_text:
+            return ""
+        return (f'<span class="qwrap" tabindex="0">'
+                f'<span class="q">?</span>'
+                f'<span class="tip">{tip_text}</span>'
+                f'</span>')
+
+    def _chip(lbl: str, val: str, status_emoji: Optional[str] = None,
+              extra_tip: Optional[str] = None) -> str:
         tip = HELP.get(lbl, "")
-        if tip:
+        if extra_tip:
+            tip = f"{tip}\n\n{extra_tip}" if tip else extra_tip
+        if status_emoji:
+            val = f"{status_emoji} {val}"
+        tip_html = _build_tip_html(_escape_tooltip(tip))
+        if tip_html:
             return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
-                    f'<span class="v">{val}</span>'
-                    f'<details class="qwrap"><summary class="q">?</summary><div class="tip">{tip}</div></details></span>')
+                    f'<span class="v">{val}</span>{tip_html}</span>')
         return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val}</span></span>'
 
-    def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None) -> str:
+    def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None,
+                  status_emoji: Optional[str] = None, extra_tip: Optional[str] = None) -> str:
         tip = HELP.get(help_key or lbl, "")
+        if extra_tip:
+            tip = f"{tip}\n\n{extra_tip}" if tip else extra_tip
         val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
-        if tip:
+        if status_emoji:
+            val_comb = f"{status_emoji} {val_comb}"
+        tip_html = _build_tip_html(_escape_tooltip(tip))
+        if tip_html:
             return (f'<span class="fd-chip"><span class="k">{lbl}</span>'
-                    f'<span class="v">{val_comb}</span>'
-                    f'<details class="qwrap"><summary class="q">?</summary><div class="tip">{tip}</div></details></span>')
+                    f'<span class="v">{val_comb}</span>{tip_html}</span>')
         return f'<span class="fd-chip"><span class="k">{lbl}</span><span class="v">{val_comb}</span></span>'
 
     def _card(title: str, chips: List[str], cls: str) -> str:
@@ -830,6 +982,17 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     total_variaveis = m.get("total_var")
     lucro_bruto = m.get("lucro_bruto")
     total_saida_operacional = m.get("total_saida_oper")
+
+    receita_liq_crescimento_pct = None
+    try:
+        prev_ano = ano - 1
+        if prev_ano > 0:
+            m_prev = _calc_mes(db_path, prev_ano, mes, vars_dre)
+            receita_liq_prev = m_prev.get("receita_liq")
+            if receita_liq_prev not in (None, 0):
+                receita_liq_crescimento_pct = _nz_div((receita_liq or 0) - receita_liq_prev, receita_liq_prev) * 100.0
+    except Exception:
+        receita_liq_crescimento_pct = None
 
     def _ratio(num, den):
         if den in (None, 0) or num is None:
@@ -890,21 +1053,65 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{total_saida_oper_display} | {formatar_percentual(perc_total_saida_oper, casas=1)} da Receita Líquida"
         )
 
+    receita_liq_meta_pct = m.get("receita_liq_meta_pct")
+    receita_liq_tip_key = "receita_liq_crescimento"
+    if receita_liq_meta_pct not in (None, ""):
+        receita_liq_status = _chip_status("receita_liquida_meta", receita_liq_meta_pct)
+        receita_liq_tip_key = "receita_liq_meta"
+    else:
+        receita_liq_status = _chip_status("receita_liquida_crescimento", receita_liq_crescimento_pct)
+    cmv_pct_val = (perc_cmv * 100.0) if perc_cmv is not None else None
+    status_cmv = _chip_status("cmv_percentual", cmv_pct_val)
+    total_var_pct_val = (perc_total_var * 100.0) if perc_total_var is not None else None
+    status_total_var = _chip_status("total_variaveis_percentual", total_var_pct_val)
+    total_saida_oper_pct_val = (perc_total_saida_oper * 100.0) if perc_total_saida_oper is not None else None
+    status_total_saida_oper = _chip_status("total_saida_oper_percentual", total_saida_oper_pct_val)
+    status_lucro_bruto = _chip_status("lucro_bruto", lucro_bruto, receita_liq)
+
+    margem_bruta_pct_val = m.get("margem_bruta_pct")
+    margem_operacional_pct_val = m.get("margem_operacional_pct")
+    margem_liquida_pct_val = m.get("margem_liquida_pct")
+    margem_contrib_pct_val = m.get("margem_contrib_pct")
+
+    status_margem_bruta = _chip_status("margem_bruta", margem_bruta_pct_val)
+    status_margem_operacional = _chip_status("margem_operacional", margem_operacional_pct_val)
+    status_margem_liquida = _chip_status("margem_liquida", margem_liquida_pct_val)
+    status_margem_contrib = _chip_status("margem_contribuicao", margem_contrib_pct_val)
+
+    def _status_or_none(v: Optional[str]) -> Optional[str]:
+        return v if v and v != "⚪" else None
+
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
-        _chip("Receita Líquida", receita_liq_display),
-        _chip("CMV", cmv_display),                 # <- chip CMV adicionado
-        _chip("Total de Variáveis (R$)", total_var_display),
-        _chip("Total de Saída Operacional (R$)", total_saida_oper_display),
-        _chip("Lucro Bruto", lucro_bruto_display),
+        _chip("Receita Líquida", receita_liq_display, status_emoji=_status_or_none(receita_liq_status),
+              extra_tip=FAIXAS_HELP[receita_liq_tip_key]),
+        _chip("CMV", cmv_display, status_emoji=_status_or_none(status_cmv),
+              extra_tip=FAIXAS_HELP["cmv"]),                 # <- chip CMV adicionado
+        _chip("Total de Variáveis (R$)", total_var_display,
+              status_emoji=_status_or_none(status_total_var),
+              extra_tip=FAIXAS_HELP["total_var"]),
+        _chip("Total de Saída Operacional (R$)", total_saida_oper_display,
+              status_emoji=_status_or_none(status_total_saida_oper),
+              extra_tip=FAIXAS_HELP["total_saida_oper"]),
+        _chip("Lucro Bruto", lucro_bruto_display,
+              status_emoji=_status_or_none(status_lucro_bruto),
+              extra_tip=FAIXAS_HELP["lucro_bruto"]),
     ], "k-estrut"))
 
     cards_html.append(_card("Margens", [
-        _chip("Margem Bruta", _fmt_pct(m["margem_bruta_pct"])),
-        _chip("Margem Operacional", _fmt_pct(m["margem_operacional_pct"])),
-        _chip("Margem Líquida", _fmt_pct(m["margem_liquida_pct"])),
+        _chip("Margem Bruta", _fmt_pct(margem_bruta_pct_val),
+              status_emoji=_status_or_none(status_margem_bruta),
+              extra_tip=FAIXAS_HELP["margem_bruta"]),
+        _chip("Margem Operacional", _fmt_pct(margem_operacional_pct_val),
+              status_emoji=_status_or_none(status_margem_operacional),
+              extra_tip=FAIXAS_HELP["margem_operacional"]),
+        _chip("Margem Líquida", _fmt_pct(margem_liquida_pct_val),
+              status_emoji=_status_or_none(status_margem_liquida),
+              extra_tip=FAIXAS_HELP["margem_liquida"]),
         _chip_duo("Margem de Contribuição", m["margem_contrib"], m["margem_contrib_pct"],
-                  help_key="Margem de Contribuição"),
+                  help_key="Margem de Contribuição",
+                  status_emoji=_status_or_none(status_margem_contrib),
+                  extra_tip=FAIXAS_HELP["margem_contribuicao"]),
     ], "k-margens"))
 
     cards_html.append(_card("Eficiência e Gestão", [
