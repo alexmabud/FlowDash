@@ -33,6 +33,7 @@ FAIXAS_HELP = {
     "total_saida_oper": "Total de Saída Operacional (% Receita Líquida): 🟢 ≤ 25% · 🟡 25–30% · 🔴 > 30%",
     "lucro_bruto": "Lucro Bruto (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
     "margem_bruta": "Margem Bruta (%): 🔴 < 45% · 🟡 45–50% · 🟢 ≥ 50%",
+    "margem_ebitda_pct": "Margem EBITDA (% da RL): 🟢 ≥ 10% · 🟡 5–10% · 🔴 < 5%",
     "margem_operacional": "Margem Operacional (EBIT, %): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
     "margem_liquida": "Margem Líquida (%): 🔴 < 5% · 🟡 5–10% · 🟢 ≥ 10%",
     "margem_contribuicao": "Margem de Contribuição (%): 🔴 < 35% · 🟡 35–45% · 🟢 ≥ 45%",
@@ -147,6 +148,11 @@ _KPI_FAIXAS: Dict[str, List] = {
         (lambda v: v is not None and v >= 50, "🟢"),
         (lambda v: v is not None and 45 <= v < 50, "🟡"),
         (lambda v: v is not None and v < 45, "🔴"),
+    ],
+    "margem_ebitda_pct": [
+        (lambda v: v is not None and v >= 10, "🟢"),
+        (lambda v: v is not None and 5 <= v < 10, "🟡"),
+        (lambda v: v is not None and v < 5, "🔴"),
     ],
     "margem_operacional": [
         (lambda v: v is not None and v >= 10, "🟢"),
@@ -708,6 +714,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     # KPIs
     rl = receita_liq
     mc_ratio = _nz_div(margem_contrib, rl)
+    margem_ebitda_pct = _nz_div(ebitda_base, rl)
 
     break_even_rs = (total_oper_fixo_extra / mc_ratio) if mc_ratio > 0 else 0.0
     break_even_pct = _nz_div(break_even_rs, rl)
@@ -767,6 +774,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
         # margens
         "margem_bruta_pct": margem_bruta_pct * 100.0,
+        "margem_ebitda_pct": margem_ebitda_pct * 100.0,
         "margem_operacional_pct": margem_operacional_pct * 100.0,
         "margem_liquida_pct": margem_liquida_pct * 100.0,
         "margem_contrib_pct": margem_contrib_pct * 100.0,
@@ -903,8 +911,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Ticket Médio": "Média de valor por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
         "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
-        "EBITDA": "Lucro operacional antes de juros, impostos, depreciação e amortização. | Serve para: avaliar a geração de caixa das operações, sem efeitos financeiros ou contábeis.",
-        "EBIT": "Lucro operacional após depreciação e amortização, antes de juros e impostos. | Serve para: avaliar a eficiência das operações principais, sem considerar efeitos financeiros (juros) ou tributários.",
+        "EBITDA": "EBITDA (R$ | %RL) = MC - OPEX. %EBITDA = EBITDA / RL. Mede geração de caixa operacional antes de depreciação e efeitos financeiros.",
+        "EBIT": "EBIT (R$ | %RL) = EBITDA - Depreciação. %EBIT = EBIT / RL (Margem Operacional). Exclui juros/IOF, CAPEX e impostos sobre lucro.",
         "Lucro Líquido": "Resultado final do período após despesas financeiras e impostos (quando aplicável). | Serve para: mostrar o quanto efetivamente sobrou no mês, após todos os custos, despesas e encargos. No Simples Nacional, representa o EBIT menos os gastos com empréstimos e juros.",
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
         "ROI": "Retorno do lucro sobre o investimento total.",
@@ -1046,11 +1054,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     status_lucro_bruto = _chip_status("lucro_bruto", lucro_bruto, receita_liq)
 
     margem_bruta_pct_val = m.get("margem_bruta_pct")
+    margem_ebitda_pct_val = m.get("margem_ebitda_pct")
     margem_operacional_pct_val = m.get("margem_operacional_pct")
     margem_liquida_pct_val = m.get("margem_liquida_pct")
     margem_contrib_pct_val = m.get("margem_contrib_pct")
 
     status_margem_bruta = _chip_status("margem_bruta", margem_bruta_pct_val)
+    status_margem_ebitda = _chip_status("margem_ebitda_pct", margem_ebitda_pct_val)
     status_margem_operacional = _chip_status("margem_operacional", margem_operacional_pct_val)
     status_margem_liquida = _chip_status("margem_liquida", margem_liquida_pct_val)
     status_margem_contrib = _chip_status("margem_contribuicao", margem_contrib_pct_val)
@@ -1116,9 +1126,24 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("Crescimento de Receita (m/m)", _fmt_pct(crec)),
     ], "k-cresc"))
 
+    margem_ebitda_ratio = (margem_ebitda_pct_val / 100.0) if margem_ebitda_pct_val is not None else None
+    margem_operacional_ratio = (margem_operacional_pct_val / 100.0) if margem_operacional_pct_val is not None else None
+
+    ebitda_display = _fmt_brl(m["ebitda"])
+    if margem_ebitda_ratio is not None:
+        ebitda_display = f"{ebitda_display} | {formatar_percentual(margem_ebitda_ratio, casas=1)} da RL"
+
+    ebit_display = _fmt_brl(m["ebit"])
+    if margem_operacional_ratio is not None:
+        ebit_display = f"{ebit_display} | {formatar_percentual(margem_operacional_ratio, casas=1)} da RL"
+
     cards_html.append(_card("Avançados", [
-        _chip("EBITDA", _fmt_brl(m["ebitda"])),
-        _chip("EBIT", _fmt_brl(m["ebit"])),
+        _chip("EBITDA", ebitda_display,
+              status_emoji=_status_or_none(status_margem_ebitda),
+              extra_tip=FAIXAS_HELP["margem_ebitda_pct"]),
+        _chip("EBIT", ebit_display,
+              status_emoji=_status_or_none(status_margem_operacional),
+              extra_tip=FAIXAS_HELP["margem_operacional"]),
         _chip("Lucro Líquido", _fmt_brl(m["lucro_liq"])),
         _chip("ROE", _fmt_pct(m["roe_pct"])),
         _chip("ROI", _fmt_pct(m["roi_pct"])),
