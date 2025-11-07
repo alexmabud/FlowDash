@@ -952,7 +952,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
         "Margem Líquida": "Lucro líquido dividido pela Receita Líquida. | Serve para: indicar a rentabilidade total do negócio, mostrando quanto sobra de cada real vendido depois de todos os custos, despesas operacionais, financeiras e tributos sobre o faturamento.",
-        "Margem de Contribuição": "Receita Líquida − Total de Variáveis. Não inclua taxas de cartão/Simples aqui se a RL já veio líquida.",
+        "Margem de Contribuição": "Receita Líquida − Total de Variáveis (CMV, sacolas, fundo de promoção, comissões variáveis…). | Serve para: mostrar quanto das vendas sobra para cobrir as despesas operacionais e gerar lucro. Obs.: se a Receita Líquida já está líquida de Simples/taxas de cartão, não inclua esses itens novamente nos variáveis.",
         "Margem de Contribuição (%)": "Serve para: indicar quanto de cada R$ vendido sobra para pagar despesas fixas e gerar lucro depois de todos os custos variáveis (CMV, taxas de cartão, sacolas, fundo de promoção, comissões etc.); base do Ponto de Equilíbrio e decisões de preço.",
         "Margem de Contribuição (R$)": "Serve para: mostrar, em reais, quanto sobra das vendas após todos os custos variáveis; valor que efetivamente contribui para cobrir despesas fixas e lucro.",
         "Custo Fixo / Receita": "Peso dos custos fixos sobre a receita.",
@@ -1130,6 +1130,33 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     def _status_or_none(v: Optional[str]) -> Optional[str]:
         return v if v and v != "⚪" else None
 
+    def _pct_ratio(val: Optional[float]) -> Optional[float]:
+        try:
+            return float(val) / 100.0
+        except (TypeError, ValueError, ZeroDivisionError):
+            return None
+
+    def _pct_label(val: Optional[float]) -> Optional[str]:
+        ratio = _pct_ratio(val)
+        if ratio is None:
+            return None
+        try:
+            return formatar_percentual(ratio, casas=1)
+        except Exception:
+            return None
+
+    def _pct_with_rl_suffix(val: Optional[float]) -> Optional[str]:
+        pct_text = _pct_label(val)
+        if not pct_text:
+            return None
+        return f"{pct_text} | {pct_text} da Receita Líquida"
+
+    def _rl_suffix_only(val: Optional[float]) -> Optional[str]:
+        pct_text = _pct_label(val)
+        if not pct_text:
+            return None
+        return f"{pct_text} da Receita Líquida"
+
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
         _chip("Receita Líquida", receita_liq_display, status_emoji=_status_or_none(receita_liq_status),
@@ -1147,20 +1174,28 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               extra_tip=FAIXAS_HELP["lucro_bruto"]),
     ], "k-estrut"))
 
+    margem_bruta_display = _pct_with_rl_suffix(margem_bruta_pct_val) or _fmt_pct(margem_bruta_pct_val)
+    margem_operacional_display = _pct_with_rl_suffix(margem_operacional_pct_val) or _fmt_pct(margem_operacional_pct_val)
+    margem_liquida_display = _pct_with_rl_suffix(margem_liquida_pct_val) or _fmt_pct(margem_liquida_pct_val)
+
+    mc_value_display = _fmt_brl(m["margem_contrib"])
+    mc_suffix = _rl_suffix_only(m["margem_contrib_pct"])
+    if mc_suffix:
+        mc_value_display = f"{mc_value_display} | {mc_suffix}"
+
     cards_html.append(_card("Margens", [
-        _chip("Margem Bruta", _fmt_pct(margem_bruta_pct_val),
+        _chip("Margem Bruta", margem_bruta_display,
               status_emoji=_status_or_none(status_margem_bruta),
               extra_tip=FAIXAS_HELP["margem_bruta"]),
-        _chip("Margem Operacional", _fmt_pct(margem_operacional_pct_val),
+        _chip("Margem Operacional", margem_operacional_display,
               status_emoji=_status_or_none(status_margem_operacional),
               extra_tip=FAIXAS_HELP["margem_operacional"]),
-        _chip("Margem Líquida", _fmt_pct(margem_liquida_pct_val),
+        _chip("Margem Líquida", margem_liquida_display,
               status_emoji=_status_or_none(status_margem_liquida),
               extra_tip=FAIXAS_HELP["margem_liquida"]),
-        _chip_duo("Margem de Contribuição", m["margem_contrib"], m["margem_contrib_pct"],
-                  help_key="Margem de Contribuição",
-                  status_emoji=_status_or_none(status_margem_contrib),
-                  extra_tip=FAIXAS_HELP["margem_contribuicao"]),
+        _chip("Margem de Contribuição", mc_value_display,
+              status_emoji=_status_or_none(status_margem_contrib),
+              extra_tip=FAIXAS_HELP["margem_contribuicao"]),
     ], "k-margens"))
 
     cards_html.append(_card("Eficiência e Gestão", [
