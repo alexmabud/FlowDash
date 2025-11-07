@@ -529,7 +529,14 @@ def get_estoque_atual_estimado(db_path_pref: Optional[str] = None) -> float:
     if isinstance(data_corte_iso, date):
         data_corte_iso = data_corte_iso.strftime("%Y-%m-%d")
     if not data_corte_iso:
-        data_corte_iso = date.today().strftime("%Y-%m-%d")
+        try:
+            date_col, _ = _detect_merc_cols(conn)
+            row = conn.execute(
+                f"SELECT MIN({_normalized_date_expr(date_col)}) FROM mercadorias"
+            ).fetchone()
+            data_corte_iso = (row[0] or "1900-01-01")
+        except Exception:
+            data_corte_iso = "1900-01-01"
 
     markup_medio = _get_num(conn, "markup_medio", 2.40) or 1.0
 

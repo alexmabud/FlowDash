@@ -358,6 +358,23 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
         imobilizado = _safe(prefs.get("pl_imobilizado_valor_total"))
         taxa_dep = _safe(prefs.get("dep_taxa_mensal_percent_live"))
 
+        try:
+            with _conn(db_path) as cfb:
+                if not imobilizado or imobilizado <= 0:
+                    r = cfb.execute(
+                        "SELECT valor_num FROM dre_variaveis WHERE chave='pl_imobilizado_valor_total' LIMIT 1"
+                    ).fetchone()
+                    if r and r[0] is not None and float(r[0]) > 0:
+                        imobilizado = float(r[0])
+                if not taxa_dep or taxa_dep <= 0:
+                    r = cfb.execute(
+                        "SELECT valor_num FROM dre_variaveis WHERE chave='dep_taxa_mensal_percent_live' LIMIT 1"
+                    ).fetchone()
+                    if r and r[0] is not None and float(r[0]) > 0:
+                        taxa_dep = float(r[0])
+        except Exception:
+            pass
+
         ativos_totais = float(bancos_total or 0.0) + float(estoque_atual or 0.0) + float(imobilizado or 0.0)
         pl_calc = ativos_totais - float(passivos_totais or 0.0)
         pl_calc_nn = pl_calc if pl_calc > 0 else 0.0
@@ -862,6 +879,10 @@ def render_dre(caminho_banco: Optional[str]):
     vars_dre = _vars_dynamic_overrides(caminho_banco, vars_dre)
     # persiste no DB para manter consistência entre páginas
     _persist_overrides_to_db(caminho_banco, vars_dre)
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
     if vars_dre.markup <= 0:
         st.warning("⚠️ Markup médio não configurado (ou 0). CMV estimado será 0.")
     if all(v == 0 for v in (vars_dre.simples, vars_dre.fundo, vars_dre.sacolas)) and vars_dre.markup == 0:
