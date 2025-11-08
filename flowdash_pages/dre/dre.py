@@ -940,38 +940,71 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 def _query_divida_estoque(db_path: str) -> float:
     """
     Retorna o MESMO valor exibido no bloco 'Empréstimos' da página Contas a Pagar
-    (saldo devedor total). Primeiro tenta reutilizar a função fonte-única do repositório;
-    se não existir ou falhar, usa o SQL de fallback que já era usado.
+    (saldo devedor total). Prioriza a função do repositório (fonte única).
+    Se possível, calcula um fallback apenas para COMPARAR e LOGAR divergência,
+    mas retorna SEMPRE o valor do repositório.
     """
-    # 1) Reuso da fonte única (se existir)
+    # 1) Usa a fonte única: mesma função do bloco Contas a Pagar -> Empréstimos
     try:
         from repository.contas_a_pagar_mov_repository.queries import (
             total_saldo_devedor_emprestimos as _saldo_func
         )
         with _conn(db_path) as c:
-            val = _saldo_func(c)  # deve ser idêntico ao bloco "Empréstimos"
-            return _safe(val)
-    except Exception as err:
-        logger.debug("DRE: fallback para dívida (estoque) — %s", err)
+            repo_val = _safe(_saldo_func(c))
 
-    # 2) Fallback: manter a lógica/SQL atual de saldo devedor total
-    sql = """
-    SELECT SUM(
-        CASE
-          WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
-          THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
-          ELSE 0
-        END
-    )
-    FROM contas_a_pagar_mov
-    WHERE tipo_obrigacao = 'EMPRESTIMO';
-    """
-    try:
-        with _conn(db_path) as c:
-            row = c.execute(sql).fetchone()
-            return _safe(row[0])
-    except Exception:
-        return 0.0
+        # 2) (Opcional) calcula fallback só para comparação e log
+        try:
+            sql_fallback = """
+            SELECT SUM(
+                CASE
+                  WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
+                  THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
+                  ELSE 0
+                END
+            )
+            FROM contas_a_pagar_mov
+            WHERE tipo_obrigacao = 'EMPRESTIMO';
+            """
+            with _conn(db_path) as c:
+                row = c.execute(sql_fallback).fetchone()
+                fb_val = _safe(row[0])
+
+            if fb_val is not None and abs((repo_val or 0.0) - (fb_val or 0.0)) > 0.01:
+                logger.warning(
+                    "DRE(Dívida Estoque): divergência detectada (repo=%s, fallback=%s, Δ=%s). "
+                    "Retornando SEMPRE o valor do repositório.",
+                    f"{(repo_val or 0.0):.2f}",
+                    f"{(fb_val or 0.0):.2f}",
+                    f"{((repo_val or 0.0) - (fb_val or 0.0)):.2f}",
+                )
+        except Exception:
+            pass
+
+        return repo_val
+
+    except Exception as err:
+        logger.error(
+            "DRE(Dívida Estoque): falha ao usar a fonte única do repositório (%s). "
+            "Usando fallback provisório — ATENÇÃO: pode divergir do Contas a Pagar.",
+            err,
+        )
+        sql = """
+        SELECT SUM(
+            CASE
+              WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
+              THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
+              ELSE 0
+            END
+        )
+        FROM contas_a_pagar_mov
+        WHERE tipo_obrigacao = 'EMPRESTIMO';
+        """
+        try:
+            with _conn(db_path) as c:
+                row = c.execute(sql).fetchone()
+                return _safe(row[0])
+        except Exception:
+            return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
