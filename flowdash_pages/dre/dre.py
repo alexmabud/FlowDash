@@ -1051,9 +1051,10 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     # KPIs
     rl = receita_liq
     mc_ratio = _nz_div(margem_contrib, rl)
+    margem_contrib_pct_val = mc_ratio * 100.0
     margem_ebitda_pct = _nz_div(ebitda_base, rl)
 
-    break_even_rs = (total_oper_fixo_extra / mc_ratio) if mc_ratio > 0 else 0.0
+    break_even_rs = (fixas_rs / (margem_contrib_pct_val / 100.0)) if margem_contrib_pct_val else 0.0
     break_even_pct = _nz_div(break_even_rs, rl)
 
     break_even_financeiro_rs = (total_cf_emprestimos / mc_ratio) if mc_ratio > 0 else 0.0
