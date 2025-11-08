@@ -1340,6 +1340,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     receita_liq = m.get("receita_liq")
     receita_liq_val = _safe(receita_liq)
     total_variaveis = calc_variaveis_total(competencia_mes, cmv_rs, receita_liq_val)
+    total_variaveis_val = _safe(total_variaveis)
+    margem_contrib_r = receita_liq_val - total_variaveis_val
+    margem_contrib_pct = (margem_contrib_r / receita_liq_val * 100.0) if receita_liq_val else 0.0
     custos_fixos_kpi = calc_custos_fixos(competencia_mes)
     despesas_operacionais_kpi = calc_despesas_operacionais(competencia_mes)
     total_saida_operacional = custos_fixos_kpi + despesas_operacionais_kpi
@@ -1408,7 +1411,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     perc_receita_liq = _ratio(receita_liq, receita_bruta)
     perc_cmv = _ratio(cmv_rs, receita_liq)
-    perc_total_var = _ratio(total_variaveis, receita_liq)
+    perc_total_var = _ratio(total_variaveis_val, receita_liq)
     perc_lucro_bruto = _ratio(lucro_bruto, receita_liq)
     perc_total_saida_oper = _ratio(total_saida_operacional, receita_liq)
     if perc_total_saida_oper is not None:
@@ -1430,7 +1433,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{cmv_display} | {formatar_percentual(perc_cmv, casas=1)} da Receita Líquida"
         )
 
-    total_var_display = formatar_moeda(total_variaveis)
+    total_var_display = formatar_moeda(total_variaveis_val)
     if perc_total_var is not None:
         total_var_display = (
             f"{total_var_display} | {formatar_percentual(perc_total_var, casas=1)} da Receita Líquida"
@@ -1461,7 +1464,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     margem_ebitda_pct_val = m.get("margem_ebitda_pct")
     margem_operacional_pct_val = m.get("margem_operacional_pct")
     margem_liquida_pct_val = m.get("margem_liquida_pct")
-    margem_contrib_pct_val = m.get("margem_contrib_pct")
+    margem_contrib_pct_val = margem_contrib_pct
 
     status_margem_bruta = _chip_status("margem_bruta", margem_bruta_pct_val)
     status_margem_ebitda = _chip_status("margem_ebitda_pct", margem_ebitda_pct_val)
@@ -1506,8 +1509,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     margem_operacional_display = _linha_pct(margem_operacional_pct_val, "Receita Líquida")
     margem_liquida_display = _linha_pct(margem_liquida_pct_val, "Receita Líquida")
 
-    mc_value_display = _fmt_brl(m["margem_contrib"])
-    mc_suffix = _rl_suffix_only(m["margem_contrib_pct"])
+    mc_value_display = _fmt_brl(margem_contrib_r)
+    mc_suffix = _rl_suffix_only(margem_contrib_pct_val)
     if mc_suffix:
         mc_value_display = f"{mc_value_display} | {mc_suffix}"
 
