@@ -1383,7 +1383,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     break_even_rs_val = pe_contabil_val
     break_even_financeiro_rs_val = pe_financeiro_val
     break_even_pct_val = _derive_pct(break_even_rs_val, receita_liq_val)
-    break_even_financeiro_pct_val = _derive_pct(break_even_financeiro_rs_val, receita_liq_val)
+    break_even_financeiro_pct_val = (
+        _nz_div(break_even_financeiro_rs_val, receita_liq_val) * 100.0 if receita_liq_val else 0.0
+    )
     m["break_even_rs"] = break_even_rs_val
     m["break_even_pct"] = break_even_pct_val
     m["break_even_financeiro_rs"] = break_even_financeiro_rs_val
