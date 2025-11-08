@@ -938,6 +938,23 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_divida_estoque(db_path: str) -> float:
+    """
+    Retorna o MESMO valor exibido no bloco 'Empréstimos' da página Contas a Pagar
+    (saldo devedor total). Primeiro tenta reutilizar a função fonte-única do repositório;
+    se não existir ou falhar, usa o SQL de fallback que já era usado.
+    """
+    # 1) Reuso da fonte única (se existir)
+    try:
+        from repository.contas_a_pagar_mov_repository.queries import (
+            total_saldo_devedor_emprestimos as _saldo_func
+        )
+        with _conn(db_path) as c:
+            val = _saldo_func(c)  # deve ser idêntico ao bloco "Empréstimos"
+            return _safe(val)
+    except Exception as err:
+        logger.debug("DRE: fallback para dívida (estoque) — %s", err)
+
+    # 2) Fallback: manter a lógica/SQL atual de saldo devedor total
     sql = """
     SELECT SUM(
         CASE
