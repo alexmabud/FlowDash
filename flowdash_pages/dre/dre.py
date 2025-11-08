@@ -9,6 +9,7 @@ from typing import Dict, Tuple, List, Iterable, Optional
 import logging
 import os
 import math
+import unicodedata
 
 import pandas as pd
 import streamlit as st
@@ -57,7 +58,7 @@ TOOLTIP_STRIP_HEADER_KEYS = {
     "EBIT",
 }
 
-SUBCATS_FIXOS = (
+SUBCATS_FIXOS = [
     "Chat GPT",
     "Microsoft 365",
     "Presence",
@@ -71,19 +72,26 @@ SUBCATS_FIXOS = (
     "Água",
     "Crédito Celular",
     "Taxas Bancárias",
-)
+]
 
-SUBCATS_VARIAVEIS = (
+SUBCATS_VARIAVEIS = [
     "Comissão Funcionário",
     "Comissão Gerente",
-    "Fundo de Promoção",
-)
+]
 
-SUBCATS_DESP_OPER = (
+SUBCATS_DESP_OPER = [
     "Manutenção/Limpeza",
     "Marketing",
     "Outros",
-)
+]
+
+
+def _normalize_subcat(value: Optional[str]) -> str:
+    if value is None:
+        return ""
+    text = unicodedata.normalize("NFKD", str(value))
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))
+    return text.strip().casefold()
 
 # --- helpers de status (Eficiência & Gestão) ---
 def eg_status_dot(metric: str, pct_value) -> str:
@@ -234,41 +242,107 @@ def _sum_saida_by_filters(ini: str, fim: str, categoria: str,
                           subcats: Iterable[str]) -> Tuple[float, int, str, List]:
     db_path = _current_db_path()
     cat_upper = categoria.strip().upper()
-    subcats_upper = tuple(sc.strip().upper() for sc in subcats if sc)
-    if not subcats_upper:
+    normalized_targets = {_normalize_subcat(sc) for sc in subcats if sc}
+    normalized_targets.discard("")
+    if not normalized_targets:
         return 0.0, 0, "", []
 
-    placeholders = ",".join(["?"] * len(subcats_upper))
-    col_candidates = ("Sub_Categoria", "Sub_Categorias_saida")
+    col_sets = [
+        ("Sub_Categoria", "Sub_Categorias_saida"),
+        ("Sub_Categoria",),
+        ("Sub_Categorias_saida",),
+    ]
+    params: List = [ini, fim, cat_upper]
     last_sql = ""
-    last_params: List = []
+    last_params: List = params
 
-    for col in col_candidates:
-        sub_expr = f"TRIM(UPPER(COALESCE({col},'')))"
+    for cols in col_sets:
+        unique_cols: List[str] = []
+        for col in cols:
+            if col not in unique_cols:
+                unique_cols.append(col)
+        if not unique_cols:
+            continue
+        columns_expr = ", ".join(unique_cols)
         sql = f"""
-        SELECT SUM(COALESCE(Valor,0)) AS total_sum,
-               COUNT(*) AS n_rows
+        SELECT COALESCE(Valor,0) AS valor_saida, {columns_expr}
           FROM saida
          WHERE date(Data) BETWEEN ? AND ?
            AND TRIM(UPPER(COALESCE(Categoria,''))) = ?
-           AND {sub_expr} IN ({placeholders})
            AND COALESCE(Valor,0) > 0;
         """
-        params: List = [ini, fim, cat_upper, *subcats_upper]
         try:
             with _conn(db_path) as c:
-                row = c.execute(sql, params).fetchone()
+                rows = c.execute(sql, params).fetchall()
         except sqlite3.OperationalError:
             last_sql = sql
             last_params = params
             continue
-        total = _safe(row[0])
-        n_rows = int(row[1] or 0)
+
+        total = 0.0
+        n_rows = 0
+        for row in rows:
+            valor = _safe(row[0])
+            sub_values = [row[idx] for idx in range(1, len(unique_cols) + 1)]
+            if any(_normalize_subcat(sub_val) in normalized_targets for sub_val in sub_values):
+                total += valor
+                n_rows += 1
+
         sql_clean = " ".join(sql.split())
-        if total > 0 or n_rows > 0 or col == col_candidates[-1]:
+        if total > 0 or n_rows > 0 or cols == col_sets[-1]:
             return total, n_rows, sql_clean, params
 
     return 0.0, 0, " ".join(last_sql.split()) if last_sql else "", last_params
+
+
+def _fetch_dre_variavel_percent(chave: str) -> Optional[float]:
+    db_path = _current_db_path()
+    sql = "SELECT valor_num FROM dre_variaveis WHERE chave=? LIMIT 1"
+    try:
+        with _conn(db_path) as c:
+            row = c.execute(sql, (chave,)).fetchone()
+            return float(row[0]) if row and row[0] is not None else None
+    except Exception as err:
+        logger.debug("Erro ao buscar dre_variaveis[%s]: %s", chave, err)
+        return None
+
+
+def _clamp_percent(value: Optional[float]) -> float:
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(v):
+        return 0.0
+    if v < 0:
+        return 0.0
+    if v > 100:
+        return 100.0
+    return v
+
+
+def calc_sacolas_valor(yyyy_mm: str, receita_liquida: float) -> float:
+    rl = max(_safe(receita_liquida), 0.0)
+    percent_raw = _fetch_dre_variavel_percent("sacolas_percent")
+    percent = _clamp_percent(percent_raw)
+    valor = rl * (percent / 100.0)
+    logger.debug(
+        "calc_sacolas_valor(%s) | receita_liq=%.2f | sacolas_percent_raw=%s | sacolas_percent=%.4f | sacolas_valor=%.2f",
+        yyyy_mm, rl, percent_raw, percent, valor,
+    )
+    return valor
+
+
+def calc_fundo_promocao_valor(yyyy_mm: str, receita_liquida: float) -> float:
+    rl = max(_safe(receita_liquida), 0.0)
+    percent_raw = _fetch_dre_variavel_percent("fundo_promocao_percent")
+    percent = _clamp_percent(percent_raw)
+    valor = rl * (percent / 100.0)
+    logger.debug(
+        "calc_fundo_promocao_valor(%s) | receita_liq=%.2f | fundo_promocao_percent_raw=%s | fundo_promocao_percent=%.4f | fundo_promocao_valor=%.2f",
+        yyyy_mm, rl, percent_raw, percent, valor,
+    )
+    return valor
 
 
 def calc_custos_fixos(yyyy_mm: str) -> float:
@@ -285,18 +359,30 @@ def calc_custos_fixos(yyyy_mm: str) -> float:
     return total
 
 
-def calc_variaveis_total(yyyy_mm: str, cmv_valor: float) -> float:
+def calc_variaveis_total(yyyy_mm: str, cmv_valor: float, receita_liquida: float) -> float:
     try:
         ini, fim, comp_norm = _competencia_periodo(yyyy_mm)
     except ValueError as err:
         logger.debug("calc_variaveis_total(%s) inválido: %s", yyyy_mm, err)
-        return _safe(cmv_valor)
+        cmv = _safe(cmv_valor)
+        sacolas = calc_sacolas_valor(yyyy_mm, receita_liquida)
+        fundo = calc_fundo_promocao_valor(yyyy_mm, receita_liquida)
+        total = cmv + sacolas + fundo
+        logger.debug(
+            "calc_variaveis_total(%s) fallback | cmv=%.2f | sacolas=%.2f | fundo=%.2f | total=%.2f",
+            yyyy_mm, cmv, sacolas, fundo, total,
+        )
+        return total
+
     variaveis_saida, n_rows, sql, params = _sum_saida_by_filters(ini, fim, "Custos Fixos", SUBCATS_VARIAVEIS)
     cmv = _safe(cmv_valor)
-    total = variaveis_saida + cmv
+    receita_liq_val = _safe(receita_liquida)
+    sacolas_valor = calc_sacolas_valor(yyyy_mm, receita_liq_val)
+    fundo_valor = calc_fundo_promocao_valor(yyyy_mm, receita_liq_val)
+    total = variaveis_saida + cmv + sacolas_valor + fundo_valor
     logger.debug(
-        "calc_variaveis_total(%s) | sql=%s | params=%s | linhas=%d | variaveis_saida=%.2f | cmv=%.2f | total=%.2f",
-        comp_norm, sql, params, n_rows, variaveis_saida, cmv, total,
+        "calc_variaveis_total(%s) | sql=%s | params=%s | linhas=%d | variaveis_saida=%.2f | cmv=%.2f | sacolas=%.2f | fundo=%.2f | total=%.2f",
+        comp_norm, sql, params, n_rows, variaveis_saida, cmv, sacolas_valor, fundo_valor, total,
     )
     return total
 
@@ -1232,7 +1318,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     competencia_mes = f"{ano:04d}-{mes:02d}"
     cmv_rs = _safe(m.get("cmv"))
-    total_variaveis = calc_variaveis_total(competencia_mes, cmv_rs)
+    receita_liq = m.get("receita_liq")
+    receita_liq_val = _safe(receita_liq)
+    total_variaveis = calc_variaveis_total(competencia_mes, cmv_rs, receita_liq_val)
     custos_fixos_kpi = calc_custos_fixos(competencia_mes)
     despesas_operacionais_kpi = calc_despesas_operacionais(competencia_mes)
     total_saida_operacional = custos_fixos_kpi + despesas_operacionais_kpi
@@ -1245,11 +1333,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html: List[str] = []
 
     receita_bruta = m.get("fat")
-    receita_liq = m.get("receita_liq")
     lucro_bruto = m.get("lucro_bruto")
 
     receita_bruta_val = _safe(receita_bruta)
-    receita_liq_val = _safe(receita_liq)
     total_saida_operacional_val = _safe(total_saida_operacional)
     break_even_rs_val = _safe(m.get("break_even_rs"))
     break_even_financeiro_rs_val = _safe(m.get("break_even_financeiro_rs"))
