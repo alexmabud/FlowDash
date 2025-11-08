@@ -297,14 +297,21 @@ def _sum_saida_by_filters(ini: str, fim: str, categoria: str,
 
 def _fetch_dre_variavel_percent(chave: str) -> Optional[float]:
     db_path = _current_db_path()
-    sql = "SELECT valor_num FROM dre_variaveis WHERE chave=? LIMIT 1"
     try:
+        logger.debug("DRE: usando DB em %s", db_path)
         with _conn(db_path) as c:
-            row = c.execute(sql, (chave,)).fetchone()
-            return float(row[0]) if row and row[0] is not None else None
+            row = c.execute(
+                "SELECT valor_num FROM dre_variaveis WHERE lower(chave)=lower(?) LIMIT 1",
+                (chave,),
+            ).fetchone()
+            if row and row[0] is not None:
+                val = float(row[0])
+                logger.debug("dre_variaveis[%s] = %.4f", chave, val)
+                return val
     except Exception as err:
         logger.debug("Erro ao buscar dre_variaveis[%s]: %s", chave, err)
-        return None
+    logger.debug("dre_variaveis[%s] não encontrada (None)", chave)
+    return None
 
 
 def _clamp_percent(value: Optional[float]) -> float:
@@ -330,6 +337,12 @@ def calc_sacolas_valor(yyyy_mm: str, receita_liquida: float) -> float:
         "calc_sacolas_valor(%s) | receita_liq=%.2f | sacolas_percent_raw=%s | sacolas_percent=%.4f | sacolas_valor=%.2f",
         yyyy_mm, rl, percent_raw, percent, valor,
     )
+    logger.debug(
+        "sacolas_percent=%.4f  receita_liquida=%.2f  sacolas_valor=%.2f",
+        percent,
+        rl,
+        valor,
+    )
     return valor
 
 
@@ -341,6 +354,12 @@ def calc_fundo_promocao_valor(yyyy_mm: str, receita_liquida: float) -> float:
     logger.debug(
         "calc_fundo_promocao_valor(%s) | receita_liq=%.2f | fundo_promocao_percent_raw=%s | fundo_promocao_percent=%.4f | fundo_promocao_valor=%.2f",
         yyyy_mm, rl, percent_raw, percent, valor,
+    )
+    logger.debug(
+        "fundo_promocao_percent=%.4f  receita_liquida=%.2f  fundo_valor=%.2f",
+        percent,
+        rl,
+        valor,
     )
     return valor
 
