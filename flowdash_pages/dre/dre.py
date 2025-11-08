@@ -6,6 +6,7 @@ import sqlite3
 from calendar import monthrange
 from dataclasses import dataclass
 from typing import Dict, Tuple, List, Iterable, Optional
+import logging
 import os
 import math
 
@@ -14,6 +15,8 @@ import streamlit as st
 from datetime import date
 from utils import formatar_moeda, formatar_percentual
 import importlib
+
+logger = logging.getLogger(__name__)
 
 _avaliar_indicador_externo = None
 try:
@@ -53,6 +56,34 @@ TOOLTIP_STRIP_HEADER_KEYS = {
     "EBITDA",
     "EBIT",
 }
+
+SUBCATS_FIXOS = (
+    "Chat GPT",
+    "Microsoft 365",
+    "Presence",
+    "Contabilidade",
+    "Pro-Labore",
+    "DARF Pro-Labore",
+    "Salário Funcionário",
+    "FGTS Funcionário",
+    "Vale Transporte Funcionário",
+    "Luz",
+    "Água",
+    "Crédito Celular",
+    "Taxas Bancárias",
+)
+
+SUBCATS_VARIAVEIS = (
+    "Comissão Funcionário",
+    "Comissão Gerente",
+    "Fundo de Promoção",
+)
+
+SUBCATS_DESP_OPER = (
+    "Manutenção/Limpeza",
+    "Marketing",
+    "Outros",
+)
 
 # --- helpers de status (Eficiência & Gestão) ---
 def eg_status_dot(metric: str, pct_value) -> str:
@@ -171,6 +202,117 @@ def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
 
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
     return (ano, mes - 1) if mes > 1 else (ano - 1, 12)
+
+
+def _current_db_path() -> str:
+    try:
+        candidate = st.session_state.get("db_path")
+        if isinstance(candidate, str) and os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    except Exception:
+        pass
+    return _ensure_db_path_or_raise()
+
+
+def _competencia_periodo(yyyy_mm: str) -> Tuple[str, str, str]:
+    if not isinstance(yyyy_mm, str):
+        raise ValueError("competência deve ser string 'YYYY-MM'")
+    comp = yyyy_mm.strip()
+    if not comp:
+        raise ValueError("competência vazia")
+    parts = comp.split("-", 1)
+    if len(parts) != 2:
+        raise ValueError(f"formato inválido para competência: {yyyy_mm}")
+    ano = int(parts[0])
+    mes = int(parts[1])
+    if not 1 <= mes <= 12:
+        raise ValueError(f"mês inválido na competência: {yyyy_mm}")
+    return _periodo_ym(ano, mes)
+
+
+def _sum_saida_by_filters(ini: str, fim: str, categoria: str,
+                          subcats: Iterable[str]) -> Tuple[float, int, str, List]:
+    db_path = _current_db_path()
+    cat_upper = categoria.strip().upper()
+    subcats_upper = tuple(sc.strip().upper() for sc in subcats if sc)
+    if not subcats_upper:
+        return 0.0, 0, "", []
+
+    placeholders = ",".join(["?"] * len(subcats_upper))
+    col_candidates = ("Sub_Categoria", "Sub_Categorias_saida")
+    last_sql = ""
+    last_params: List = []
+
+    for col in col_candidates:
+        sub_expr = f"TRIM(UPPER(COALESCE({col},'')))"
+        sql = f"""
+        SELECT SUM(COALESCE(Valor,0)) AS total_sum,
+               COUNT(*) AS n_rows
+          FROM saida
+         WHERE date(Data) BETWEEN ? AND ?
+           AND TRIM(UPPER(COALESCE(Categoria,''))) = ?
+           AND {sub_expr} IN ({placeholders})
+           AND COALESCE(Valor,0) > 0;
+        """
+        params: List = [ini, fim, cat_upper, *subcats_upper]
+        try:
+            with _conn(db_path) as c:
+                row = c.execute(sql, params).fetchone()
+        except sqlite3.OperationalError:
+            last_sql = sql
+            last_params = params
+            continue
+        total = _safe(row[0])
+        n_rows = int(row[1] or 0)
+        sql_clean = " ".join(sql.split())
+        if total > 0 or n_rows > 0 or col == col_candidates[-1]:
+            return total, n_rows, sql_clean, params
+
+    return 0.0, 0, " ".join(last_sql.split()) if last_sql else "", last_params
+
+
+def calc_custos_fixos(yyyy_mm: str) -> float:
+    try:
+        ini, fim, comp_norm = _competencia_periodo(yyyy_mm)
+    except ValueError as err:
+        logger.debug("calc_custos_fixos(%s) inválido: %s", yyyy_mm, err)
+        return 0.0
+    total, n_rows, sql, params = _sum_saida_by_filters(ini, fim, "Custos Fixos", SUBCATS_FIXOS)
+    logger.debug(
+        "calc_custos_fixos(%s) | sql=%s | params=%s | linhas=%d | total=%.2f",
+        comp_norm, sql, params, n_rows, total,
+    )
+    return total
+
+
+def calc_variaveis_total(yyyy_mm: str, cmv_valor: float) -> float:
+    try:
+        ini, fim, comp_norm = _competencia_periodo(yyyy_mm)
+    except ValueError as err:
+        logger.debug("calc_variaveis_total(%s) inválido: %s", yyyy_mm, err)
+        return _safe(cmv_valor)
+    variaveis_saida, n_rows, sql, params = _sum_saida_by_filters(ini, fim, "Custos Fixos", SUBCATS_VARIAVEIS)
+    cmv = _safe(cmv_valor)
+    total = variaveis_saida + cmv
+    logger.debug(
+        "calc_variaveis_total(%s) | sql=%s | params=%s | linhas=%d | variaveis_saida=%.2f | cmv=%.2f | total=%.2f",
+        comp_norm, sql, params, n_rows, variaveis_saida, cmv, total,
+    )
+    return total
+
+
+def calc_despesas_operacionais(yyyy_mm: str) -> float:
+    try:
+        ini, fim, comp_norm = _competencia_periodo(yyyy_mm)
+    except ValueError as err:
+        logger.debug("calc_despesas_operacionais(%s) inválido: %s", yyyy_mm, err)
+        return 0.0
+    total, n_rows, sql, params = _sum_saida_by_filters(ini, fim, "Despesas", SUBCATS_DESP_OPER)
+    logger.debug(
+        "calc_despesas_operacionais(%s) | sql=%s | params=%s | linhas=%d | total=%.2f",
+        comp_norm, sql, params, n_rows, total,
+    )
+    return total
 
 @dataclass
 class _KPIStatusResult:
@@ -987,10 +1129,10 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas. | Serve para: medir o volume total de vendas antes de qualquer dedução (base para metas e sazonalidade).",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
-        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (já inclui frete de compra), sacolas %, fundo de promoção % (+ comissão variável %, se existir). Não incluir Simples/taxas da maquininha se a Receita Líquida já estiver líquida dessas deduções.",
-        "Total de Saída Operacional (R$)": "OPEX: despesas operacionais do mês (fixas + de operação), sem juros/IOF, CAPEX e depreciação. Base para EBITDA, eficiência e margens.",
+        "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (com frete de compra), sacolas (%), fundo de promoção (%), comissões variáveis (%). Não inclui Simples nem taxa de maquininha porque a Receita Líquida já é líquida dessas deduções.\n\nServe para: mostrar o custo que varia diretamente com as vendas e compõe a base da Margem de Contribuição.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 50% · 🟡 Entre 50% e 60% · 🔴 Maior que 60%.",
+        "Total de Saída Operacional (R$)": "Despesas de operação do mês: custos fixos + despesas administrativas/comerciais (manutenção, marketing, etc.), sem juros, CAPEX ou depreciação.\n\nServe para: medir o custo para manter a loja funcionando; base do EBITDA e da eficiência operacional.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 25% · 🟡 Entre 25% e 30% · 🔴 Maior que 30%.",
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
-        "Custos Fixos": "Somatório das despesas fixas do mês (aluguel, folha, encargos, utilidades etc.). | Serve para: acompanhar o nível absoluto de custos fixos. Para cores, use as faixas do indicador Custo Fixo / Receita (%).\nPercentual da Receita Líquida comprometido com os custos fixos do mês. | Serve para: avaliar o peso da estrutura fixa sobre as vendas.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%",
+        "Custos Fixos": "Somatório das despesas fixas do mês: aluguel/infra, folha/encargos, utilidades e assinaturas recorrentes.\n\nServe para: avaliar quanto da Receita Líquida é comprometido pela estrutura fixa e calcular o ponto de equilíbrio.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%.",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Bruta (%)": "Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
         "Margem Operacional": "Lucro operacional após depreciação e amortização. | Serve para: medir a rentabilidade das operações principais, mostrando quanto sobra de cada real vendido após todos os custos e despesas operacionais, antes de juros e impostos.",
@@ -1088,23 +1230,23 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     except Exception:
         crec = 0.0
 
-    fixas_rs = m.get("fixas")
-    if fixas_rs is None:
-        try:
-            ini, fim, _ = _periodo_ym(ano, mes)
-            fixas_rs = _query_saidas_total(db_path, ini, fim, "Custos Fixos")
-        except Exception:
-            fixas_rs = 0.0
-    fixas_rs = _safe(fixas_rs)
+    competencia_mes = f"{ano:04d}-{mes:02d}"
+    cmv_rs = _safe(m.get("cmv"))
+    total_variaveis = calc_variaveis_total(competencia_mes, cmv_rs)
+    custos_fixos_kpi = calc_custos_fixos(competencia_mes)
+    despesas_operacionais_kpi = calc_despesas_operacionais(competencia_mes)
+    total_saida_operacional = custos_fixos_kpi + despesas_operacionais_kpi
+    logger.debug(
+        "total_saida_operacional(%s) | custos_fixos=%.2f | despesas_operacionais=%.2f | total=%.2f",
+        competencia_mes, custos_fixos_kpi, despesas_operacionais_kpi, total_saida_operacional,
+    )
+    fixas_rs = _safe(custos_fixos_kpi)
 
     cards_html: List[str] = []
 
     receita_bruta = m.get("fat")
     receita_liq = m.get("receita_liq")
-    cmv_rs = m.get("cmv")
-    total_variaveis = m.get("total_var")
     lucro_bruto = m.get("lucro_bruto")
-    total_saida_operacional = m.get("total_oper_fixo_extra")  # usar somente OPEX nos chips
 
     receita_bruta_val = _safe(receita_bruta)
     receita_liq_val = _safe(receita_liq)
@@ -1112,9 +1254,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     break_even_rs_val = _safe(m.get("break_even_rs"))
     break_even_financeiro_rs_val = _safe(m.get("break_even_financeiro_rs"))
 
-    custo_fixo_rl_pct_val = m.get("custo_fixo_sobre_receita_pct")
-    if custo_fixo_rl_pct_val is None:
-        custo_fixo_rl_pct_val = _derive_pct(fixas_rs, receita_liq_val)
+    custo_fixo_rl_pct_val = _derive_pct(fixas_rs, receita_liq_val)
 
     break_even_pct_val = m.get("break_even_pct")
     if break_even_pct_val is None:
@@ -1249,11 +1389,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("CMV", cmv_display, status_emoji=_status_or_none(status_cmv),
               extra_tip=FAIXAS_HELP["cmv"]),                 # <- chip CMV adicionado
         _chip("Total de Variáveis (R$)", total_var_display,
-              status_emoji=_status_or_none(status_total_var),
-              extra_tip=FAIXAS_HELP["total_var"]),
+              status_emoji=_status_or_none(status_total_var)),
         _chip("Total de Saída Operacional (R$)", total_saida_oper_display,
-              status_emoji=_status_or_none(status_total_saida_oper),
-              extra_tip=FAIXAS_HELP["total_saida_oper"]),
+              status_emoji=_status_or_none(status_total_saida_oper)),
         _chip("Lucro Bruto", lucro_bruto_display,
               status_emoji=_status_or_none(status_lucro_bruto),
               extra_tip=FAIXAS_HELP["lucro_bruto"]),
