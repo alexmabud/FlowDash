@@ -1360,14 +1360,24 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     receita_bruta_val = _safe(receita_bruta)
     total_saida_operacional_val = _safe(total_saida_operacional)
-    break_even_rs_val = _safe(m.get("break_even_rs"))
     break_even_financeiro_rs_val = _safe(m.get("break_even_financeiro_rs"))
 
     custo_fixo_rl_pct_val = _derive_pct(fixas_rs, receita_liq_val)
 
-    break_even_pct_val = m.get("break_even_pct")
-    if break_even_pct_val is None:
-        break_even_pct_val = _derive_pct(break_even_rs_val, receita_liq_val)
+    # >>> BLOCO NOVO / SUBSTITUI O CÁLCULO ATUAL DO PE CONTÁBIL <<<
+    custos_fixos_val = fixas_rs
+    custos_fixos_base = float(custos_fixos_val) if "custos_fixos_val" in locals() else 0.0
+    mc_pct_base = float(margem_contrib_pct) if "margem_contrib_pct" in locals() else 0.0
+    pe_contabil_val = (custos_fixos_base / (mc_pct_base / 100.0)) if mc_pct_base else 0.0
+    if pe_contabil_val < 0:
+        pe_contabil_val = 0.0
+    pe_contabil_val = round(pe_contabil_val, 2)
+    # <<< FIM BLOCO NOVO >>>
+
+    break_even_rs_val = pe_contabil_val
+    break_even_pct_val = _derive_pct(break_even_rs_val, receita_liq_val)
+    m["break_even_rs"] = break_even_rs_val
+    m["break_even_pct"] = break_even_pct_val
 
     break_even_financeiro_pct_val = m.get("break_even_financeiro_pct")
     if break_even_financeiro_pct_val is None:
