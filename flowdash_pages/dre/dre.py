@@ -198,12 +198,11 @@ def _fmt_pct_ratio_from_percent_value(percent_val: float, casas: int = 1) -> str
         return f"{percent_val:.{casas}f}%"
 
 def _normalize_percent_input(val: float) -> float:
-    """
-    Recebe um valor que pode estar em 'percentual' (ex.: 146.0) ou em 'razão' (ex.: 1.46).
-    Retorna SEMPRE em percentual (ex.: 146.0).
-    Heurística: se 0 <= val <= 2.0, assume razão e converte para %; caso contrário, assume que já é %.
-    """
-    v = _safe(val)
+    """Retorna sempre em percentual; valores em razão (<=2.0) viram % via *100."""
+    try:
+        v = float(val)
+    except (TypeError, ValueError):
+        return 0.0
     if v < 0:
         return 0.0
     return (v * 100.0) if v <= 2.0 else v
@@ -1317,7 +1316,11 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     def _linha_reais_pct(valor_reais: Optional[float], pct: Optional[float], base_txt: str) -> str:
         pct_percent = _normalize_percent_input(_safe(pct))
-        pct_fmt = _fmt_pct_ratio_from_percent_value(pct_percent, casas=1)
+        ratio = pct_percent / 100.0
+        try:
+            pct_fmt = formatar_percentual(ratio, casas=1)
+        except Exception:
+            pct_fmt = f"{pct_percent:.1f}%"
         return f"{formatar_moeda(_safe(valor_reais))} | {pct_fmt} da {base_txt}"
 
     def _linha_pct(pct: Optional[float], base_txt: str) -> str:
