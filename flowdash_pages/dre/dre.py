@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from calendar import monthrange
 from dataclasses import dataclass
-from typing import Dict, Tuple, List, Iterable, Optional
+from typing import Dict, Tuple, List, Iterable, Optional, Any
 import logging
 import os
 import math
@@ -123,6 +123,88 @@ def eg_status_dot(metric: str, pct_value) -> str:
     # métrica desconhecida → neutro
     return "⚪"
 
+# ==============================================================================
+# BLOCO CAP (cópia da lógica de Contas a Pagar, com prefixo _cap_ para evitar conflitos)
+# ==============================================================================
+def _cap_first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    for c in candidates:
+        if c in df.columns:
+            return c
+        matches = [col for col in df.columns if col.lower() == c.lower()]
+        if matches:
+            return matches[0]
+    return None
+
+@dataclass
+class CAP_DB:
+    path: str
+
+    def conn(self) -> sqlite3.Connection:
+        cx = sqlite3.connect(self.path)
+        cx.row_factory = sqlite3.Row
+        return cx
+
+    def q(self, sql: str, params: tuple = ()) -> pd.DataFrame:
+        try:
+            with self.conn() as cx:
+                return pd.read_sql_query(sql, cx, params=params)
+        except Exception as e:
+            logger.warning(f"[CAP_DB] Falha ao executar SQL.\nSQL: {sql}\nErro: {e}")
+            return pd.DataFrame()
+
+def _cap_table_exists(db: CAP_DB, name: str) -> bool:
+    sql = "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?)"
+    try:
+        with db.conn() as cx:
+            return cx.execute(sql, (name,)).fetchone() is not None
+    except Exception:
+        return False
+
+def _cap_load_loans_raw(db: CAP_DB) -> pd.DataFrame:
+    if not _cap_table_exists(db, "emprestimos_financiamentos"):
+        return pd.DataFrame()
+    return db.q("SELECT * FROM emprestimos_financiamentos")
+
+def _cap_build_loans_view(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    id_col    = _cap_first_existing(df, ["id","Id","ID"])
+    desc_col  = _cap_first_existing(df, ["descricao","Descrição","titulo","nome","credor"])
+    vparc_col = _cap_first_existing(df, ["valor_parcela","parcela_valor","Valor_Parcela","parcela"])
+    sdev_col  = _cap_first_existing(df, ["saldo_devedor","Saldo_Devedor"])
+    vtot_col  = _cap_first_existing(df, ["valor_total","principal","valor","Valor_Total"])
+    pagas_col = _cap_first_existing(df, ["parcelas_pagas","parcelas_pag","qtd_parcelas_pagas","Parcelas_Pagas"])
+
+    out = pd.DataFrame()
+    out["id"] = df[id_col].astype(str) if id_col else df.index.astype(str)
+    out["descricao"] = df[desc_col].astype(str) if desc_col else "(sem descrição)"
+    out["Valor da Parcela Mensal"] = pd.to_numeric(df.get(vparc_col, 0), errors="coerce").fillna(0.0)
+
+    if sdev_col:
+        out["Saldo Devedor do Empréstimo"] = pd.to_numeric(df[sdev_col], errors="coerce").fillna(0.0)
+    else:
+        try:
+            tot   = pd.to_numeric(df.get(vtot_col, 0), errors="coerce").fillna(0.0)
+            pagas = pd.to_numeric(df.get(pagas_col, 0), errors="coerce").fillna(0.0)
+            parc  = out["Valor da Parcela Mensal"]
+            out["Saldo Devedor do Empréstimo"] = (tot - (pagas * parc)).clip(lower=0)
+        except Exception:
+            out["Saldo Devedor do Empréstimo"] = 0.0
+
+    out = out[["id","descricao","Saldo Devedor do Empréstimo","Valor da Parcela Mensal"]].copy()
+    out = out.sort_values(by=["descricao","id"], kind="stable").reset_index(drop=True)
+    return out
+
+def _cap_loans_totals(df_view: pd.DataFrame) -> Dict[str, float]:
+    if df_view.empty:
+        return {"saldo_total": 0.0, "parcelas_total": 0.0}
+    return {
+        "saldo_total": float(pd.to_numeric(df_view["Saldo Devedor do Empréstimo"], errors="coerce").fillna(0).sum()),
+        "parcelas_total": float(pd.to_numeric(df_view["Valor da Parcela Mensal"], errors="coerce").fillna(0).sum()),
+    }
+# ==============================================================================
+# FIM BLOCO CAP
+# ==============================================================================
 # ============================== Helpers ==============================
 def _conn(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
@@ -939,75 +1021,24 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_divida_estoque(db_path: str) -> float:
     """
-    Busca o MESMO valor do 'Saldo devedor de todos empréstimos' do CAP.
-    1) Tenta o repositório (aceitando variações de assinatura).
-    2) Se falhar, fallback SEM abatimento do mês:
-       soma 'saldo_devedor' (quando existir) OU (valor_total - parcelas_pagas*valor_parcela).
+    Calcula o MESMO 'Saldo devedor de todos empréstimos' da página Contas a Pagar,
+    replicando a lógica de CAP localmente (sem depender do repositório).
     """
-    import logging
-    import pandas as pd
-
-    logger = logging.getLogger(__name__)
-
-    # ---- 1) Tentar repositório (várias assinaturas) ----
     try:
-        from repository.contas_a_pagar_mov_repository.queries import (
-            total_saldo_devedor_emprestimos as _saldo_func
-        )
-        # (a) tentar com conexão
-        try:
-            with _conn(db_path) as c:
-                val = _saldo_func(c)
-            if val is not None:
-                return _safe(val)
-        except TypeError:
-            pass
-        # (b) tentar com caminho do DB
-        try:
-            val = _saldo_func(db_path)
-            if val is not None:
-                return _safe(val)
-        except TypeError:
-            pass
-        # (c) tentar sem argumentos
-        try:
-            val = _saldo_func()
-            if val is not None:
-                return _safe(val)
-        except TypeError:
-            pass
-        logger.error("DRE dívida estoque: repositório importado, mas não houve assinatura compatível.")
-    except Exception as e:
-        logger.error("DRE dívida estoque: falha ao importar repositório: %s", e)
-
-    # ---- 2) Fallback FINAL (espelha CAP; NUNCA usa valor_pago_acumulado) ----
-    try:
-        with _conn(db_path) as c:
-            df = pd.read_sql_query("SELECT * FROM contas_a_pagar_mov", c)
-        if df.empty:
+        db = CAP_DB(db_path)
+        df_raw = _cap_load_loans_raw(db)
+        if df_raw.empty:
+            logger.debug("DRE(Dívida Estoque): 'emprestimos_financiamentos' vazia/inexistente.")
             return 0.0
-        cols = {k.lower(): k for k in df.columns}
-        # filtra somente empréstimos
-        tipo = cols.get("tipo_obrigacao")
-        if tipo is not None:
-            df = df[df[tipo].astype(str).str.upper().str.contains("EMPRE")]
-        if df.empty:
-            return 0.0
-        # usar saldo_devedor se existir
-        sdev = cols.get("saldo_devedor")
-        if sdev:
-            return float(pd.to_numeric(df[sdev], errors="coerce").fillna(0).clip(lower=0).sum())
-        # senão: valor_total - (parcelas_pagas * valor_parcela)
-        vtot = cols.get("valor_total") or cols.get("valor_evento") or cols.get("principal") or cols.get("valor")
-        vpar = cols.get("valor_parcela") or cols.get("valor_parcela_mensal") or cols.get("parcela")
-        pagas = cols.get("parcelas_pagas") or cols.get("qtd_parcelas_pagas") or cols.get("parcelas_pag")
-        tot = pd.to_numeric(df[vtot], errors="coerce").fillna(0) if vtot else 0
-        parc = pd.to_numeric(df[vpar], errors="coerce").fillna(0) if vpar else 0
-        qtd = pd.to_numeric(df[pagas], errors="coerce").fillna(0) if pagas else 0
-        saldo = (tot - (qtd * parc)).clip(lower=0) if vtot is not None else 0
-        return float(getattr(saldo, "sum", lambda: float(saldo))())
-    except Exception as e:
-        logger.error("DRE dívida estoque: fallback falhou: %s", e)
+        df_view = _cap_build_loans_view(df_raw)
+        totals = _cap_loans_totals(df_view)
+        val = totals.get("saldo_total", 0.0)
+        try:
+            return _safe(val)  # type: ignore[name-defined]
+        except Exception:
+            return float(val or 0.0)
+    except Exception as err:
+        logger.error("DRE(Dívida Estoque): falha no cálculo (cópia CAP): %s", err)
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -1220,6 +1251,10 @@ def render_dre(caminho_banco: Optional[str]):
     prev = st.session_state.get("db_path")
     if prev != db_resolved:
         st.session_state["db_path"] = db_resolved
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
     if ano_atual not in anos:
@@ -1649,7 +1684,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip_duo("Gasto c/ Empréstimos", m["emp"], m["emp_pct_sobre_receita"],
                   help_key="Gasto c/ Empréstimos (R$)"),
-        _chip("Dívida (Estoque)", m["divida_estoque"], "Índice de Endividamento"),
+        _chip("Dívida (Estoque)", f"{m['divida_estoque']}", extra_tip="Índice de Endividamento"),
         _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
     ], "k-fluxo"))
 
