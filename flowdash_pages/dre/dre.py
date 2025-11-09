@@ -944,64 +944,52 @@ def _query_divida_estoque(db_path: str) -> float:
     Se possível, calcula um fallback apenas para COMPARAR e LOGAR divergência,
     mas retorna SEMPRE o valor do repositório.
     """
-    # 1) Usa a fonte única: mesma função do bloco Contas a Pagar -> Empréstimos
     try:
         from repository.contas_a_pagar_mov_repository.queries import (
             total_saldo_devedor_emprestimos as _saldo_func
         )
         with _conn(db_path) as c:
             repo_val = _safe(_saldo_func(c))
-
-        # 2) (Opcional) calcula fallback só para comparação e log
+        # Fallback só para LOG de divergência (não usado no retorno)
         try:
-            sql_fallback = """
-            SELECT SUM(
-                CASE
-                  WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
-                  THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
-                  ELSE 0
-                END
-            )
-            FROM contas_a_pagar_mov
-            WHERE tipo_obrigacao = 'EMPRESTIMO';
+            sql_fb = """
+                SELECT SUM(
+                  CASE
+                    WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
+                    THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
+                    ELSE 0
+                  END
+                )
+                FROM contas_a_pagar_mov
+                WHERE tipo_obrigacao = 'EMPRESTIMO';
             """
             with _conn(db_path) as c:
-                row = c.execute(sql_fallback).fetchone()
+                row = c.execute(sql_fb).fetchone()
                 fb_val = _safe(row[0])
-
-            if fb_val is not None and abs((repo_val or 0.0) - (fb_val or 0.0)) > 0.01:
+            if abs((repo_val or 0.0) - (fb_val or 0.0)) > 0.01:
                 logger.warning(
-                    "DRE(Dívida Estoque): divergência detectada (repo=%s, fallback=%s, Δ=%s). "
+                    "DRE(Dívida Estoque): divergência (repo=%.2f, fallback=%.2f). "
                     "Retornando SEMPRE o valor do repositório.",
-                    f"{(repo_val or 0.0):.2f}",
-                    f"{(fb_val or 0.0):.2f}",
-                    f"{((repo_val or 0.0) - (fb_val or 0.0)):.2f}",
+                    repo_val, fb_val
                 )
         except Exception:
             pass
-
         return repo_val
-
     except Exception as err:
-        logger.error(
-            "DRE(Dívida Estoque): falha ao usar a fonte única do repositório (%s). "
-            "Usando fallback provisório — ATENÇÃO: pode divergir do Contas a Pagar.",
-            err,
-        )
-        sql = """
-        SELECT SUM(
-            CASE
-              WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
-              THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
-              ELSE 0
-            END
-        )
-        FROM contas_a_pagar_mov
-        WHERE tipo_obrigacao = 'EMPRESTIMO';
-        """
+        logger.error("DRE(Dívida Estoque): falha no repositório (%s). Usando fallback provisório.", err)
         try:
             with _conn(db_path) as c:
-                row = c.execute(sql).fetchone()
+                row = c.execute("""
+                    SELECT SUM(
+                      CASE
+                        WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
+                        THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
+                        ELSE 0
+                      END
+                    )
+                    FROM contas_a_pagar_mov
+                    WHERE tipo_obrigacao = 'EMPRESTIMO';
+                """).fetchone()
                 return _safe(row[0])
         except Exception:
             return 0.0
@@ -1142,8 +1130,10 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     margem_contrib_pct = _nz_div(margem_contrib, rl)
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
 
-    divida_estoque_rs = _query_divida_estoque(db_path)
-    indice_endividamento_pct = (_nz_div(divida_estoque_rs, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0
+    divida_estoque_rs = _query_divida_estoque(db_path)  # única fonte, sem abatimento do mês
+    indice_endividamento_pct = (
+        (_safe(divida_estoque_rs) / _safe(vars_dre.atv_base)) * 100.0
+    ) if _safe(vars_dre.atv_base) > 0 else 0.0
 
     return {
         # básicos/estruturais
