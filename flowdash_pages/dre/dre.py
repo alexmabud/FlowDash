@@ -936,64 +936,24 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
     except Exception:
         return 0.0
 
-@st.cache_data(show_spinner=False, ttl=30)
+@st.cache_data(show_spinner=False, ttl=60)
 def _query_divida_estoque(db_path: str) -> float:
     """
-    Retorna o MESMO valor do 'Saldo devedor de todos empréstimos' usado no CAP,
-    via repositório. Se o repositório falhar, faz um fallback que NÃO abate
-    parcela do mês (nunca usa valor_pago_acumulado).
+    Retorna o MESMO valor do 'Saldo devedor de todos empréstimos' da página Contas a Pagar.
+    Fonte única: repository.contas_a_pagar_mov_repository.queries.total_saldo_devedor_emprestimos.
+    Em caso de erro de import/execução, loga e retorna 0.0 (sem fallback alternativo para não divergir).
     """
     import logging
 
     logger = logging.getLogger(__name__)
-
-    # 1) Fonte oficial: repositório
     try:
         from repository.contas_a_pagar_mov_repository.queries import (
             total_saldo_devedor_emprestimos as _saldo_func
         )
         with _conn(db_path) as c:
             return _safe(_saldo_func(c))
-    except Exception as e:
-        logger.error("DRE: falha no repositório p/ dívida estoque (%s). Usando fallback.", e)
-
-    # 2) Fallback FINAL (espelha CAP sem abater mês)
-    try:
-        import pandas as pd
-        import numpy as np
-
-        with _conn(db_path) as c:
-            df = pd.read_sql_query("SELECT * FROM contas_a_pagar_mov", c)
-        if df.empty:
-            return 0.0
-
-        cols = {k.lower(): k for k in df.columns}
-
-        # filtra somente empréstimos
-        tipo = cols.get("tipo_obrigacao", None)
-        if tipo is not None:
-            df = df[df[tipo].astype(str).str.upper().str.contains("EMPRE")]
-        if df.empty:
-            return 0.0
-
-        # usar saldo_devedor se existir
-        sdev = cols.get("saldo_devedor")
-        if sdev:
-            series = pd.to_numeric(df[sdev], errors="coerce").fillna(0).clip(lower=0)
-            return float(series.sum())
-
-        # senão: valor_total - (parcelas_pagas * valor_parcela)
-        vtot = cols.get("valor_total") or cols.get("valor_evento") or cols.get("principal") or cols.get("valor")
-        vpar = cols.get("valor_parcela") or cols.get("valor_parcela_mensal") or cols.get("parcela")
-        pagas = cols.get("parcelas_pagas") or cols.get("qtd_parcelas_pagas") or cols.get("parcelas_pag")
-
-        tot = pd.to_numeric(df[vtot], errors="coerce").fillna(0) if vtot else 0
-        parc = pd.to_numeric(df[vpar], errors="coerce").fillna(0) if vpar else 0
-        qtd = pd.to_numeric(df[pagas], errors="coerce").fillna(0) if pagas else 0
-
-        saldo = (tot - (qtd * parc)).clip(lower=0) if vtot is not None else 0
-        return float(getattr(saldo, "sum", lambda: float(saldo))())
-    except Exception:
+    except Exception as err:
+        logger.error("DRE(Dívida Estoque): falha ao usar a função do repositório: %s", err)
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
@@ -1201,19 +1161,11 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
     db_resolved = os.path.abspath(caminho_banco)
     prev = st.session_state.get("db_path")
     if prev != db_resolved:
         st.session_state["db_path"] = db_resolved
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
     anos = _listar_anos(caminho_banco)
     ano_atual = int(pd.Timestamp.today().year)
     if ano_atual not in anos:
@@ -1234,14 +1186,19 @@ def render_dre(caminho_banco: Optional[str]):
     vars_dre = _vars_dynamic_overrides(caminho_banco, vars_dre)
     # persiste no DB para manter consistência entre páginas
     _persist_overrides_to_db(caminho_banco, vars_dre)
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
     if vars_dre.markup <= 0:
         st.warning("⚠️ Markup médio não configurado (ou 0). CMV estimado será 0.")
     if all(v == 0 for v in (vars_dre.simples, vars_dre.fundo, vars_dre.sacolas)) and vars_dre.markup == 0:
         st.info("ℹ️ Configure em: Cadastros › Variáveis do DRE.")
+
+    cache_scope_key = (db_resolved, int(ano), int(mes))
+    last_scope_key = st.session_state.get("_dre_cache_scope_key")
+    if last_scope_key != cache_scope_key:
+        st.session_state["_dre_cache_scope_key"] = cache_scope_key
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
 
     _render_kpis_mes_cards(caminho_banco, int(ano), int(mes), vars_dre)
     _render_anual(caminho_banco, int(ano), vars_dre)
@@ -1638,7 +1595,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip_duo("Gasto c/ Empréstimos", m["emp"], m["emp_pct_sobre_receita"],
                   help_key="Gasto c/ Empréstimos (R$)"),
-        _chip("Dívida (Estoque)", _fmt_brl(m["divida_estoque"])),
+        _chip("Dívida (Estoque)", m["divida_estoque"], "Índice de Endividamento"),
         _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
     ], "k-fluxo"))
 
