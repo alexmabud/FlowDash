@@ -936,63 +936,65 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
     except Exception:
         return 0.0
 
-@st.cache_data(show_spinner=False, ttl=60)
+@st.cache_data(show_spinner=False, ttl=30)
 def _query_divida_estoque(db_path: str) -> float:
     """
-    Retorna o MESMO valor exibido no bloco 'Empréstimos' da página Contas a Pagar
-    (saldo devedor total). Prioriza a função do repositório (fonte única).
-    Se possível, calcula um fallback apenas para COMPARAR e LOGAR divergência,
-    mas retorna SEMPRE o valor do repositório.
+    Retorna o MESMO valor do 'Saldo devedor de todos empréstimos' usado no CAP,
+    via repositório. Se o repositório falhar, faz um fallback que NÃO abate
+    parcela do mês (nunca usa valor_pago_acumulado).
     """
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # 1) Fonte oficial: repositório
     try:
         from repository.contas_a_pagar_mov_repository.queries import (
             total_saldo_devedor_emprestimos as _saldo_func
         )
         with _conn(db_path) as c:
-            repo_val = _safe(_saldo_func(c))
-        # Fallback só para LOG de divergência (não usado no retorno)
-        try:
-            sql_fb = """
-                SELECT SUM(
-                  CASE
-                    WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
-                    THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
-                    ELSE 0
-                  END
-                )
-                FROM contas_a_pagar_mov
-                WHERE tipo_obrigacao = 'EMPRESTIMO';
-            """
-            with _conn(db_path) as c:
-                row = c.execute(sql_fb).fetchone()
-                fb_val = _safe(row[0])
-            if abs((repo_val or 0.0) - (fb_val or 0.0)) > 0.01:
-                logger.warning(
-                    "DRE(Dívida Estoque): divergência (repo=%.2f, fallback=%.2f). "
-                    "Retornando SEMPRE o valor do repositório.",
-                    repo_val, fb_val
-                )
-        except Exception:
-            pass
-        return repo_val
-    except Exception as err:
-        logger.error("DRE(Dívida Estoque): falha no repositório (%s). Usando fallback provisório.", err)
-        try:
-            with _conn(db_path) as c:
-                row = c.execute("""
-                    SELECT SUM(
-                      CASE
-                        WHEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0)) > 0
-                        THEN (COALESCE(valor_evento,0) - COALESCE(valor_pago_acumulado,0))
-                        ELSE 0
-                      END
-                    )
-                    FROM contas_a_pagar_mov
-                    WHERE tipo_obrigacao = 'EMPRESTIMO';
-                """).fetchone()
-                return _safe(row[0])
-        except Exception:
+            return _safe(_saldo_func(c))
+    except Exception as e:
+        logger.error("DRE: falha no repositório p/ dívida estoque (%s). Usando fallback.", e)
+
+    # 2) Fallback FINAL (espelha CAP sem abater mês)
+    try:
+        import pandas as pd
+        import numpy as np
+
+        with _conn(db_path) as c:
+            df = pd.read_sql_query("SELECT * FROM contas_a_pagar_mov", c)
+        if df.empty:
             return 0.0
+
+        cols = {k.lower(): k for k in df.columns}
+
+        # filtra somente empréstimos
+        tipo = cols.get("tipo_obrigacao", None)
+        if tipo is not None:
+            df = df[df[tipo].astype(str).str.upper().str.contains("EMPRE")]
+        if df.empty:
+            return 0.0
+
+        # usar saldo_devedor se existir
+        sdev = cols.get("saldo_devedor")
+        if sdev:
+            series = pd.to_numeric(df[sdev], errors="coerce").fillna(0).clip(lower=0)
+            return float(series.sum())
+
+        # senão: valor_total - (parcelas_pagas * valor_parcela)
+        vtot = cols.get("valor_total") or cols.get("valor_evento") or cols.get("principal") or cols.get("valor")
+        vpar = cols.get("valor_parcela") or cols.get("valor_parcela_mensal") or cols.get("parcela")
+        pagas = cols.get("parcelas_pagas") or cols.get("qtd_parcelas_pagas") or cols.get("parcelas_pag")
+
+        tot = pd.to_numeric(df[vtot], errors="coerce").fillna(0) if vtot else 0
+        parc = pd.to_numeric(df[vpar], errors="coerce").fillna(0) if vpar else 0
+        qtd = pd.to_numeric(df[pagas], errors="coerce").fillna(0) if pagas else 0
+
+        saldo = (tot - (qtd * parc)).clip(lower=0) if vtot is not None else 0
+        return float(getattr(saldo, "sum", lambda: float(saldo))())
+    except Exception:
+        return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_mkt_cartao(db_path: str, ini: str, fim: str) -> float:
@@ -1199,6 +1201,10 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
     db_resolved = os.path.abspath(caminho_banco)
     prev = st.session_state.get("db_path")
