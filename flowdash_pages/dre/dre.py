@@ -1684,7 +1684,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip_duo("Gasto c/ Empréstimos", m["emp"], m["emp_pct_sobre_receita"],
                   help_key="Gasto c/ Empréstimos (R$)"),
-        _chip("Dívida (Estoque)", f"{m['divida_estoque']}", extra_tip="Índice de Endividamento"),
+        _chip("Dívida (Estoque)", _fmt_brl(m["divida_estoque"]), extra_tip="Índice de Endividamento"),
         _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
     ], "k-fluxo"))
 
