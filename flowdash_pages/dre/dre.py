@@ -939,21 +939,75 @@ def _query_cap_emprestimos(db_path: str, competencia: str) -> float:
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_divida_estoque(db_path: str) -> float:
     """
-    Retorna o MESMO valor do 'Saldo devedor de todos empréstimos' da página Contas a Pagar.
-    Fonte única: repository.contas_a_pagar_mov_repository.queries.total_saldo_devedor_emprestimos.
-    Em caso de erro de import/execução, loga e retorna 0.0 (sem fallback alternativo para não divergir).
+    Busca o MESMO valor do 'Saldo devedor de todos empréstimos' do CAP.
+    1) Tenta o repositório (aceitando variações de assinatura).
+    2) Se falhar, fallback SEM abatimento do mês:
+       soma 'saldo_devedor' (quando existir) OU (valor_total - parcelas_pagas*valor_parcela).
     """
     import logging
+    import pandas as pd
 
     logger = logging.getLogger(__name__)
+
+    # ---- 1) Tentar repositório (várias assinaturas) ----
     try:
         from repository.contas_a_pagar_mov_repository.queries import (
             total_saldo_devedor_emprestimos as _saldo_func
         )
+        # (a) tentar com conexão
+        try:
+            with _conn(db_path) as c:
+                val = _saldo_func(c)
+            if val is not None:
+                return _safe(val)
+        except TypeError:
+            pass
+        # (b) tentar com caminho do DB
+        try:
+            val = _saldo_func(db_path)
+            if val is not None:
+                return _safe(val)
+        except TypeError:
+            pass
+        # (c) tentar sem argumentos
+        try:
+            val = _saldo_func()
+            if val is not None:
+                return _safe(val)
+        except TypeError:
+            pass
+        logger.error("DRE dívida estoque: repositório importado, mas não houve assinatura compatível.")
+    except Exception as e:
+        logger.error("DRE dívida estoque: falha ao importar repositório: %s", e)
+
+    # ---- 2) Fallback FINAL (espelha CAP; NUNCA usa valor_pago_acumulado) ----
+    try:
         with _conn(db_path) as c:
-            return _safe(_saldo_func(c))
-    except Exception as err:
-        logger.error("DRE(Dívida Estoque): falha ao usar a função do repositório: %s", err)
+            df = pd.read_sql_query("SELECT * FROM contas_a_pagar_mov", c)
+        if df.empty:
+            return 0.0
+        cols = {k.lower(): k for k in df.columns}
+        # filtra somente empréstimos
+        tipo = cols.get("tipo_obrigacao")
+        if tipo is not None:
+            df = df[df[tipo].astype(str).str.upper().str.contains("EMPRE")]
+        if df.empty:
+            return 0.0
+        # usar saldo_devedor se existir
+        sdev = cols.get("saldo_devedor")
+        if sdev:
+            return float(pd.to_numeric(df[sdev], errors="coerce").fillna(0).clip(lower=0).sum())
+        # senão: valor_total - (parcelas_pagas * valor_parcela)
+        vtot = cols.get("valor_total") or cols.get("valor_evento") or cols.get("principal") or cols.get("valor")
+        vpar = cols.get("valor_parcela") or cols.get("valor_parcela_mensal") or cols.get("parcela")
+        pagas = cols.get("parcelas_pagas") or cols.get("qtd_parcelas_pagas") or cols.get("parcelas_pag")
+        tot = pd.to_numeric(df[vtot], errors="coerce").fillna(0) if vtot else 0
+        parc = pd.to_numeric(df[vpar], errors="coerce").fillna(0) if vpar else 0
+        qtd = pd.to_numeric(df[pagas], errors="coerce").fillna(0) if pagas else 0
+        saldo = (tot - (qtd * parc)).clip(lower=0) if vtot is not None else 0
+        return float(getattr(saldo, "sum", lambda: float(saldo))())
+    except Exception as e:
+        logger.error("DRE dívida estoque: fallback falhou: %s", e)
         return 0.0
 
 @st.cache_data(show_spinner=False, ttl=60)
