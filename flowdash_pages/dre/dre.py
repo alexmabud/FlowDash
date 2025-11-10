@@ -309,16 +309,28 @@ def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
     return (_safe(num) / den_val) * 100.0
 
 
+def _looks_like_centavos(x: float) -> bool:
+    """Detecta valores provavelmente armazenados em centavos."""
+    magnitude = abs(x)
+    if magnitude < 1_000_000:
+        return False
+    # valores muito altos em centavos (acima de 50 milhões) provavelmente já estão em reais
+    if magnitude > 50_000_000:
+        return False
+    frac_part = abs(x - math.trunc(x))
+    near_integer = frac_part <= 0.95
+    scaled = magnitude / 100.0
+    scaled_reasonable = 100.0 <= scaled <= 500_000.0
+    many_decimals_after_div = abs(scaled - round(scaled, 2)) > 5e-4
+    return (near_integer and scaled_reasonable) or (scaled_reasonable and many_decimals_after_div)
+
+
 def _centavos_to_reais_if_needed(v) -> float:
     try:
         x = float(v or 0.0)
     except Exception:
         return 0.0
-    # Heurística conservadora: só tratamos como centavos se for um INTEIRO MUITO GRANDE.
-    # Evita dividir por 100 valores inteiros em reais (ex.: 12_000.00).
-    if abs(x) >= 1_000_000 and float(int(x)) == x:
-        return x / 100.0
-    return x
+    return x / 100.0 if _looks_like_centavos(x) else x
 
 
 def _safe_pct(num: Optional[float], den: Optional[float]) -> float:
@@ -384,10 +396,7 @@ def _as_reais(v) -> float:
         x = float(v or 0.0)
     except Exception:
         return 0.0
-    # Heurística: inteiros muito grandes costumam ser centavos
-    if abs(x) >= 1_000_000 and float(int(x)) == x:
-        return x / 100.0
-    return x
+    return x / 100.0 if _looks_like_centavos(x) else x
 
 def _ativos_totais_calc(db_path: str) -> float:
     """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados."""
@@ -1274,10 +1283,25 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
     # Dívida (estoque) e índice calculado com Ativos Totais em tempo real (independe da outra página)
     divida_estoque_rs = _as_reais(_query_divida_estoque(db_path))
-    ativos_totais_rt = _as_reais(_ativos_totais_calc(db_path))
+    ativos_totais_warning = None
+    try:
+        ativos_totais_rt = _as_reais(_ativos_totais_calc(db_path))
+    except Exception as err:
+        logger.exception("DRE: falha ao calcular Ativos Totais em tempo real")
+        ativos_totais_rt = 0.0
+        ativos_totais_warning = f"Não foi possível calcular Ativos Totais em tempo real ({err})."
+
+    ativos_totais_fallback = False
     if not ativos_totais_rt:
-        # fallback seguro: usa o 'ativos_totais_base' persistido (em R$)
-        ativos_totais_rt = _as_reais(_safe(vars_dre.atv_base))
+        ativos_totais_fallback = True
+        fallback_val = _as_reais(_safe(vars_dre.atv_base))
+        ativos_totais_rt = fallback_val
+        if fallback_val <= 0:
+            ativos_totais_warning = (ativos_totais_warning or "") + " Valor salvo em 'Ativos Totais (base)' também está zerado."
+        else:
+            fallback_msg = "Usando o valor salvo em 'Ativos Totais (base)' porque o cálculo em tempo real não retornou."
+            ativos_totais_warning = fallback_msg if not ativos_totais_warning else f"{ativos_totais_warning} {fallback_msg}"
+
     indice_endividamento_pct = (divida_estoque_rs / ativos_totais_rt * 100.0) if ativos_totais_rt > 0 else 0.0
 
     return {
@@ -1334,6 +1358,9 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
         # endividamento (estoque)
         "divida_estoque": divida_estoque_rs,
         "indice_endividamento_pct": indice_endividamento_pct,
+        "ativos_totais_rt": ativos_totais_rt,
+        "ativos_totais_warning": ativos_totais_warning,
+        "ativos_totais_fallback": ativos_totais_fallback,
 
         # avançados
         "dep_extra": dep_extra,
@@ -1561,6 +1588,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         return f'<div class="cap-card {cls}"><div class="cap-title-xl">{title}</div><div class="fd-card-body">{"".join(chips)}</div></div>'
 
     m = _calc_mes(db_path, ano, mes, vars_dre)
+    ativos_totais_warning = (m.get("ativos_totais_warning") or "").strip()
+    if ativos_totais_warning:
+        st.warning(ativos_totais_warning)
 
     try:
         crec = _crescimento_mtd(db_path, ano, mes)
