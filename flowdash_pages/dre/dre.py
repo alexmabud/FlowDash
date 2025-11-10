@@ -308,6 +308,49 @@ def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
         return 0.0
     return (_safe(num) / den_val) * 100.0
 
+
+def _safe_pct(num: Optional[float], den: Optional[float]) -> float:
+    """Retorna o percentual num/den*100, protegendo contra divisões inválidas."""
+    try:
+        num_val = float(num)
+        den_val = float(den)
+    except (TypeError, ValueError):
+        return 0.0
+    if den_val == 0:
+        return 0.0
+    return (num_val / den_val) * 100.0
+
+
+def _status_dot(pct: Optional[float], green_max: float, yellow_max: float) -> str:
+    """Mapeia um percentual para 🟢/🟡/🔴 conforme limites fornecidos."""
+    try:
+        val = float(pct)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(val):
+        return "⚪"
+    if val <= green_max:
+        return "🟢"
+    if val <= yellow_max:
+        return "🟡"
+    return "🔴"
+
+
+def _linha_reais_pct(valor_rs: Optional[float], pct: Optional[float], base_label: str) -> str:
+    """Formata 'R$ x | y% base' reaproveitando os formatadores existentes."""
+    valor_fmt = formatar_moeda(_safe(valor_rs))
+    pct_fmt = _fmt_pct_ratio_from_percent_value(_safe(pct), casas=1)
+    base = base_label.strip() if base_label else ""
+    if base:
+        lower = base.lower()
+        if lower.startswith(("da ", "do ", "de ", "das ", "dos ")):
+            suffix = f" {base}"
+        else:
+            suffix = f" da {base}"
+    else:
+        suffix = ""
+    return f"{valor_fmt} | {pct_fmt}{suffix}"
+
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
     return (ano, mes - 1) if mes > 1 else (ano - 1, 12)
 
@@ -1400,10 +1443,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
                     f'<span class="v">{val}</span>{tip_html}</span>')
         return f'<span class="fd-chip"><span class="k">{lbl_display}</span><span class="v">{val}</span></span>'
 
-    def _linha_reais_pct(valor_reais: Optional[float], pct: Optional[float], base_txt: str) -> str:
-        pct_fmt = _fmt_pct_ratio_from_percent_value(_safe(pct), casas=1)
-        return f"{formatar_moeda(_safe(valor_reais))} | {pct_fmt} da {base_txt}"
-
     def _linha_pct(pct: Optional[float], base_txt: str) -> str:
         return f"{_fmt_pct(_safe(pct))} da {base_txt}"
 
@@ -1580,6 +1619,12 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         total_saida_oper_pct_val = _derive_pct(total_saida_operacional_val, receita_liq_val)
     total_saida_oper_display = _linha_reais_pct(total_saida_operacional_val, total_saida_oper_pct_val, "Receita Líquida")
 
+    emp_pct_val = m.get("emp_pct_sobre_receita")
+    if emp_pct_val is None:
+        emp_pct_val = _safe_pct(m.get("emp"), receita_liq_val)
+    gasto_emp_display = _linha_reais_pct(m.get("emp"), emp_pct_val, "da Receita Líquida")
+    gasto_emp_status = _status_dot(emp_pct_val, 7.0, 12.0)
+
     perc_rl_rb_pct = (perc_receita_liq * 100.0) if perc_receita_liq is not None else None
     receita_liq_status = _chip_status("receita_liquida_sobre_bruta", perc_rl_rb_pct)
     receita_liq_tip_key = "receita_liq_rb"
@@ -1682,8 +1727,9 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     ], "k-efic"))
 
     cards_html.append(_card("Fluxo e Endividamento", [
-        _chip_duo("Gasto c/ Empréstimos", m["emp"], m["emp_pct_sobre_receita"],
-                  help_key="Gasto c/ Empréstimos (R$)"),
+        _chip("Gasto c/ Empréstimos (R$ | %)", gasto_emp_display,
+              status_emoji=_status_or_none(gasto_emp_status),
+              extra_tip="Gasto c/ Empréstimos (R$ | % da Receita Líquida). Mede o peso das parcelas pagas (principal + juros) sobre a Receita Líquida do mês."),
         _chip("Dívida (Estoque)", _fmt_brl(m["divida_estoque"]), extra_tip="Índice de Endividamento"),
         _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
     ], "k-fluxo"))
