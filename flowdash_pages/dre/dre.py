@@ -314,9 +314,9 @@ def _centavos_to_reais_if_needed(v) -> float:
         x = float(v or 0.0)
     except Exception:
         return 0.0
-    # FIX DEFINITIVO: Qualquer valor inteiro maior que R$ 10,00 (1000 centavos)
-    # será considerado em centavos e convertido para reais, resolvendo a inconsistência de cálculo inicial.
-    if abs(x) >= 1000 and float(int(x)) == x:
+    # Heurística conservadora: só tratamos como centavos se for um INTEIRO MUITO GRANDE.
+    # Evita dividir por 100 valores inteiros em reais (ex.: 12_000.00).
+    if abs(x) >= 1_000_000 and float(int(x)) == x:
         return x / 100.0
     return x
 
@@ -363,6 +363,36 @@ def _current_db_path() -> str:
     except Exception:
         pass
     return _ensure_db_path_or_raise()
+
+# --- cálculo rápido e isolado dos Ativos Totais (em tempo real)
+def _ativos_totais_calc(db_path: str) -> float:
+    """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados."""
+    try:
+        from flowdash_pages.cadastros.variaveis_dre import (
+            get_estoque_atual_estimado as _estoque_est,
+            _get_total_consolidado_bancos_caixa as _bancos_total,
+            _load_ui_prefs as _load_prefs,
+        )
+        est = _centavos_to_reais_if_needed(_estoque_est(db_path) or 0.0)
+        with _conn(db_path) as c:
+            bt, _ = _bancos_total(c, db_path)
+        bt = _centavos_to_reais_if_needed(bt)
+        prefs = _load_prefs(db_path) or {}
+        imob = _centavos_to_reais_if_needed(_safe(prefs.get("pl_imobilizado_valor_total")))
+        if not imob:
+            try:
+                with _conn(db_path) as c2:
+                    r = c2.execute(
+                        "SELECT valor_num FROM dre_variaveis WHERE chave='pl_imobilizado_valor_total' LIMIT 1"
+                    ).fetchone()
+                    if r and r[0] is not None:
+                        imob = _centavos_to_reais_if_needed(_safe(r[0]))
+            except Exception:
+                pass
+        total = _safe(bt) + _safe(est) + _safe(imob)
+        return total if total > 0 else 0.0
+    except Exception:
+        return 0.0
 
 
 def _competencia_periodo(yyyy_mm: str) -> Tuple[str, str, str]:
@@ -1226,10 +1256,13 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     margem_contrib_pct = _nz_div(margem_contrib, rl)
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
 
-    divida_estoque_rs = _query_divida_estoque(db_path)  # única fonte, sem abatimento do mês
+    # Dívida (estoque) e índice calculado com Ativos Totais em tempo real (independe da outra página)
+    divida_estoque_rs = _query_divida_estoque(db_path)
+    ativos_totais_rt = _ativos_totais_calc(db_path) or _safe(vars_dre.atv_base)
     indice_endividamento_pct = (
-        (_safe(divida_estoque_rs) / _safe(vars_dre.atv_base)) * 100.0
-    ) if _safe(vars_dre.atv_base) > 0 else 0.0
+        (_safe(divida_estoque_rs) / _safe(ativos_totais_rt) * 100.0)
+        if _safe(ativos_totais_rt) > 0 else 0.0
+    )
 
     return {
         # básicos/estruturais
@@ -1296,6 +1329,11 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
+    # limpa cache de dados para evitar "valor muda depois que entra na outra página"
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
     db_resolved = os.path.abspath(caminho_banco)
     prev = st.session_state.get("db_path")
     if prev != db_resolved:
