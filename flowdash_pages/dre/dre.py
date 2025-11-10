@@ -314,9 +314,9 @@ def _centavos_to_reais_if_needed(v) -> float:
         x = float(v or 0.0)
     except Exception:
         return 0.0
-    # Heurística: número muito grande e inteiro → provável centavos
-    # Reduzindo o limite de 1 milhão para 100 mil para cobrir ativos menores.
-    if abs(x) >= 100_000 and float(int(x)) == x:
+    # FIX DEFINITIVO: Qualquer valor inteiro maior que R$ 10,00 (1000 centavos)
+    # será considerado em centavos e convertido para reais, resolvendo a inconsistência de cálculo inicial.
+    if abs(x) >= 1000 and float(int(x)) == x:
         return x / 100.0
     return x
 
