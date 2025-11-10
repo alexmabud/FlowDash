@@ -309,6 +309,14 @@ def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
     return (_safe(num) / den_val) * 100.0
 
 
+def _centavos_to_reais_if_needed(v) -> float:
+    try:
+        x = float(v or 0.0)
+    except Exception:
+        return 0.0
+    return (x / 100.0) if x >= 1_000_000 else x
+
+
 def _safe_pct(num: Optional[float], den: Optional[float]) -> float:
     """Retorna num/den*100 com proteção contra divisões inválidas."""
     try:
@@ -773,6 +781,8 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
         with _conn(db_path) as c_local:
             bancos_total, _ = _bancos_total(c_local, db_path)
         passivos_totais, _ = _cap_totais(db_path)
+        bancos_total = _centavos_to_reais_if_needed(bancos_total)
+        passivos_totais = _centavos_to_reais_if_needed(passivos_totais)
 
         # preferências JSON para imobilizado e taxa depreciação
         prefs = _load_prefs(db_path)
