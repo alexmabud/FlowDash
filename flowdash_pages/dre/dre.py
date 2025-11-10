@@ -314,7 +314,10 @@ def _centavos_to_reais_if_needed(v) -> float:
         x = float(v or 0.0)
     except Exception:
         return 0.0
-    return (x / 100.0) if x >= 1_000_000 else x
+    # Heurística: número muito grande e inteiro → provável centavos
+    if abs(x) >= 1_000_000 and float(int(x)) == x:
+        return x / 100.0
+    return x
 
 
 def _safe_pct(num: Optional[float], den: Optional[float]) -> float:
@@ -778,6 +781,7 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
     try:
         # dados auxiliares
         estoque_atual = float(_estoque_est(db_path) or 0.0)
+        estoque_atual = _centavos_to_reais_if_needed(estoque_atual)
         with _conn(db_path) as c_local:
             bancos_total, _ = _bancos_total(c_local, db_path)
         passivos_totais, _ = _cap_totais(db_path)
@@ -787,6 +791,7 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
         # preferências JSON para imobilizado e taxa depreciação
         prefs = _load_prefs(db_path)
         imobilizado = _safe(prefs.get("pl_imobilizado_valor_total"))
+        imobilizado = _centavos_to_reais_if_needed(imobilizado)
         taxa_dep = _safe(prefs.get("dep_taxa_mensal_percent_live"))
 
         try:
@@ -795,8 +800,8 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
                     r = cfb.execute(
                         "SELECT valor_num FROM dre_variaveis WHERE chave='pl_imobilizado_valor_total' LIMIT 1"
                     ).fetchone()
-                    if r and r[0] is not None and float(r[0]) > 0:
-                        imobilizado = float(r[0])
+                if r and r[0] is not None and float(r[0]) > 0:
+                    imobilizado = _centavos_to_reais_if_needed(float(r[0]))
                 if not taxa_dep or taxa_dep <= 0:
                     r = cfb.execute(
                         "SELECT valor_num FROM dre_variaveis WHERE chave='dep_taxa_mensal_percent_live' LIMIT 1"
@@ -807,6 +812,8 @@ def _vars_dynamic_overrides(db_path: str, vars_dre: "VarsDRE") -> "VarsDRE":
             pass
 
         ativos_totais = float(bancos_total or 0.0) + float(estoque_atual or 0.0) + float(imobilizado or 0.0)
+        if ativos_totais < 0:
+            ativos_totais = 0.0
         pl_calc = ativos_totais - float(passivos_totais or 0.0)
         pl_calc_nn = pl_calc if pl_calc > 0 else 0.0
         dep_padrao = float(imobilizado) * (float(taxa_dep) / 100.0)
