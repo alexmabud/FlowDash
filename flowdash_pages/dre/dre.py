@@ -365,6 +365,30 @@ def _current_db_path() -> str:
     return _ensure_db_path_or_raise()
 
 # --- cálculo rápido e isolado dos Ativos Totais (em tempo real)
+def _get_var(db_path: str, chave: str, default: float = 0.0) -> float:
+    """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados."""
+    try:
+        with _conn(db_path) as c:
+            row = c.execute(
+                "SELECT valor_num FROM dre_variaveis WHERE chave = ? LIMIT 1", (chave,)
+            ).fetchone()
+            if row and row[0] is not None:
+                return float(row[0])
+    except Exception:
+        pass
+    return default
+
+# --- util: normaliza possíveis valores em centavos para reais
+def _as_reais(v) -> float:
+    try:
+        x = float(v or 0.0)
+    except Exception:
+        return 0.0
+    # Heurística: inteiros muito grandes costumam ser centavos
+    if abs(x) >= 1_000_000 and float(int(x)) == x:
+        return x / 100.0
+    return x
+
 def _ativos_totais_calc(db_path: str) -> float:
     """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados."""
     try:
@@ -378,19 +402,11 @@ def _ativos_totais_calc(db_path: str) -> float:
             bt, _ = _bancos_total(c, db_path)
         bt = _centavos_to_reais_if_needed(bt)
         prefs = _load_prefs(db_path) or {}
-        imob = _centavos_to_reais_if_needed(_safe(prefs.get("pl_imobilizado_valor_total")))
-        if not imob:
-            try:
-                with _conn(db_path) as c2:
-                    r = c2.execute(
-                        "SELECT valor_num FROM dre_variaveis WHERE chave='pl_imobilizado_valor_total' LIMIT 1"
-                    ).fetchone()
-                    if r and r[0] is not None:
-                        imob = _centavos_to_reais_if_needed(_safe(r[0]))
-            except Exception:
-                pass
-        total = _safe(bt) + _safe(est) + _safe(imob)
-        return total if total > 0 else 0.0
+        imob = _as_reais(_safe(prefs.get("pl_imobilizado_valor_total")))
+        if imob in (None, 0.0):
+            # fallback para o que estiver persistido no DB
+            imob = _as_reais(_get_var(db_path, "pl_imobilizado_valor_total", default=0.0))
+        return float(bt or 0.0) + float(est or 0.0) + float(imob or 0.0)
     except Exception:
         return 0.0
 
@@ -1257,12 +1273,12 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
 
     # Dívida (estoque) e índice calculado com Ativos Totais em tempo real (independe da outra página)
-    divida_estoque_rs = _query_divida_estoque(db_path)
-    ativos_totais_rt = _ativos_totais_calc(db_path) or _safe(vars_dre.atv_base)
-    indice_endividamento_pct = (
-        (_safe(divida_estoque_rs) / _safe(ativos_totais_rt) * 100.0)
-        if _safe(ativos_totais_rt) > 0 else 0.0
-    )
+    divida_estoque_rs = _as_reais(_query_divida_estoque(db_path))
+    ativos_totais_rt = _as_reais(_ativos_totais_calc(db_path))
+    if not ativos_totais_rt:
+        # fallback seguro: usa o 'ativos_totais_base' persistido (em R$)
+        ativos_totais_rt = _as_reais(_safe(vars_dre.atv_base))
+    indice_endividamento_pct = (divida_estoque_rs / ativos_totais_rt * 100.0) if ativos_totais_rt > 0 else 0.0
 
     return {
         # básicos/estruturais
@@ -1328,6 +1344,13 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
+    # Garante dados frescos no primeiro load da sessão (evita depender de abrir Variáveis antes)
+    if not st.session_state.get("_dre_cache_busted_once"):
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.session_state["_dre_cache_busted_once"] = True
     caminho_banco = _ensure_db_path_or_raise(caminho_banco)
     # limpa cache de dados para evitar "valor muda depois que entra na outra página"
     try:
