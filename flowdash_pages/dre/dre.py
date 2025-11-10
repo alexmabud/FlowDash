@@ -310,45 +310,33 @@ def _derive_pct(num: Optional[float], den: Optional[float]) -> float:
 
 
 def _safe_pct(num: Optional[float], den: Optional[float]) -> float:
-    """Retorna o percentual num/den*100, protegendo contra divisões inválidas."""
+    """Retorna num/den*100 com proteção contra divisões inválidas."""
     try:
-        num_val = float(num)
-        den_val = float(den)
+        n = float(num) if num is not None else 0.0
+        d = float(den) if den not in (None, 0, 0.0) else None
     except (TypeError, ValueError):
         return 0.0
-    if den_val == 0:
-        return 0.0
-    return (num_val / den_val) * 100.0
+    return 0.0 if d is None else (n / d) * 100.0
 
 
-def _status_dot(pct: Optional[float], green_max: float, yellow_max: float) -> str:
-    """Mapeia um percentual para 🟢/🟡/🔴 conforme limites fornecidos."""
+def _status_dot_range(pct: Optional[float], green_max: float, yellow_max: float) -> str:
+    """Retorna 🟢/🟡/🔴 conforme os limites informados."""
     try:
-        val = float(pct)
+        v = float(pct)
     except (TypeError, ValueError):
         return "⚪"
-    if math.isnan(val):
+    if math.isnan(v):
         return "⚪"
-    if val <= green_max:
-        return "🟢"
-    if val <= yellow_max:
-        return "🟡"
-    return "🔴"
+    return "🟢" if v <= green_max else ("🟡" if v <= yellow_max else "🔴")
 
 
-def _linha_reais_pct(valor_rs: Optional[float], pct: Optional[float], base_label: str) -> str:
-    """Formata 'R$ x | y% base' reaproveitando os formatadores existentes."""
-    valor_fmt = formatar_moeda(_safe(valor_rs))
-    pct_fmt = _fmt_pct_ratio_from_percent_value(_safe(pct), casas=1)
+def _linha_reais_pct(valor_rs: Optional[float], pct: Optional[float],
+                     base_label: str, fmt_moeda, fmt_pct) -> str:
+    """Formata 'R$ valor | pct base' usando os formatadores fornecidos."""
+    valor_fmt = fmt_moeda(_safe(valor_rs))
+    pct_fmt = fmt_pct(_safe(pct))
     base = base_label.strip() if base_label else ""
-    if base:
-        lower = base.lower()
-        if lower.startswith(("da ", "do ", "de ", "das ", "dos ")):
-            suffix = f" {base}"
-        else:
-            suffix = f" da {base}"
-    else:
-        suffix = ""
+    suffix = f" {base}" if base else ""
     return f"{valor_fmt} | {pct_fmt}{suffix}"
 
 def _mes_anterior(ano: int, mes: int) -> Tuple[int, int]:
@@ -1406,10 +1394,18 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Margem de Segurança (%)": "Quanto a receita está acima do Ponto de Equilíbrio Contábil. | Serve para: medir a folga de vendas antes de entrar no prejuízo.\n\n🟢 Maior ou igual a 25% · 🟡 Entre 15% e 25% · 🔴 Menor que 15%",
         "Eficiência Operacional (%)": "Total de Saída Operacional (fixos + variáveis operacionais, sem despesas financeiras) sobre a Receita Líquida. | Serve para: medir o consumo operacional das vendas.\n\n🟢 Menor ou igual a 45% · 🟡 Entre 45% e 50% · 🔴 Maior que 50%",
         "Relação Saídas/Entradas (%)": "Total de Saída Operacional sobre a Receita Bruta. | Serve para: comparar o nível de despesas operacionais diretamente com o faturamento bruto.\n\n🟢 Menor ou igual a 40% · 🟡 Entre 40% e 48% · 🔴 Maior que 48%",
-        "Gasto c/ Empréstimos (R$)": "Desembolso do mês com parcelas pagas.",
-        "Gasto c/ Empréstimos (%)": "Gasto com empréstimos como % da receita líquida.",
-        "Dívida (Estoque)": "Saldo devedor ainda em aberto.",
-        "Índice de Endividamento (%)": "Quanto dos ativos está comprometido com dívidas.",
+        "Gasto c/ Empréstimos (R$ | %)": (
+            "Gasto c/ Empréstimos (R$ | % da Receita Líquida) | Serve para: medir o peso das parcelas pagas (principal + juros) sobre a Receita Líquida do mês (pressão da dívida no caixa).\n\n"
+            "🟢 Menor ou igual a 7% · 🟡 Entre 7% e 12% · 🔴 Maior que 12%"
+        ),
+        "Dívida (Estoque)": (
+            "Dívida (Estoque) (R$ | % dos Ativos Totais) | Serve para: mostrar o tamanho da dívida financeira (saldo devedor) em relação aos Ativos Totais (calc.) da loja (alavancagem).\n\n"
+            "🟢 Menor ou igual a 50% · 🟡 Entre 50% e 70% · 🔴 Maior que 70%"
+        ),
+        "Índice de Endividamento (%)": (
+            "Índice de Endividamento (%) | Serve para: acompanhar a razão Dívida (Estoque) ÷ Ativos Totais (calc.) como medida simplificada de alavancagem no DRE.\n\n"
+            "🟢 Menor ou igual a 50% · 🟡 Entre 50% e 70% · 🔴 Maior que 70%"
+        ),
         "Ticket Médio": "Média de valor por venda.",
         "Nº de Vendas": "Quantidade de vendas no período.",
         "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
@@ -1466,7 +1462,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         if tip_key in TOOLTIP_STRIP_HEADER_KEYS:
             tip = _strip_prefix_before_bullets(tip)
         if pct_base_txt:
-            val_comb = _linha_reais_pct(val_rs, val_pct, pct_base_txt)
+            val_comb = _linha_reais_pct(
+                val_rs,
+                val_pct,
+                pct_base_txt,
+                formatar_moeda,
+                lambda pct: _fmt_pct_ratio_from_percent_value(pct, casas=1),
+            )
         else:
             val_comb = f'{_fmt_brl(val_rs)} | (%) {_fmt_pct(val_pct)}'
         lbl_display = f"{status_emoji} {lbl}" if status_emoji else lbl
@@ -1614,16 +1616,55 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             f"{lucro_bruto_display} | {formatar_percentual(perc_lucro_bruto, casas=1)} da Receita Líquida"
         )
 
+    def _pct_ratio_formatter(pct_value):
+        try:
+            val = float(pct_value)
+        except (TypeError, ValueError):
+            return "—"
+        try:
+            return formatar_percentual(val / 100.0, casas=1)
+        except Exception:
+            return f"{val:.1f}%"
+
+    pct_ratio_formatter = _pct_ratio_formatter
+
     total_saida_oper_pct_val = (perc_total_saida_oper * 100.0) if perc_total_saida_oper is not None else None
     if total_saida_oper_pct_val is None:
         total_saida_oper_pct_val = _derive_pct(total_saida_operacional_val, receita_liq_val)
-    total_saida_oper_display = _linha_reais_pct(total_saida_operacional_val, total_saida_oper_pct_val, "Receita Líquida")
+    total_saida_oper_display = _linha_reais_pct(
+        total_saida_operacional_val,
+        total_saida_oper_pct_val,
+        "da Receita Líquida",
+        formatar_moeda,
+        pct_ratio_formatter,
+    )
 
     emp_pct_val = m.get("emp_pct_sobre_receita")
     if emp_pct_val is None:
         emp_pct_val = _safe_pct(m.get("emp"), receita_liq_val)
-    gasto_emp_display = _linha_reais_pct(m.get("emp"), emp_pct_val, "da Receita Líquida")
-    gasto_emp_status = _status_dot(emp_pct_val, 7.0, 12.0)
+    gasto_emp_display = _linha_reais_pct(
+        m.get("emp"),
+        emp_pct_val,
+        "da Receita Líquida",
+        formatar_moeda,
+        pct_ratio_formatter,
+    )
+    gasto_emp_status = _status_dot_range(emp_pct_val, 7.0, 12.0)
+
+    divida_rs = m.get("divida_estoque")
+    divida_pct = m.get("indice_endividamento_pct")
+    divida_display = _linha_reais_pct(
+        divida_rs,
+        divida_pct,
+        "dos Ativos Totais (calc.)",
+        formatar_moeda,
+        pct_ratio_formatter,
+    )
+    divida_status = _status_dot_range(divida_pct, 50.0, 70.0)
+
+    indice_pct_val = _safe(divida_pct)
+    indice_display = f"{_fmt_pct(indice_pct_val)} dos Ativos Totais (calc.)"
+    indice_status = _status_dot_range(indice_pct_val, 50.0, 70.0)
 
     perc_rl_rb_pct = (perc_receita_liq * 100.0) if perc_receita_liq is not None else None
     receita_liq_status = _chip_status("receita_liquida_sobre_bruta", perc_rl_rb_pct)
@@ -1705,7 +1746,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     ], "k-margens"))
 
     custo_fixo_pct_display_val = _safe(custo_fixo_rl_pct_val)
-    custos_fixos_display = _linha_reais_pct(fixas_rs, custo_fixo_pct_display_val, "Receita Líquida")
+    custos_fixos_display = _linha_reais_pct(
+        fixas_rs,
+        custo_fixo_pct_display_val,
+        "da Receita Líquida",
+        formatar_moeda,
+        pct_ratio_formatter,
+    )
 
     cards_html.append(_card("Eficiência e Gestão", [
         _chip("Custos Fixos", custos_fixos_display,
@@ -1713,11 +1760,11 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip_duo("Ponto de Equilíbrio (Contábil)", break_even_rs_val, break_even_pct_val,
                   help_key="Ponto de Equilíbrio (Contábil) (R$ | %)",
                   status_emoji=pe_contabil_status,
-                  pct_base_txt="Receita Líquida"),
+                  pct_base_txt="da Receita Líquida"),
         _chip_duo("Ponto de Equilíbrio Financeiro", break_even_financeiro_rs_val, break_even_financeiro_pct_val,
                   help_key="Ponto de Equilíbrio Financeiro (R$ | %)",
                   status_emoji=pe_financeiro_status,
-                  pct_base_txt="Receita Líquida"),
+                  pct_base_txt="da Receita Líquida"),
         _chip("Margem de Segurança (%)", _linha_pct(margem_seguranca_pct_val, "Receita Líquida"),
               status_emoji=margem_seguranca_status),
         _chip("Eficiência Operacional (%)", _linha_pct(eficiencia_oper_pct_val, "Receita Líquida"),
@@ -1728,10 +1775,11 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip("Gasto c/ Empréstimos (R$ | %)", gasto_emp_display,
-              status_emoji=_status_or_none(gasto_emp_status),
-              extra_tip="Gasto c/ Empréstimos (R$ | % da Receita Líquida). Mede o peso das parcelas pagas (principal + juros) sobre a Receita Líquida do mês."),
-        _chip("Dívida (Estoque)", _fmt_brl(m["divida_estoque"]), extra_tip="Índice de Endividamento"),
-        _chip("Índice de Endividamento (%)", _fmt_pct(m["indice_endividamento_pct"])),
+              status_emoji=_status_or_none(gasto_emp_status)),
+        _chip("Dívida (Estoque)", divida_display,
+              status_emoji=_status_or_none(divida_status)),
+        _chip("Índice de Endividamento (%)", indice_display,
+              status_emoji=_status_or_none(indice_status)),
     ], "k-fluxo"))
 
     cards_html.append(_card("Crescimento e Vendas", [
