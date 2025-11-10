@@ -1887,8 +1887,6 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               status_emoji=_status_or_none(gasto_emp_status)),
         _chip("Dívida (Estoque)", divida_display,
               status_emoji=_status_or_none(divida_status)),
-        _chip("Índice de Endividamento (%)", indice_display,
-              status_emoji=_status_or_none(indice_status)),
     ], "k-fluxo"))
 
     cards_html.append(_card("Crescimento e Vendas", [
@@ -1953,7 +1951,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Margem de Segurança (%)","Eficiência Operacional (%)","Relação Saídas/Entradas (%)"
         ],
         "Fluxo e Endividamento": [
-            "Gasto com Empréstimos/Financiamentos","Índice de Endividamento (%)"
+            "Gasto com Empréstimos/Financiamentos","Dívida (Estoque)"
         ],
         "Crescimento e Vendas": [
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
@@ -2047,6 +2045,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "EBIT": m["ebit"],
             "EBITDA Lucro/Prejuízo": m["ebitda"],
             "Lucro Líquido": m["lucro_liq"],
+            "Dívida (Estoque)": m["divida_estoque"],
         }
 
         overrides_pct = {
@@ -2060,7 +2059,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Eficiência Operacional (%)": m["eficiencia_oper_pct"],
             "Relação Saídas/Entradas (%)": m["rel_saida_entrada_pct"],
             "Gasto com Empréstimos/Financiamentos": m["emp_pct_sobre_receita"],
-            "Índice de Endividamento (%)": m["indice_endividamento_pct"],
+            "Dívida (Estoque)": m["indice_endividamento_pct"],
             "Crescimento de Receita (m/m) (%)": crec_pct,
             "ROE (%)": m["roe_pct"],
             "ROI (%)": m["roi_pct"],
@@ -2073,7 +2072,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
                 df.loc[r, (meses[i], "Análise Vertical")] = None
                 continue
 
-            if r == "Índice de Endividamento (%)":
+            if r == "Dívida (Estoque)":
                 df.loc[r, (meses[i], "Valores R$")] = m["divida_estoque"]
             else:
                 df.loc[r, (meses[i], "Valores R$")] = vals.get(r, None)
@@ -2149,7 +2148,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Relação Saídas/Entradas (%)"
         ],
         "Fluxo e Endividamento": [
-            "Gasto com Empréstimos/Financiamentos","Índice de Endividamento (%)"
+            "Gasto com Empréstimos/Financiamentos","Dívida (Estoque)"
         ],
         "Crescimento e Vendas": [
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
