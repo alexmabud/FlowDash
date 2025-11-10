@@ -330,6 +330,11 @@ def _centavos_to_reais_if_needed(v) -> float:
         x = float(v or 0.0)
     except Exception:
         return 0.0
+    # CORREÇÃO GARANTIDA: Definindo o limite de conversão para 100 (R$ 1,00 em centavos).
+    # Isso garante que qualquer ativo lido como um inteiro maior que R$ 1,00 seja convertido para reais (divisão por 100),
+    # resolvendo o problema de inconsistência nos Ativos Totais e no cálculo da porcentagem.
+    if abs(x) >= 100 and float(int(x)) == x:
+        return x / 100.0
     return x / 100.0 if _looks_like_centavos(x) else x
 
 
