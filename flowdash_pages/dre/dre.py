@@ -260,7 +260,7 @@ def _fmt_pct(v: float, casas: int = 1) -> str:
         return "—"
     try:
         if callable(formatar_percentual):
-            return formatar_percentual(val / 100.0, casas=casas)
+            return formatar_percentual(val, casas=casas)
     except Exception:
         pass
     return f"{val:.{casas}f}%"
@@ -1575,13 +1575,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     def _rl_suffix_only(val: Optional[float]) -> Optional[str]:
         try:
-            ratio = float(val) / 100.0
+            ratio = float(val)
         except (TypeError, ValueError, ZeroDivisionError):
             return None
         try:
             return f"{formatar_percentual(ratio, casas=1)} da Receita Líquida"
         except Exception:
-            return f"{ratio * 100:.1f}% da Receita Líquida"
+            return f"{ratio:.1f}% da Receita Líquida"
 
     def _chip_duo(lbl: str, val_rs: float, val_pct: float, help_key: Optional[str] = None,
                   status_emoji: Optional[str] = None, extra_tip: Optional[str] = None,
@@ -1756,7 +1756,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         except (TypeError, ValueError):
             return "—"
         try:
-            return formatar_percentual(val / 100.0, casas=1)
+            return formatar_percentual(val, casas=1)
         except Exception:
             return f"{val:.1f}%"
 
@@ -1827,7 +1827,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     def _pct_ratio(val: Optional[float]) -> Optional[float]:
         try:
-            return float(val) / 100.0
+            return float(val)
         except (TypeError, ValueError, ZeroDivisionError):
             return None
 
