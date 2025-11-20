@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import json
 import sqlite3
 from typing import Optional, Tuple, List, Callable, Dict, Any
 import html as _html
@@ -41,61 +40,62 @@ def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
             return p
     raise FileNotFoundError("Nenhum banco encontrado. Defina st.session_state['db_path'].")
 
-# ============== Persistência leve de UI (JSON) ==============
-_UI_PREFS_PATH = os.path.join("data", "flowdash_ui_prefs.json")
-
-def _ui_prefs_path_for(db_path: Optional[str]) -> str:
-    """Caminho do JSON ancorado ao diretório do banco (retrocompatível)."""
-    try:
-        if db_path and isinstance(db_path, str) and db_path.strip():
-            base = os.path.dirname(os.path.abspath(db_path))
-            return os.path.join(base, "flowdash_ui_prefs.json")
-    except Exception:
-        pass
-    return _UI_PREFS_PATH
-
-def _ensure_data_dir() -> None:
-    os.makedirs("data", exist_ok=True)
-
 def _load_ui_prefs(db_path: Optional[str] = None) -> Dict[str, Any]:
-    """Carrega preferências mesclando arquivo ao lado do DB e o legado em data/."""
-    data_db: Dict[str, Any] = {}
-    data_old: Dict[str, Any] = {}
+    """Carrega preferências diretamente do banco (dre_variaveis)."""
+    prefs: Dict[str, Any] = {}
     try:
-        p = _ui_prefs_path_for(db_path)
-        if os.path.exists(p):
-            with open(p, "r", encoding="utf-8") as f:
-                data_db = json.load(f) or {}
+        path = _ensure_db_path_or_raise(db_path)
+        conn = _connect(path)
+        _ensure_table(conn)
+        rows = conn.execute(
+            "SELECT chave, tipo, valor_num, valor_text FROM dre_variaveis"
+        ).fetchall()
+        for r in rows:
+            chave = _canon_key(r["chave"])
+            if not chave:
+                continue
+            tipo = (r["tipo"] or "").strip().lower()
+            if tipo == "num":
+                prefs[chave] = float(r["valor_num"] or 0.0)
+            elif tipo == "bool":
+                prefs[chave] = str(r["valor_text"]).strip().lower() in ("true", "1", "yes", "y", "sim")
+            else:
+                prefs[chave] = r["valor_text"]
     except Exception:
         pass
-    try:
-        if os.path.exists(_UI_PREFS_PATH):
-            with open(_UI_PREFS_PATH, "r", encoding="utf-8") as f:
-                data_old = json.load(f) or {}
-    except Exception:
-        pass
-    merged = dict(data_old)
-    merged.update(data_db)
-    return merged
+    return prefs
 
 def _save_ui_prefs(prefs: Dict[str, Any], db_path: Optional[str] = None) -> None:
-    """Salva nas duas localizações para evitar desencontros entre páginas."""
+    """Persiste chaves permitidas diretamente em dre_variaveis (sem JSON)."""
     try:
-        t = _ui_prefs_path_for(db_path)
-        os.makedirs(os.path.dirname(t), exist_ok=True)
-        with open(t, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
-    try:
-        _ensure_data_dir()
-        with open(_UI_PREFS_PATH, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, ensure_ascii=False, indent=2)
+        path = _ensure_db_path_or_raise(db_path)
+        conn = _connect(path)
+        _ensure_table(conn)
+        for k, v in prefs.items():
+            tipo = "text"
+            num_val: Optional[float] = None
+            text_val: Optional[str] = None
+            if isinstance(v, (int, float)):
+                tipo = "num"
+                num_val = float(v)
+            elif isinstance(v, date):
+                tipo = "text"
+                text_val = v.strftime("%Y-%m-%d")
+            elif isinstance(v, bool):
+                tipo = "bool"
+                text_val = "true" if v else "false"
+            elif v is None:
+                tipo = "num"
+                num_val = 0.0
+            else:
+                tipo = "text"
+                text_val = str(v)
+            _upsert_allowed(conn, k, tipo, num_val, text_val, "")
     except Exception:
         pass
 
 def _persist_keys_to_json(keys: List[str], db_path: Optional[str] = None) -> None:
-    """Salva imediatamente no JSON os valores atuais no session_state para as chaves pedidas."""
+    """Mantida por compatibilidade: agora persiste no DB, não em JSON."""
     prefs = _load_ui_prefs(db_path)
     for k in keys:
         v = st.session_state.get(k)
@@ -106,7 +106,7 @@ def _persist_keys_to_json(keys: List[str], db_path: Optional[str] = None) -> Non
     _save_ui_prefs(prefs, db_path)
 
 def _on_change_persist(*keys: str, db_path: Optional[str] = None) -> Callable[[], None]:
-    """Factory de callback para st.number_input / st.date_input que persiste no JSON ao mudar."""
+    """Factory de callback para st.number_input / st.date_input que persiste no DB ao mudar."""
     def _cb():
         _persist_keys_to_json(list(keys), db_path=db_path)
     return _cb
@@ -212,16 +212,22 @@ def _upsert(conn: sqlite3.Connection, chave: str, tipo: str,
 
 # ====== Variáveis que PODEM ser gravadas no DB (somente as 8 pedidas) ======
 _ALLOWED_KEYS = {
+    # calculados e bases do DRE
     "ativos_totais_base",
     "patrimonio_liquido_base",
     "investimento_total_base",
     "depreciacao_mensal_padrao",
+    # entradas de cadastro
     "fundo_promocao_percent",
     "sacolas_percent",
     "markup_medio",
     "aliquota_simples_nacional",
+    # imobilizado / depreciação
     "pl_imobilizado_valor_total",
     "dep_taxa_mensal_percent_live",
+    # estoque base
+    "dre_estoque_inicial_live",
+    "dre_data_corte_live",
 }
 
 def _upsert_allowed(conn: sqlite3.Connection, chave: str, tipo: str,
