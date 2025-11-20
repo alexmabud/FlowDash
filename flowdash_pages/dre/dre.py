@@ -409,16 +409,28 @@ def _ativos_totais_calc(db_path: str) -> float:
             _get_total_consolidado_bancos_caixa as _bancos_total,
             _load_ui_prefs as _load_prefs,
         )
-        est = _centavos_to_reais_if_needed(_estoque_est(db_path) or 0.0)
+        # Carrega valores brutos
+        est = float(_estoque_est(db_path) or 0.0)
         with _conn(db_path) as c:
             bt, _ = _bancos_total(c, db_path)
-        bt = _centavos_to_reais_if_needed(bt)
+        bt = float(bt or 0.0)
+
         prefs = _load_prefs(db_path) or {}
-        imob = _as_reais(_safe(prefs.get("pl_imobilizado_valor_total")))
+        imob = _safe(prefs.get("pl_imobilizado_valor_total"))
         if imob in (None, 0.0):
-            # fallback para o que estiver persistido no DB
-            imob = _as_reais(_get_var(db_path, "pl_imobilizado_valor_total", default=0.0))
-        return float(bt or 0.0) + float(est or 0.0) + float(imob or 0.0)
+            imob = _get_var(db_path, "pl_imobilizado_valor_total", default=0.0)
+        imob = float(imob or 0.0)
+
+        # Soma bruta
+        total = bt + est + imob
+
+        # CORREÇÃO DE GRANDEZA (Centavos -> Reais)
+        # Se o valor for > 1.000.000, assume-se que veio em centavos do DB/Cálculos anteriores
+        # e divide-se por 100 para ajustar para Reais.
+        if total > 1000000:
+            total = total / 100.0
+
+        return total
     except Exception:
         return 0.0
 
@@ -1374,19 +1386,13 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str
 
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
-    # Garante dados frescos no primeiro load da sessão (evita depender de abrir Variáveis antes)
-    if not st.session_state.get("_dre_cache_busted_once"):
-        try:
-            st.cache_data.clear()
-        except Exception:
-            pass
-        st.session_state["_dre_cache_busted_once"] = True
-    caminho_banco = _ensure_db_path_or_raise(caminho_banco)
-    # limpa cache de dados para evitar "valor muda depois que entra na outra página"
+    # Força limpeza de cache para garantir dados frescos ao trocar de página
     try:
         st.cache_data.clear()
     except Exception:
         pass
+
+    caminho_banco = _ensure_db_path_or_raise(caminho_banco)
     db_resolved = os.path.abspath(caminho_banco)
     prev = st.session_state.get("db_path")
     if prev != db_resolved:
