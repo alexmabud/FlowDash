@@ -402,7 +402,7 @@ def _as_reais(v) -> float:
     return x / 100.0 if _looks_like_centavos(x) else x
 
 def _ativos_totais_calc(db_path: str) -> float:
-    """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados componente a componente."""
+    """Retorna Bancos+Caixa + Estoque + Imobilizado, normalizando CADA item individualmente para Reais antes de somar."""
     try:
         from flowdash_pages.cadastros.variaveis_dre import (
             get_estoque_atual_estimado as _estoque_est,
@@ -410,25 +410,26 @@ def _ativos_totais_calc(db_path: str) -> float:
             _load_ui_prefs as _load_prefs,
         )
         
-        # 1. Estoque (normaliza individualmente)
+        # 1. Estoque: Carrega e normaliza
         est_raw = float(_estoque_est(db_path) or 0.0)
-        est = _as_reais(est_raw)
+        est = est_raw / 100.0 if _looks_like_centavos(est_raw) else est_raw
 
-        # 2. Bancos (normaliza individualmente)
+        # 2. Bancos: Carrega e normaliza
         with _conn(db_path) as c:
             bt_raw, _ = _bancos_total(c, db_path)
-        bt = _as_reais(float(bt_raw or 0.0))
+        bt_val = float(bt_raw or 0.0)
+        bt = bt_val / 100.0 if _looks_like_centavos(bt_val) else bt_val
         
-        # 3. Imobilizado (normaliza individualmente)
+        # 3. Imobilizado: Carrega e normaliza
         prefs = _load_prefs(db_path) or {}
         imob_raw = _safe(prefs.get("pl_imobilizado_valor_total"))
         if imob_raw in (None, 0.0):
             imob_raw = _get_var(db_path, "pl_imobilizado_valor_total", default=0.0)
-        imob = _as_reais(float(imob_raw or 0.0))
+        imob_val = float(imob_raw or 0.0)
+        imob = imob_val / 100.0 if _looks_like_centavos(imob_val) else imob_val
 
-        # Soma dos valores já corrigidos
-        total = bt + est + imob
-        return total
+        # Soma apenas valores já garantidos em Reais
+        return bt + est + imob
     except Exception:
         return 0.0
 
