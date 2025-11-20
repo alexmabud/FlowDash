@@ -446,8 +446,9 @@ def _ativos_totais_calc(db_path: str) -> float:
         # Soma final
         total = bt + est + imob
         return total
-    except Exception:
-        return 0.0
+    except Exception as err:
+        logger.error("Ativos Totais (calc) falhou: %s", err, exc_info=True)
+        raise
 
 
 def _competencia_periodo(yyyy_mm: str) -> Tuple[str, str, str]:
@@ -1321,16 +1322,9 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         ativos_totais_rt = 0.0
         ativos_totais_warning = f"Não foi possível calcular Ativos Totais em tempo real ({err})."
 
-    ativos_totais_fallback = False
-    if not ativos_totais_rt:
-        ativos_totais_fallback = True
-        fallback_val = _as_reais(_safe(vars_dre.atv_base))
-        ativos_totais_rt = fallback_val
-        if fallback_val <= 0:
-            ativos_totais_warning = (ativos_totais_warning or "") + " Valor salvo em 'Ativos Totais (base)' também está zerado."
-        else:
-            fallback_msg = "Usando o valor salvo em 'Ativos Totais (base)' porque o cálculo em tempo real não retornou."
-            ativos_totais_warning = fallback_msg if not ativos_totais_warning else f"{ativos_totais_warning} {fallback_msg}"
+    if not ativos_totais_rt or ativos_totais_rt <= 0:
+        warning_msg = "Ativos Totais em tempo real não retornaram valor válido; índice de endividamento será 0 até corrigir os dados de bancos/estoque/imobilizado."
+        ativos_totais_warning = warning_msg if not ativos_totais_warning else f"{ativos_totais_warning} {warning_msg}"
 
     indice_endividamento_pct = (divida_estoque_rs / ativos_totais_rt * 100.0) if ativos_totais_rt > 0 else 0.0
 
@@ -1390,7 +1384,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         "indice_endividamento_pct": indice_endividamento_pct,
         "ativos_totais_rt": ativos_totais_rt,
         "ativos_totais_warning": ativos_totais_warning,
-        "ativos_totais_fallback": ativos_totais_fallback,
 
         # avançados
         "dep_extra": dep_extra,
