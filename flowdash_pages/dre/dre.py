@@ -402,34 +402,32 @@ def _as_reais(v) -> float:
     return x / 100.0 if _looks_like_centavos(x) else x
 
 def _ativos_totais_calc(db_path: str) -> float:
-    """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados."""
+    """Retorna Bancos+Caixa (consolidado) + Estoque atual (estimado) + Imobilizado (prefs/variáveis), já normalizados componente a componente."""
     try:
         from flowdash_pages.cadastros.variaveis_dre import (
             get_estoque_atual_estimado as _estoque_est,
             _get_total_consolidado_bancos_caixa as _bancos_total,
             _load_ui_prefs as _load_prefs,
         )
-        # Carrega valores brutos
-        est = float(_estoque_est(db_path) or 0.0)
+        
+        # 1. Estoque (normaliza individualmente)
+        est_raw = float(_estoque_est(db_path) or 0.0)
+        est = _as_reais(est_raw)
+
+        # 2. Bancos (normaliza individualmente)
         with _conn(db_path) as c:
-            bt, _ = _bancos_total(c, db_path)
-        bt = float(bt or 0.0)
-
+            bt_raw, _ = _bancos_total(c, db_path)
+        bt = _as_reais(float(bt_raw or 0.0))
+        
+        # 3. Imobilizado (normaliza individualmente)
         prefs = _load_prefs(db_path) or {}
-        imob = _safe(prefs.get("pl_imobilizado_valor_total"))
-        if imob in (None, 0.0):
-            imob = _get_var(db_path, "pl_imobilizado_valor_total", default=0.0)
-        imob = float(imob or 0.0)
+        imob_raw = _safe(prefs.get("pl_imobilizado_valor_total"))
+        if imob_raw in (None, 0.0):
+            imob_raw = _get_var(db_path, "pl_imobilizado_valor_total", default=0.0)
+        imob = _as_reais(float(imob_raw or 0.0))
 
-        # Soma bruta
+        # Soma dos valores já corrigidos
         total = bt + est + imob
-
-        # CORREÇÃO DE GRANDEZA (Centavos -> Reais)
-        # Se o valor for > 1.000.000, assume-se que veio em centavos do DB/Cálculos anteriores
-        # e divide-se por 100 para ajustar para Reais.
-        if total > 1000000:
-            total = total / 100.0
-
         return total
     except Exception:
         return 0.0
@@ -1226,7 +1224,7 @@ def _listar_anos(db_path: str) -> List[int]:
 
 # ============================== Cálculo por mês ==============================
 @st.cache_data(show_spinner=False)
-def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE") -> Dict[str, float]:
+def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float = 0.0) -> Dict[str, float]:
     ini, fim, comp = _periodo_ym(ano, mes)
 
     fat, taxa_maq_rs, n_vendas = _query_entradas(db_path, ini, fim)
@@ -1596,7 +1594,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     def _card(title: str, chips: List[str], cls: str) -> str:
         return f'<div class="cap-card {cls}"><div class="cap-title-xl">{title}</div><div class="fd-card-body">{"".join(chips)}</div></div>'
 
-    m = _calc_mes(db_path, ano, mes, vars_dre)
+    m = _calc_mes(db_path, ano, mes, vars_dre, _ts=pd.Timestamp.now().timestamp())
     ativos_totais_warning = (m.get("ativos_totais_warning") or "").strip()
     if ativos_totais_warning:
         st.warning(ativos_totais_warning)
@@ -2009,7 +2007,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
 
     for i, mes in enumerate(range(1, 12 + 1), start=0):
         pre_start = (ano < START_YEAR) or (ano == START_YEAR and mes < START_MONTH)
-        m = _calc_mes(db_path, ano, mes, vars_dre)
+        m = _calc_mes(db_path, ano, mes, vars_dre, _ts=pd.Timestamp.now().timestamp())
         fat = m["fat"]
         fixas_rs = _safe(m.get("fixas"))
 
