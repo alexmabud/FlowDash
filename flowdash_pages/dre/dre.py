@@ -402,7 +402,11 @@ def _as_reais(v) -> float:
     return x / 100.0 if _looks_like_centavos(x) else x
 
 def _ativos_totais_calc(db_path: str) -> float:
-    """Retorna Bancos+Caixa + Estoque + Imobilizado, normalizando CADA item individualmente para Reais antes de somar."""
+    """
+    Calcula Ativos Totais com normalização agressiva.
+    Se qualquer componente (Bancos, Estoque, Imobilizado) for > 1.000.000,
+    assume-se erro de escala (centavos) e divide por 100.
+    """
     try:
         from flowdash_pages.cadastros.variaveis_dre import (
             get_estoque_atual_estimado as _estoque_est,
@@ -410,26 +414,38 @@ def _ativos_totais_calc(db_path: str) -> float:
             _load_ui_prefs as _load_prefs,
         )
         
-        # 1. Estoque: Carrega e normaliza
-        est_raw = float(_estoque_est(db_path) or 0.0)
-        est = est_raw / 100.0 if _looks_like_centavos(est_raw) else est_raw
+        # Função local para normalização forçada
+        def _force_norm(val):
+            try:
+                v = float(val or 0.0)
+                # SE O VALOR FOR MAIOR QUE 1 MILHÃO, DIVIDE POR 100
+                # Isso corrige o erro onde 6.800.000 (centavos) entra como 6.8M Reais
+                if abs(v) > 1000000: 
+                    return v / 100.0
+                return v
+            except:
+                return 0.0
 
-        # 2. Bancos: Carrega e normaliza
+        # 1. Estoque
+        est_raw = _estoque_est(db_path)
+        est = _force_norm(est_raw)
+
+        # 2. Bancos e Caixa
         with _conn(db_path) as c:
             bt_raw, _ = _bancos_total(c, db_path)
-        bt_val = float(bt_raw or 0.0)
-        bt = bt_val / 100.0 if _looks_like_centavos(bt_val) else bt_val
+        bt = _force_norm(bt_raw)
         
-        # 3. Imobilizado: Carrega e normaliza
+        # 3. Imobilizado (tenta pegar do JSON atualizado primeiro)
         prefs = _load_prefs(db_path) or {}
-        imob_raw = _safe(prefs.get("pl_imobilizado_valor_total"))
-        if imob_raw in (None, 0.0):
+        imob_raw = prefs.get("pl_imobilizado_valor_total")
+        if imob_raw in (None, "", 0, 0.0):
+            # Se não achou no JSON, tenta no DB
             imob_raw = _get_var(db_path, "pl_imobilizado_valor_total", default=0.0)
-        imob_val = float(imob_raw or 0.0)
-        imob = imob_val / 100.0 if _looks_like_centavos(imob_val) else imob_val
+        imob = _force_norm(imob_raw)
 
-        # Soma apenas valores já garantidos em Reais
-        return bt + est + imob
+        # Soma final
+        total = bt + est + imob
+        return total
     except Exception:
         return 0.0
 
@@ -1385,6 +1401,7 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
 
 # ============================== UI / Página ==============================
 def render_dre(caminho_banco: Optional[str]):
+    st.cache_data.clear()
     # Força limpeza de cache para garantir dados frescos ao trocar de página
     try:
         st.cache_data.clear()
