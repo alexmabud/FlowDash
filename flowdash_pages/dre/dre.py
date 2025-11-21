@@ -1271,7 +1271,13 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
     margem_contrib  = receita_liq - total_var
     lucro_bruto     = receita_liq - cmv_rs
 
-    total_oper_fixo_extra = compute_total_saida_operacional(ano, mes, db_path)
+    # --- NOVO CÁLCULO DE OPEX (alinhado com os chips) ---
+    competencia_mes = f"{ano:04d}-{mes:02d}"
+    custos_fixos_kpi = calc_custos_fixos(competencia_mes)
+    despesas_operacionais_kpi = calc_despesas_operacionais(competencia_mes)
+    total_oper_fixo_extra = _safe(custos_fixos_kpi) + _safe(despesas_operacionais_kpi)
+    # -----------------------------------------------------
+
     total_cf_emprestimos = total_oper_fixo_extra + emp_rs
     total_saida_oper     = total_oper_fixo_extra + total_var
 
