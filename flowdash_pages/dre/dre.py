@@ -1363,6 +1363,15 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
 
     indice_endividamento_pct = (divida_estoque_rs / ativos_totais_rt * 100.0) if ativos_totais_rt > 0 else 0.0
 
+    print(
+        "[DRE-OPEX-DEBUG]",
+        {
+            "custos_fixos_kpi": custos_fixos_kpi,
+            "despesas_operacionais_kpi": despesas_operacionais_kpi,
+            "total_oper_fixo_extra": total_oper_fixo_extra,
+        },
+    )
+
     return {
         # básicos/estruturais
         "fat": fat,
