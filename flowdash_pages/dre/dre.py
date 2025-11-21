@@ -1318,6 +1318,35 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
     margem_contrib_pct = _nz_div(margem_contrib, rl)
     custo_fixo_sobre_receita_pct = _nz_div(fixas_rs, rl)
 
+    # === DEBUG EBITDA / OPEX ===
+    opex_esperado = _safe(custos_fixos_kpi) + _safe(despesas_operacionais_kpi)
+    ebitda_esperado = margem_contrib - opex_esperado
+    diferenca = ebitda_esperado - ebitda_base
+    print(
+        "[DRE DEBUG]",
+        {
+            "ano": ano,
+            "mes": mes,
+            "fat": fat,
+            "simples_rs": simples_rs,
+            "taxa_maq_rs": taxa_maq_rs,
+            "receita_liq": rl,
+            "cmv_rs": cmv_rs,
+            "sacolas_rs": sacolas_rs,
+            "fundo_rs": fundo_rs,
+            "total_var": total_var,
+            "margem_contrib": margem_contrib,
+            "custos_fixos_kpi": custos_fixos_kpi,
+            "despesas_operacionais_kpi": despesas_operacionais_kpi,
+            "total_oper_fixo_extra": total_oper_fixo_extra,
+            "opec_esperado": opex_esperado,
+            "emp_rs": emp_rs,
+            "ebitda_base": ebitda_base,
+            "ebitda_esperado": ebitda_esperado,
+            "diferenca": diferenca,
+        },
+    )
+
     # Dívida (estoque) e índice calculado com Ativos Totais em tempo real (independe da outra página)
     divida_estoque_rs = _as_reais(_query_divida_estoque(db_path))
     ativos_totais_warning = None
