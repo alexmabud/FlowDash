@@ -357,6 +357,69 @@ def _status_dot_range(pct: Optional[float], green_max: float, yellow_max: float)
     return "🟢" if v <= green_max else ("🟡" if v <= yellow_max else "🔴")
 
 
+def _lucro_liquido_status(pct):
+    """Retorna o emoji de status para o Lucro Líquido (% da Receita Líquida)."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(v):
+        return "⚪"
+    if v >= 5.0:
+        return "🟢"
+    if v >= 0.0:
+        return "🟡"
+    return "🔴"
+
+
+def _roe_status(pct):
+    """Status do ROE (%)."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(v):
+        return "⚪"
+    # Patrimônio líquido negativo ou zero → não faz sentido ROE → vermelho
+    if v <= 0.0:
+        return "🔴"
+    if v < 5.0:
+        return "🔴"
+    if v < 15.0:
+        return "🟡"
+    return "🟢"
+
+
+def _roi_status(pct):
+    """Status do ROI (%)."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(v):
+        return "⚪"
+    if v < 0.0:
+        return "🔴"
+    if v < 10.0:
+        return "🟡"
+    return "🟢"
+
+
+def _roa_status(pct):
+    """Status do ROA (%)."""
+    try:
+        v = float(pct)
+    except (TypeError, ValueError):
+        return "⚪"
+    if math.isnan(v):
+        return "⚪"
+    if v < 0.0:
+        return "🔴"
+    if v < 5.0:
+        return "🟡"
+    return "🟢"
+
+
 def _linha_reais_pct(valor_rs: Optional[float], pct: Optional[float],
                      base_label: str, fmt_moeda, fmt_pct) -> str:
     """Formata 'R$ valor | pct base' usando os formatadores fornecidos."""
@@ -1322,30 +1385,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
     opex_esperado = _safe(custos_fixos_kpi) + _safe(despesas_operacionais_kpi)
     ebitda_esperado = margem_contrib - opex_esperado
     diferenca = ebitda_esperado - ebitda_base
-    print(
-        "[DRE DEBUG]",
-        {
-            "ano": ano,
-            "mes": mes,
-            "fat": fat,
-            "simples_rs": simples_rs,
-            "taxa_maq_rs": taxa_maq_rs,
-            "receita_liq": rl,
-            "cmv_rs": cmv_rs,
-            "sacolas_rs": sacolas_rs,
-            "fundo_rs": fundo_rs,
-            "total_var": total_var,
-            "margem_contrib": margem_contrib,
-            "custos_fixos_kpi": custos_fixos_kpi,
-            "despesas_operacionais_kpi": despesas_operacionais_kpi,
-            "total_oper_fixo_extra": total_oper_fixo_extra,
-            "opec_esperado": opex_esperado,
-            "emp_rs": emp_rs,
-            "ebitda_base": ebitda_base,
-            "ebitda_esperado": ebitda_esperado,
-            "diferenca": diferenca,
-        },
-    )
 
     # Dívida (estoque) e índice calculado com Ativos Totais em tempo real (independe da outra página)
     divida_estoque_rs = _as_reais(_query_divida_estoque(db_path))
@@ -1362,15 +1401,6 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         ativos_totais_warning = warning_msg if not ativos_totais_warning else f"{ativos_totais_warning} {warning_msg}"
 
     indice_endividamento_pct = (divida_estoque_rs / ativos_totais_rt * 100.0) if ativos_totais_rt > 0 else 0.0
-
-    print(
-        "[DRE-OPEX-DEBUG]",
-        {
-            "custos_fixos_kpi": custos_fixos_kpi,
-            "despesas_operacionais_kpi": despesas_operacionais_kpi,
-            "total_oper_fixo_extra": total_oper_fixo_extra,
-        },
-    )
 
     return {
         # básicos/estruturais
@@ -1540,6 +1570,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     unsafe_allow_html=True,
 )
 
+    tooltip_lucro_liquido = (
+        "Lucro Líquido\n"
+        "Resultado final após todos os custos, despesas operacionais, depreciação e gastos com empréstimos. "
+        "| Serve para: mostrar se a operação da loja + estrutura de dívidas está gerando ganho real ou prejuízo no mês.\n\n"
+        "🟢 Maior ou igual a 5% da Receita Líquida · 🟡 Entre 0% e 5% da Receita Líquida · 🔴 Menor que 0% (prejuízo)"
+    )
+
     HELP: Dict[str, str] = {
         "Receita Bruta": "Total vendido no período, antes de impostos e taxas. | Serve para: medir o volume total de vendas antes de qualquer dedução (base para metas e sazonalidade).",
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
@@ -1579,7 +1616,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Crescimento de Receita (m/m)": "Variação do faturamento comparado ao mês anterior.",
         "EBITDA": "EBITDA (R$ | %RL) = MC - OPEX. %EBITDA = EBITDA / RL. Mede geração de caixa operacional antes de depreciação e efeitos financeiros.",
         "EBIT": "EBIT (R$ | %RL) = EBITDA - Depreciação. %EBIT = EBIT / RL (Margem Operacional). Exclui juros/IOF, CAPEX e impostos sobre lucro.",
-        "Lucro Líquido": "Resultado final do período após despesas financeiras e impostos (quando aplicável). | Serve para: mostrar o quanto efetivamente sobrou no mês, após todos os custos, despesas e encargos. No Simples Nacional, representa o EBIT menos os gastos com empréstimos e juros.",
+        "Lucro Líquido": tooltip_lucro_liquido,
         "ROE": "Retorno do lucro sobre o patrimônio líquido.",
         "ROI": "Retorno do lucro sobre o investimento total.",
         "ROA": "Retorno do lucro sobre os ativos totais.",
@@ -1686,6 +1723,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     total_saida_operacional_val = _safe(total_saida_operacional)
 
     custo_fixo_rl_pct_val = _derive_pct(fixas_rs, receita_liq_val)
+    lucro_liq_rs = _safe(m.get("lucro_liq"))
+    lucro_liq_pct_rl = _derive_pct(lucro_liq_rs, receita_liq_val)
 
     # >>> BLOCO NOVO / SUBSTITUI QUALQUER CÁLCULO ATUAL DE PE CONTÁBIL/FINANCEIRO <<<
     custos_fixos_val = fixas_rs
@@ -1858,6 +1897,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     status_margem_operacional = _chip_status("margem_operacional", margem_operacional_pct_val)
     status_margem_liquida = _chip_status("margem_liquida", margem_liquida_pct_val)
     status_margem_contrib = _chip_status("margem_contribuicao", margem_contrib_pct_val)
+    lucro_liq_status = _lucro_liquido_status(lucro_liq_pct_rl)
+    roe_pct_val = _safe(m.get("roe_pct"))
+    roi_pct_val = _safe(m.get("roi_pct"))
+    roa_pct_val = _safe(m.get("roa_pct"))
+    roe_status = _roe_status(roe_pct_val)
+    roi_status = _roi_status(roi_pct_val)
+    roa_status = _roa_status(roa_pct_val)
 
     def _status_or_none(v: Optional[str]) -> Optional[str]:
         return v if v and v != "⚪" else None
@@ -1876,6 +1922,27 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
             return formatar_percentual(ratio, casas=1)
         except Exception:
             return None
+
+    roe_help = (
+        "Retorno do Lucro Líquido sobre o Patrimônio Líquido (calc.). "
+        "| Serve para: mostrar quanto o negócio rende em relação ao capital próprio do dono "
+        "(o que é realmente da empresa, depois de descontar as dívidas).\n\n"
+        "🟢 Maior ou igual a 15% · 🟡 Entre 5% e 15% · 🔴 Menor que 5% ou Patrimônio Líquido ≤ 0"
+    )
+
+    roi_help = (
+        "Retorno do Lucro Líquido sobre o Investimento Total (base). "
+        "| Serve para: mostrar quanto o negócio devolve de retorno sobre tudo que já foi colocado nele "
+        "(investimento inicial + aportes).\n\n"
+        "🟢 Maior ou igual a 10% · 🟡 Entre 0% e 10% · 🔴 Menor que 0% (destrói valor investido)"
+    )
+
+    roa_help = (
+        "Retorno do Lucro Líquido sobre os Ativos Totais (calc.). "
+        "| Serve para: mostrar quão eficientes são os ativos da empresa "
+        "(bancos, caixa, estoque e imobilizado) para gerar lucro.\n\n"
+        "🟢 Maior ou igual a 5% · 🟡 Entre 0% e 5% · 🔴 Menor que 0%"
+    )
 
     cards_html.append(_card("Estruturais", [
         _chip("Receita Bruta", _fmt_brl(m["fat"])),
@@ -1962,11 +2029,15 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     ebitda_display = _fmt_brl(m["ebitda"])
     if margem_ebitda_ratio is not None:
-        ebitda_display = f"{ebitda_display} | {formatar_percentual(margem_ebitda_ratio, casas=1)} da RL"
+        ebitda_display = f"{ebitda_display} | {formatar_percentual(margem_ebitda_ratio, casas=1)} da Receita Líquida"
 
     ebit_display = _fmt_brl(m["ebit"])
     if margem_operacional_ratio is not None:
-        ebit_display = f"{ebit_display} | {formatar_percentual(margem_operacional_ratio, casas=1)} da RL"
+        ebit_display = f"{ebit_display} | {formatar_percentual(margem_operacional_ratio, casas=1)} da Receita Líquida"
+
+    lucro_liq_display = _fmt_brl(m["lucro_liq"])
+    if margem_liquida_pct_val is not None:
+        lucro_liq_display = f"{lucro_liq_display} | {formatar_percentual(margem_liquida_pct_val, casas=1)} da Receita Líquida"
 
     cards_html.append(_card("Avançados", [
         _chip("EBITDA", ebitda_display,
@@ -1975,10 +2046,29 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         _chip("EBIT", ebit_display,
               status_emoji=_status_or_none(status_margem_operacional),
               extra_tip=FAIXAS_HELP["margem_operacional"]),
-        _chip("Lucro Líquido", _fmt_brl(m["lucro_liq"])),
-        _chip("ROE", _fmt_pct(m["roe_pct"])),
-        _chip("ROI", _fmt_pct(m["roi_pct"])),
-        _chip("ROA", _fmt_pct(m["roa_pct"])),
+        _chip(
+            "Lucro Líquido",
+            lucro_liq_display,
+            status_emoji=_status_or_none(status_margem_liquida),
+        ),
+        _chip(
+            "ROE",
+            _fmt_pct(m["roe_pct"]),
+            status_emoji=_status_or_none(roe_status),
+            extra_tip=roe_help,
+        ),
+        _chip(
+            "ROI",
+            _fmt_pct(m["roi_pct"]),
+            status_emoji=_status_or_none(roi_status),
+            extra_tip=roi_help,
+        ),
+        _chip(
+            "ROA",
+            _fmt_pct(m["roa_pct"]),
+            status_emoji=_status_or_none(roa_status),
+            extra_tip=roa_help,
+        ),
     ], "k-avanc"))
 
     st.markdown('<div class="fd-grid">' + "".join(cards_html) + '</div>', unsafe_allow_html=True)
@@ -2006,14 +2096,14 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
         ],
         "Margens": [
-            "Margem Bruta (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
+            "Margem Bruta (%)","Margem EBITDA (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
         ],
         "Eficiência e Gestão": [
             "Custo Fixo Mensal","Ponto de Equilíbrio (Contábil)","Ponto de Equilíbrio Financeiro",
             "Margem de Segurança (%)","Eficiência Operacional (%)","Relação Saídas/Entradas (%)"
         ],
         "Fluxo e Endividamento": [
-            "Gasto com Empréstimos/Financiamentos","Dívida (Estoque)"
+            "Gasto com Empréstimos/Financiamentos","Dívida (Estoque)",
         ],
         "Crescimento e Vendas": [
             "Ticket Médio","Crescimento de Receita (m/m) (%)"
@@ -2112,6 +2202,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
 
         overrides_pct = {
             "Margem Bruta (%)": m["margem_bruta_pct"],
+            "Margem EBITDA (%)": m["margem_ebitda_pct"],
             "Margem Operacional (%)": m["margem_operacional_pct"],
             "Margem Líquida (%)": m["margem_liquida_pct"],
             "Margem de Contribuição (%)": m["margem_contrib_pct"],
@@ -2135,18 +2226,25 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
                 continue
 
             if r == "Dívida (Estoque)":
+                # Sempre usar o saldo devedor em R$
                 df.loc[r, (meses[i], "Valores R$")] = m["divida_estoque"]
             else:
                 df.loc[r, (meses[i], "Valores R$")] = vals.get(r, None)
 
             if fat > 0:
                 if r in overrides_pct:
+                    # Para Dívida (Estoque), aqui entra o índice de endividamento (%)
                     df.loc[r, (meses[i], "Análise Vertical")] = overrides_pct[r]
                 else:
                     v = vals.get(r, None)
-                    df.loc[r, (meses[i], "Análise Vertical")] = (v / fat * 100.0) if isinstance(v, (int, float)) else None
+                    df.loc[r, (meses[i], "Análise Vertical")] = (
+                        (v / fat * 100.0) if isinstance(v, (int, float)) else None
+                    )
             else:
-                df.loc[r, (meses[i], "Análise Vertical")] = overrides_pct.get(r, 0.0 if vals.get(r) else None)
+                df.loc[r, (meses[i], "Análise Vertical")] = overrides_pct.get(
+                    r,
+                    0.0 if vals.get(r) else None,
+                )
 
     def _fmt_val(v):
         if v is None:
@@ -2199,7 +2297,7 @@ def _render_anual(db_path: str, ano: int, vars_dre: VarsDRE):
             "Fretes","Sacolas","Fundo de Promoção","Margem de Contribuição"
         ],
         "Margens": [
-            "Margem Bruta (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
+            "Margem Bruta (%)","Margem EBITDA (%)","Margem Operacional (%)","Margem Líquida (%)","Margem de Contribuição (%)"
         ],
         "Eficiência e Gestão": [
             "Custo Fixo Mensal",
