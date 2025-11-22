@@ -1056,7 +1056,7 @@ def _query_entradas(db_path: str, ini: str, fim: str) -> Tuple[float, float, int
 @st.cache_data(show_spinner=False, ttl=60)
 def _query_fretes(db_path: str, ini: str, fim: str) -> float:
     sql = """
-    SELECT SUM(COALESCE(Frete,0))
+    SELECT SUM(COALESCE(Frete_Cobrado,0))
     FROM mercadorias
     WHERE date(Data) BETWEEN ? AND ?;
     """
