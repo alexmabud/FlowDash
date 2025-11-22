@@ -125,6 +125,22 @@ def _ensure_valor(df_in: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     cols = {c.lower(): c for c in df.columns}
+
+    # Preferir o valor efetivamente recebido; se não houver, cair para o valor da compra
+    col_val_rec = next((cols[n] for n in ["valor_recebido", "valorrecebido"] if n in cols), None)
+    col_val_merc = next((cols[n] for n in ["valor_mercadoria", "valormercadoria", "valor_mercadorias", "valormercadorias"] if n in cols), None)
+    if col_val_rec or col_val_merc:
+        ser_rec = pd.to_numeric(df[col_val_rec], errors="coerce") if col_val_rec else None
+        ser_merc = pd.to_numeric(df[col_val_merc], errors="coerce") if col_val_merc else None
+        if ser_rec is not None and ser_merc is not None:
+            prefer_rec = ser_rec.where((ser_rec.notna()) & (ser_rec != 0))
+            df["Valor"] = prefer_rec.fillna(ser_merc.fillna(0.0)).fillna(0.0)
+        elif ser_rec is not None:
+            df["Valor"] = ser_rec.fillna(0.0)
+        else:
+            df["Valor"] = ser_merc.fillna(0.0)
+        return df
+
     valor_col = _pick_valor_col(df)
     if valor_col is None:
         preco_col = next((cols[n] for n in ["preco", "preço", "valor_unit", "vl_unit", "unitario", "unit_price"] if n in cols), None)
