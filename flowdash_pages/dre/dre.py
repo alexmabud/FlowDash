@@ -843,6 +843,70 @@ def _crescimento_mtd(db_path: str, ano: int, mes: int, today: Optional[date] = N
 
     return _nz_div(fat_mtd - fat_mtd_prev, fat_mtd_prev) * 100.0 if fat_mtd_prev > 0 else 0.0
 
+
+def _calc_delta_pct_atual_vs_prev(valor_atual: float, valor_prev: Optional[float]) -> Optional[float]:
+    """Delta percentual seguro entre valor_atual e valor_prev."""
+    try:
+        prev = float(valor_prev)
+        cur = float(valor_atual)
+    except Exception:
+        return None
+    if prev == 0:
+        return None
+    return ((cur - prev) / prev) * 100.0
+
+
+def _status_delta_pct(delta_pct: Optional[float]) -> str:
+    """🟢/🟡/🔴 para deltas de crescimento."""
+    try:
+        v = float(delta_pct)
+        if math.isnan(v):
+            return "⚪"
+    except Exception:
+        return "⚪"
+    if abs(v) < 0.5:
+        return "🟡"
+    return "🟢" if v > 0 else "🔴"
+
+
+def _fmt_pct_signed(delta_pct: Optional[float]) -> str:
+    """Formata percentual com sinal (+/-) usando o formatter padrão."""
+    try:
+        v = float(delta_pct)
+    except Exception:
+        v = 0.0
+    txt = _fmt_pct(v)
+    if v > 0 and not txt.startswith("+"):
+        return f"+{txt}"
+    return txt
+
+
+def _hist_fat_mes_por_ano(db_path: str, mes: int, anos: Iterable[int]) -> Dict[int, float]:
+    """Retorna Receita Bruta do mês (mes/ano) para cada ano informado."""
+    out: Dict[int, float] = {}
+    for ano in anos:
+        try:
+            ini, fim, _ = _periodo_ym(ano, mes)
+            fat, _, _ = _query_entradas(db_path, ini, fim)
+            out[int(ano)] = float(fat or 0.0)
+        except Exception:
+            out[int(ano)] = 0.0
+    return out
+
+
+def _hist_fat_ytd_por_ano(db_path: str, mes: int, anos: Iterable[int]) -> Dict[int, float]:
+    """Retorna Receita Bruta YTD (jan até fim do mês selecionado) por ano."""
+    out: Dict[int, float] = {}
+    for ano in anos:
+        try:
+            _, fim, _ = _periodo_ym(ano, mes)
+            ini = f"{ano:04d}-01-01"
+            fat, _, _ = _query_entradas(db_path, ini, fim)
+            out[int(ano)] = float(fat or 0.0)
+        except Exception:
+            out[int(ano)] = 0.0
+    return out
+
 @dataclass
 class VarsDRE:
     # parâmetros configuráveis
@@ -1522,6 +1586,7 @@ def render_dre(caminho_banco: Optional[str]):
     _render_anual(caminho_banco, int(ano), vars_dre)
 
 def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) -> None:
+    meses_labels = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
     st.markdown(
     """
 <style>
@@ -2018,10 +2083,74 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               status_emoji=_status_or_none(divida_status)),
     ], "k-fluxo"))
 
+    anos_disp = _listar_anos(db_path)
+    hist_mes_vals = _hist_fat_mes_por_ano(db_path, mes, anos_disp)
+    hist_ytd_vals = _hist_fat_ytd_por_ano(db_path, mes, anos_disp)
+
+    mes_nome = meses_labels[mes-1]
+
+    # Mês atual vs mesmo mês do último ano disponível anterior
+    fat_mes_atual = _safe(hist_mes_vals.get(ano))
+    anos_prev_mes = sorted([a for a in hist_mes_vals.keys() if int(a) < int(ano)], reverse=True)
+    ano_prev_mes = anos_prev_mes[0] if anos_prev_mes else None
+    fat_mes_prev = _safe(hist_mes_vals.get(ano_prev_mes)) if ano_prev_mes is not None else 0.0
+    delta_mes_pct = _calc_delta_pct_atual_vs_prev(fat_mes_atual, fat_mes_prev) if (ano_prev_mes is not None and fat_mes_prev != 0) else None
+    has_hist_mes = ano_prev_mes is not None and fat_mes_prev != 0
+    status_hist_mes = _status_delta_pct(delta_mes_pct) if has_hist_mes else "⚪"
+    delta_mes_txt = _fmt_pct_signed(delta_mes_pct if has_hist_mes else 0.0)
+    tip_hist_mes_lines = [
+        "Histórico do mês atual em relação ao mesmo mês de anos anteriores.",
+        "Serve para: mostrar se este mês está melhor ou pior que o mesmo mês em anos anteriores, com base na Receita Bruta.",
+        "🟢 Valor maior que o ano anterior · 🟡 Praticamente igual ao ano anterior · 🔴 Valor menor que o ano anterior",
+        f"Histórico de {mes_nome}:",
+    ]
+    for ano_hist in sorted(hist_mes_vals.keys(), reverse=True):
+        tip_hist_mes_lines.append(f"• {ano_hist}: {_fmt_brl(hist_mes_vals[ano_hist])}")
+    if not has_hist_mes:
+        tip_hist_mes_lines.append("Sem histórico anterior para comparação.")
+    tip_hist_mes = "\n".join(tip_hist_mes_lines)
+    valor_hist_mes_display = f"{mes_nome}/{ano}: {delta_mes_txt} vs {ano_prev_mes or 'sem histórico'}"
+
+    # Ano atual (YTD) vs ano anterior
+    fat_ytd_atual = _safe(hist_ytd_vals.get(ano))
+    anos_prev_ytd = sorted([a for a in hist_ytd_vals.keys() if int(a) < int(ano)], reverse=True)
+    ano_prev_ytd = anos_prev_ytd[0] if anos_prev_ytd else None
+    fat_ytd_prev = _safe(hist_ytd_vals.get(ano_prev_ytd)) if ano_prev_ytd is not None else 0.0
+    delta_ytd_pct = _calc_delta_pct_atual_vs_prev(fat_ytd_atual, fat_ytd_prev) if (ano_prev_ytd is not None and fat_ytd_prev != 0) else None
+    has_hist_ytd = ano_prev_ytd is not None and fat_ytd_prev != 0
+    status_hist_ytd = _status_delta_pct(delta_ytd_pct) if has_hist_ytd else "⚪"
+    delta_ytd_txt = _fmt_pct_signed(delta_ytd_pct if has_hist_ytd else 0.0)
+    tip_hist_ytd_lines = [
+        "Crescimento anual acumulado (YTD) em relação aos anos anteriores.",
+        "Serve para: mostrar se o ano atual está melhor ou pior do que os anos anteriores no acumulado de Receita Bruta.",
+        "🟢 YTD maior que o ano anterior · 🟡 YTD praticamente igual · 🔴 YTD menor que o ano anterior",
+        f"Histórico YTD até {mes_nome}/{ano}:",
+    ]
+    for ano_hist in sorted(hist_ytd_vals.keys(), reverse=True):
+        tip_hist_ytd_lines.append(f"• {ano_hist}: {_fmt_brl(hist_ytd_vals[ano_hist])}")
+    if not has_hist_ytd:
+        tip_hist_ytd_lines.append("Sem histórico anterior para comparação.")
+    tip_hist_ytd = "\n".join(tip_hist_ytd_lines)
+    valor_hist_ytd_display = f"{ano}: {delta_ytd_txt} vs {ano_prev_ytd or 'sem histórico'}"
+
+    crescimento_mm_status = _status_delta_pct(crec)
+    crescimento_mm_tip = (
+        "Crescimento da Receita Bruta em relação ao mês anterior. | Serve para: mostrar se o faturamento está aumentando, estável ou caindo mês a mês.\n\n"
+        "🟢 Maior que o mês anterior · 🟡 Praticamente igual ao mês anterior · 🔴 Menor que o mês anterior"
+    )
+
     cards_html.append(_card("Crescimento e Vendas", [
         _chip("Ticket Médio", _fmt_brl(m["ticket_medio"])),
         _chip("Nº de Vendas", f"{int(m['n_vendas'])}"),
-        _chip("Crescimento de Receita (m/m)", _fmt_pct(crec)),
+        _chip("Crescimento de Receita (m/m)", _fmt_pct(crec),
+              status_emoji=_status_or_none(crescimento_mm_status),
+              extra_tip=crescimento_mm_tip),
+        _chip("Histórico do mês (R$)", valor_hist_mes_display,
+              status_emoji=_status_or_none(status_hist_mes),
+              extra_tip=tip_hist_mes),
+        _chip("Histórico do ano (YTD)", valor_hist_ytd_display,
+              status_emoji=_status_or_none(status_hist_ytd),
+              extra_tip=tip_hist_ytd),
     ], "k-cresc"))
 
     margem_ebitda_ratio = (margem_ebitda_pct_val / 100.0) if margem_ebitda_pct_val is not None else None
