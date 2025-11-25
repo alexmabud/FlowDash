@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -9,6 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from shared.db import ensure_db_path_or_raise, get_conn
+from flowdash_pages.lancamentos.pagina.ui_cards_pagina import render_card_row
 from flowdash_pages.dataframes import dataframes as df_utils
 from flowdash_pages.dataframes import contas_a_pagar as cap
 from flowdash_pages.dre.dre import (
@@ -501,48 +503,225 @@ def render_chips_principais(
     ano_selecionado: int,
     vars_dre,
 ) -> None:
-    st.subheader("Visão Geral")
-    metrics = _calc_monthly_metrics(db_path, ano_selecionado, vars_dre)
-    df_ano = df_entrada[df_entrada["ano"] == ano_selecionado]
-    ultimo_mes = int(df_ano["mes"].max()) if not df_ano.empty else datetime.today().month
+    """
+    Bloco de KPIs principais do dashboard (topo da página).
 
-    receita_bruta = sum(m.get("fat", 0.0) or 0.0 for m in metrics)
-    receita_liq = sum(m.get("receita_liq", 0.0) or 0.0 for m in metrics)
-    lucro_bruto = sum(m.get("lucro_bruto", 0.0) or 0.0 for m in metrics)
-    margem_bruta_pct = (lucro_bruto / receita_liq * 100.0) if receita_liq else 0.0
-    margem_contrib = sum(m.get("margem_contrib", 0.0) or 0.0 for m in metrics)
-    margem_contrib_pct = (margem_contrib / receita_liq * 100.0) if receita_liq else 0.0
-    ebitda_total = sum(m.get("ebitda", 0.0) or 0.0 for m in metrics)
-    lucro_liq_total = sum(m.get("lucro_liq", 0.0) or 0.0 for m in metrics)
-    n_vendas = sum(m.get("n_vendas", 0) or 0 for m in metrics)
-    ticket_medio = (receita_bruta / n_vendas) if n_vendas else 0.0
-    crescimento = _growth_mm(metrics, ultimo_mes)
-
-    ref_mes = metrics[ultimo_mes - 1] if ultimo_mes - 1 < len(metrics) else {}
-    divida_estoque = ref_mes.get("divida_estoque", 0.0) or 0.0
-    indice_endividamento = ref_mes.get("indice_endividamento_pct", 0.0) or 0.0
-
+    Indicadores calculados sempre com base na data de hoje (ano/mês/dia atuais),
+    independentemente do ano selecionado para os gráficos abaixo.
+    """
     hoje = date.today()
+    ano_atual = hoje.year
+    mes_atual = hoje.month
+    dia_atual = hoje.day
+
+    if df_entrada is None or df_entrada.empty:
+        st.info("Sem dados de entrada para calcular os indicadores principais.")
+        return
+
+    df = df_entrada.copy()
+    # Garante colunas de apoio
+    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+    df["Data_date"] = df["Data"].dt.date
+    df["ano"] = df["Data"].dt.year
+    df["mes"] = df["Data"].dt.month
+
+    # -------------------------
+    # Bloco 1 – Vendas & Saldo
+    # -------------------------
+    # Vendas do dia
+    mask_dia = df["Data_date"] == hoje
+    vendas_dia = float(df.loc[mask_dia, "Valor"].sum())
+
+    # Vendas do mês (ano atual + mês atual)
+    mask_mes_atual = (df["ano"] == ano_atual) & (df["mes"] == mes_atual)
+    vendas_mes = float(df.loc[mask_mes_atual, "Valor"].sum())
+
+    # Vendas do ano (ano atual)
+    mask_ano_atual = df["ano"] == ano_atual
+    vendas_ano = float(df.loc[mask_ano_atual, "Valor"].sum())
+
+    # Saldo disponível (bancos + caixa + caixa 2) usando helpers do fechamento
     bancos_dict = _somar_bancos_totais(db_path, hoje)
     disp_caixa, disp_caixa2, _ = _ultimo_caixas_ate(db_path, hoje)
-    saldo_total = float(disp_caixa + disp_caixa2 + sum(bancos_dict.values()))
+    saldo_disponivel = float(disp_caixa + disp_caixa2 + sum(bancos_dict.values()))
 
-    linhas: List[Tuple[str, str, Optional[str]]] = [
-        ("Crescimento m/m", _fmt_percent(crescimento), None),
-        ("Ticket médio", _fmt_currency(ticket_medio), None),
-        ("Nº de vendas", str(n_vendas), None),
-        ("Saldo disponível", _fmt_currency(saldo_total), None),
-    ]
-    _cards_row(linhas, cols_per_row=3)
+    # ------------------------------
+    # Bloco 2 – Crescimento & Comparações
+    # ------------------------------
+    # Crescimento m/m: mês atual vs mês anterior (ano atual)
+    fat_por_mes_ano = (
+        df[df["ano"] == ano_atual]
+        .groupby("mes")["Valor"]
+        .sum()
+    )
 
-    bancos_items = []
-    for nome, valor in bancos_dict.items():
-        bancos_items.append((nome, _fmt_currency(valor), None))
-    bancos_items.append(("Caixa", _fmt_currency(disp_caixa), None))
-    bancos_items.append(("Caixa 2", _fmt_currency(disp_caixa2), None))
-    if bancos_items:
-        st.markdown("**Saldos por conta**")
-        _cards_row(bancos_items, cols_per_row=4)
+    valor_mes_atual = float(fat_por_mes_ano.get(mes_atual, 0.0))
+    valor_mes_anterior = float(fat_por_mes_ano.get(mes_atual - 1, 0.0)) if mes_atual > 1 else 0.0
+    if valor_mes_anterior > 0:
+        crescimento_mm_pct = (valor_mes_atual - valor_mes_anterior) / valor_mes_anterior * 100.0
+        delta_mm_valor = valor_mes_atual - valor_mes_anterior
+    else:
+        crescimento_mm_pct = 0.0
+        delta_mm_valor = 0.0
+
+    # Comparação do mesmo período do mês x ano anterior
+    ano_anterior = ano_atual - 1
+    comp_mes_anoant_pct = 0.0
+    delta_mes_anoant_valor = 0.0
+    valor_periodo_atual = 0.0
+    valor_periodo_prev = 0.0
+
+    if ano_anterior in df["ano"].unique():
+        # Ajusta o dia final do mês anterior para não estourar (ex.: 31 vs fevereiro)
+        dia_limite_prev = monthrange(ano_anterior, mes_atual)[1]
+        dia_prev = min(dia_atual, dia_limite_prev)
+
+        atual_ini = date(ano_atual, mes_atual, 1)
+        atual_fim = hoje
+        prev_ini = date(ano_anterior, mes_atual, 1)
+        prev_fim = date(ano_anterior, mes_atual, dia_prev)
+
+        mask_periodo_atual = (df["Data_date"] >= atual_ini) & (df["Data_date"] <= atual_fim)
+        mask_periodo_prev = (df["Data_date"] >= prev_ini) & (df["Data_date"] <= prev_fim)
+
+        valor_periodo_atual = float(df.loc[mask_periodo_atual, "Valor"].sum())
+        valor_periodo_prev = float(df.loc[mask_periodo_prev, "Valor"].sum())
+
+        if valor_periodo_prev > 0:
+            comp_mes_anoant_pct = (valor_periodo_atual - valor_periodo_prev) / valor_periodo_prev * 100.0
+            delta_mes_anoant_valor = valor_periodo_atual - valor_periodo_prev
+
+    # Comparação do mês atual com o melhor mesmo mês dos anos anteriores
+    df_mes_hist = df[df["mes"] == mes_atual].groupby("ano")["Valor"].sum()
+    historico_mes_anteriores = df_mes_hist[df_mes_hist.index < ano_atual]
+    melhor_ano_mes = None
+    melhor_val_mes = 0.0
+    comp_mes_melhor_pct = 0.0
+    delta_mes_melhor_valor = 0.0
+
+    if not historico_mes_anteriores.empty:
+        melhor_ano_mes = int(historico_mes_anteriores.idxmax())
+        melhor_val_mes = float(historico_mes_anteriores.max())
+        if melhor_val_mes > 0:
+            comp_mes_melhor_pct = (valor_mes_atual - melhor_val_mes) / melhor_val_mes * 100.0
+            delta_mes_melhor_valor = valor_mes_atual - melhor_val_mes
+
+    # Comparação do ano atual com o ano anterior (total anual)
+    vendas_ano_anterior = float(df.loc[df["ano"] == ano_anterior, "Valor"].sum()) if ano_anterior in df["ano"].unique() else 0.0
+    if vendas_ano_anterior > 0:
+        comp_ano_anterior_pct = (vendas_ano - vendas_ano_anterior) / vendas_ano_anterior * 100.0
+        delta_ano_anterior_valor = vendas_ano - vendas_ano_anterior
+    else:
+        comp_ano_anterior_pct = 0.0
+        delta_ano_anterior_valor = 0.0
+
+    # Comparação do ano atual com o melhor ano de vendas (histórico)
+    vendas_por_ano = df.groupby("ano")["Valor"].sum()
+    historico_anos_anteriores = vendas_por_ano[vendas_por_ano.index < ano_atual]
+    melhor_ano_global = None
+    melhor_val_ano_global = 0.0
+    comp_ano_melhor_pct = 0.0
+    delta_ano_melhor_valor = 0.0
+
+    if not historico_anos_anteriores.empty:
+        melhor_ano_global = int(historico_anos_anteriores.idxmax())
+        melhor_val_ano_global = float(historico_anos_anteriores.max())
+        if melhor_val_ano_global > 0:
+            comp_ano_melhor_pct = (vendas_ano - melhor_val_ano_global) / melhor_val_ano_global * 100.0
+            delta_ano_melhor_valor = vendas_ano - melhor_val_ano_global
+
+    # -------------------------
+    # Bloco 3 – Eficiência de Vendas
+    # -------------------------
+    # Usa os metrics do DRE para pegar n_vendas (ano atual) e ticket médio
+    metrics_ano_atual = _calc_monthly_metrics(db_path, ano_atual, vars_dre)
+    receita_bruta_ano = sum(m.get("fat", 0.0) or 0.0 for m in metrics_ano_atual)
+    n_vendas_ano = sum(m.get("n_vendas", 0) or 0 for m in metrics_ano_atual)
+    ticket_medio_ano = (receita_bruta_ano / n_vendas_ano) if n_vendas_ano else 0.0
+
+    # =======================
+    # Renderização dos blocos (cards estilo Lançamentos)
+    # =======================
+    st.markdown("## Indicadores de Vendas")
+
+    # --- Bloco 1 – Vendas & Saldo (card igual ao Resumo do Dia) ---
+    render_card_row(
+        "📊 Vendas & Saldo",
+        [
+            ("Vendas do dia", vendas_dia, True),          # moeda
+            ("Vendas do mês", vendas_mes, True),          # moeda
+            ("Vendas do ano", vendas_ano, True),          # moeda
+            ("Saldo disponível", saldo_disponivel, True), # moeda
+        ],
+    )
+
+    # Monta labels dinâmicos reaproveitando as variáveis já calculadas
+    label_mes_melhor = (
+        f"Mês atual vs melhor {MESES_LABELS[mes_atual - 1]}/{melhor_ano_mes}"
+        if melhor_ano_mes is not None
+        else f"Mês atual vs melhor {MESES_LABELS[mes_atual - 1]} histórico"
+    )
+    label_ano_melhor = (
+        f"Ano atual vs melhor ano ({melhor_ano_global})"
+        if melhor_ano_global is not None
+        else "Ano atual vs melhor ano"
+    )
+
+    # monta valores com % e delta em R$ e aplica cor por sinal
+    def _colorize_val(texto: str, base_pct: float) -> str:
+        if base_pct > 0:
+            color = "#2ecc71"
+        elif base_pct < 0:
+            color = "#e74c3c"
+        else:
+            color = "#ffffff"
+        return f"<span style='color:{color};font-size:18px;font-weight:600;'>{texto}</span>"
+
+    val_cres_mm_txt = _fmt_percent(crescimento_mm_pct)
+    if delta_mm_valor:
+        val_cres_mm_txt = f"{val_cres_mm_txt} ({_fmt_currency(delta_mm_valor)})"
+    val_cres_mm = _colorize_val(val_cres_mm_txt, crescimento_mm_pct)
+
+    val_comp_mes_anoant_txt = _fmt_percent(comp_mes_anoant_pct)
+    if delta_mes_anoant_valor:
+        val_comp_mes_anoant_txt = f"{val_comp_mes_anoant_txt} ({_fmt_currency(delta_mes_anoant_valor)})"
+    val_comp_mes_anoant = _colorize_val(val_comp_mes_anoant_txt, comp_mes_anoant_pct)
+
+    val_comp_mes_melhor_txt = _fmt_percent(comp_mes_melhor_pct)
+    if delta_mes_melhor_valor:
+        val_comp_mes_melhor_txt = f"{val_comp_mes_melhor_txt} ({_fmt_currency(delta_mes_melhor_valor)})"
+    val_comp_mes_melhor = _colorize_val(val_comp_mes_melhor_txt, comp_mes_melhor_pct)
+
+    val_comp_ano_ant_txt = _fmt_percent(comp_ano_anterior_pct)
+    if delta_ano_anterior_valor:
+        val_comp_ano_ant_txt = f"{val_comp_ano_ant_txt} ({_fmt_currency(delta_ano_anterior_valor)})"
+    val_comp_ano_ant = _colorize_val(val_comp_ano_ant_txt, comp_ano_anterior_pct)
+
+    val_comp_ano_melhor_txt = _fmt_percent(comp_ano_melhor_pct)
+    if delta_ano_melhor_valor:
+        val_comp_ano_melhor_txt = f"{val_comp_ano_melhor_txt} ({_fmt_currency(delta_ano_melhor_valor)})"
+    val_comp_ano_melhor = _colorize_val(val_comp_ano_melhor_txt, comp_ano_melhor_pct)
+
+    # --- Bloco 2 – Crescimento & Comparações (percentuais em texto, centralizados) ---
+    render_card_row(
+        "📈 Crescimento & Comparações",
+        [
+            ("Crescimento m/m", [val_cres_mm], False),
+            ("Mês vs mesmo período ano anterior", [val_comp_mes_anoant], False),
+            (label_mes_melhor, [val_comp_mes_melhor], False),
+            ("Ano atual vs ano anterior", [val_comp_ano_ant], False),
+            (label_ano_melhor, [val_comp_ano_melhor], False),
+        ],
+    )
+
+    # --- Bloco 3 – Eficiência de Vendas ---
+    render_card_row(
+        "🎯 Eficiência de Vendas",
+        [
+            ("Ticket médio (ano)", ticket_medio_ano, True),       # moeda
+            ("Nº de vendas (ano)", [str(int(n_vendas_ano))], False),     # número simples (texto para não virar R$)
+        ],
+    )
 
 
 def render_endividamento(db_path: str) -> None:
@@ -600,7 +779,7 @@ def render_endividamento(db_path: str) -> None:
                 labels=["Pago", "Em aberto"],
                 values=[total_pago, total_aberto],
                 hole=0.6,
-                marker=dict(colors=["#27ae60", "#e67e22"]),
+                marker=dict(colors=["#27ae60", "#e74c3c"]),
                 text=[_fmt_currency(total_pago), _fmt_currency(total_aberto)],
                 textinfo="percent+text",
                 showlegend=False,
@@ -612,62 +791,66 @@ def render_endividamento(db_path: str) -> None:
         margin=dict(l=10, r=10, t=10, b=10),
     )
 
-    # duas colunas principais: Endividamento (esquerda) e Metas (direita)
-    col_endiv, col_meta = st.columns(2)
+    def _render_mini_loan_card(card: Dict) -> None:
+        st.caption(card["descricao"])
+        st.markdown(f"**Contratado:** {_fmt_currency(card['contratado'])}")
+
+        fig = go.Figure(
+            data=[
+                go.Pie(
+                    labels=["Pago", "Em aberto"],
+                    values=[card["pago"], card["aberto"]],
+                    hole=0.5,
+                    marker=dict(colors=["#2ecc71", "#e74c3c"]),
+                    text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
+                    textinfo="percent+text",
+                    showlegend=False,
+                )
+            ]
+        )
+
+        fig.update_traces(
+            textposition="inside",
+            textfont_size=11,
+        )
+
+        fig.update_layout(
+            height=180,
+            margin=dict(l=0, r=0, t=0, b=0),
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+    # duas colunas principais: Metas (esquerda) e Endividamento (direita)
+    col_meta, col_endiv = st.columns(2)
+
+    # --- coluna de Metas da Loja (fica à esquerda) ---
+    with col_meta:
+        st.markdown("### Metas da Loja")
+        render_metas_resumo_dashboard(db_path)
 
     # --- coluna de Endividamento (donut total + donuts por empréstimo) ---
     with col_endiv:
         st.markdown("### Endividamento")
 
-        # coluna do donut total e coluna dos donuts por empréstimo
-        col_geral, col_emp = st.columns([3, 2])
+        col_big, col_c1, col_c2 = st.columns([2, 1, 1])
 
-        # donut total
-        with col_geral:
+        with col_big:
             st.plotly_chart(fig_total, use_container_width=True)
             st.caption("Dívida total em empréstimos")
             valor_total = (total_pago or 0) + (total_aberto or 0)
             st.markdown(f"**{_fmt_currency(valor_total)}**")
 
-        # donuts individuais por empréstimo (empilhados na vertical)
-        with col_emp:
-            for card in mini_cards[:3]:
-                st.caption(card["descricao"])
-                st.write(f"Contratado: {_fmt_currency(card['contratado'])}")
+        col_c1_container = col_c1.container()
+        col_c2_container = col_c2.container()
 
-                fig = go.Figure(
-                    data=[
-                        go.Pie(
-                            labels=["Pago", "Em aberto"],
-                            values=[card["pago"], card["aberto"]],
-                            hole=0.5,
-                            marker=dict(colors=["#2ecc71", "#e74c3c"]),
-                            text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
-                            textinfo="percent+text",
-                            showlegend=False,
-                        )
-                    ]
-                )
-
-                fig.update_traces(
-                    textposition="inside",
-                    textfont_size=11,
-                )
-
-                fig.update_layout(
-                    height=210,
-                    margin=dict(l=0, r=0, t=10, b=0),
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-
-    # --- coluna de Metas da Loja (fica à direita) ---
-    with col_meta:
-        st.markdown("### Metas da Loja")
-        render_metas_resumo_dashboard(db_path)
+        for idx, card in enumerate(mini_cards):
+            target_col = col_c1_container if idx % 2 == 0 else col_c2_container
+            with target_col:
+                _render_mini_loan_card(card)
 
 
-def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame) -> None:
+def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame, is_mobile: bool = False) -> None:
     st.subheader("Gráficos Mensais")
     meses = list(range(1, 13))
     lucro_labels = [MESES_LABELS[m - 1] for m in meses]
@@ -684,6 +867,9 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
         lucros_plot.append(v if v not in (None, 0) else None)
     fig_lucro = None
     show_lucro = False
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
     if ano == 2025:
         show_lucro = any(v is not None for v in lucros_plot)
         if show_lucro:
@@ -720,7 +906,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 )
             )
             fig_lucro.update_layout(
-                title=f"Lucro Líquido – {ano}",
+                title=dict(text=f"Lucro Líquido – {ano}", font=dict(size=title_size)),
                 legend=dict(
                     orientation="h",
                     yanchor="top",
@@ -729,7 +915,14 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                     x=0.5,
                 ),
                 margin=dict(b=80),
+                height=height,
+                font=dict(size=font_size),
+                dragmode="zoom",
+                hovermode="x unified",
+                showlegend=not is_mobile,
             )
+            if is_mobile:
+                fig_lucro.update_traces(text=None, texttemplate=None)
 
     # --- Balanço Mensal com dados reais de entrada/saída ---
     df_ent_ano = df_entrada[df_entrada["ano"] == ano] if not df_entrada.empty else pd.DataFrame(columns=["mes", "Valor"])
@@ -790,7 +983,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
     )
     fig_balanco.update_layout(
         barmode="group",
-        title=f"Balanço Mensal – {ano}",
+        title=dict(text=f"Balanço Mensal – {ano}", font=dict(size=title_size)),
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -799,18 +992,24 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
             x=0.5,
         ),
         margin=dict(b=90),
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
     )
+    if is_mobile:
+        fig_balanco.update_traces(text=None, texttemplate=None)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if ano != 2025:
-            st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
-        else:
-            if show_lucro and fig_lucro is not None:
-                st.plotly_chart(fig_lucro, use_container_width=True)
+    if is_mobile:
+        with st.container():
+            if ano != 2025:
+                st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
             else:
-                st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
-    with col2:
+                if show_lucro and fig_lucro is not None:
+                    st.plotly_chart(fig_lucro, use_container_width=True)
+                else:
+                    st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with st.container():
             st.plotly_chart(fig_balanco, use_container_width=True)
             tabela_mes = pd.DataFrame(
@@ -828,9 +1027,37 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
             )
             st.markdown("**Valores Mensais**")
             st.dataframe(tabela_fmt, use_container_width=True)
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            if ano != 2025:
+                st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
+            else:
+                if show_lucro and fig_lucro is not None:
+                    st.plotly_chart(fig_lucro, use_container_width=True)
+                else:
+                    st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
+        with col2:
+            with st.container():
+                st.plotly_chart(fig_balanco, use_container_width=True)
+                tabela_mes = pd.DataFrame(
+                    [fat, saidas, resultado],
+                    index=["Entrada", "Saída", "Resultado"],
+                    columns=meses_labels,
+                )
+                tabela_fmt = (
+                    tabela_mes.style.format(_fmt_currency).applymap(
+                        lambda v: "color:green"
+                        if isinstance(v, (int, float)) and v > 0
+                        else ("color:red" if isinstance(v, (int, float)) and v < 0 else ""),
+                        subset=pd.IndexSlice["Resultado", :],
+                    )
+                )
+                st.markdown("**Valores Mensais**")
+                st.dataframe(tabela_fmt, use_container_width=True)
 
 
-def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> None:
+def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
     st.subheader("Análise Anual")
     if df_entrada.empty:
         st.info("Sem dados de entradas para análise.")
@@ -851,6 +1078,10 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
     # adiciona coluna formatada em R$ para exibir no gráfico
     fat_anual["total_fmt"] = fat_anual["total"].apply(lambda v: f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
 
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
+
     fig_fat_ano = px.line(
         fat_anual,
         x="ano",
@@ -858,11 +1089,28 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
         markers=True,
         title="Faturamento Anual",
         labels={"ano": "Ano", "total": "Faturamento"},
-        text="total_fmt",  # rótulo em R$ em cada ponto
     )
 
-    # posiciona os rótulos acima dos pontos
-    fig_fat_ano.update_traces(textposition="top center")
+    fig_fat_ano.update_traces(
+        mode="lines+markers+text",
+        text=fat_anual["total_fmt"],
+        textposition="top center",
+        cliponaxis=False,
+        line=dict(color="#9b59b6"),
+        marker=dict(color="#9b59b6"),
+    )
+    fig_fat_ano.update_xaxes(dtick=1, tickformat="d")
+    if is_mobile:
+        fig_fat_ano.update_traces(text=None, texttemplate=None)
+    fig_fat_ano.update_layout(
+        height=height,
+        font=dict(size=font_size),
+        title=dict(font=dict(size=title_size)),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+        margin=dict(t=80, b=40),
+    )
 
     def _calc_mm(df: pd.DataFrame) -> pd.DataFrame:
         df = df.sort_values("mes")
@@ -898,6 +1146,40 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
             yoy_labels_full[m] = lbl
             yoy_colors_full[m] = color
 
+    palette_outros = [
+        "#e67e22",  # laranja
+        "#1abc9c",  # verde água
+        "#e74c3c",  # vermelho
+        "#f1c40f",  # amarelo
+        "#8e44ad",  # roxo escuro
+        "#16a085",  # verde
+        "#d35400",  # laranja escuro
+        "#2ecc71",  # verde claro
+        "#3498db",  # azul claro
+        "#9b59b6",  # roxo extra
+    ]
+
+    anos_sorted = sorted(anos_multiselect)
+    cores_por_ano = {}
+
+    # reserva cores fixas para ano atual e ano anterior
+    if ano_atual is not None and ano_atual in anos_sorted:
+        cores_por_ano[ano_atual] = "#9b59b6"  # roxo para ano atual
+
+    if ano_anterior is not None and ano_anterior in anos_sorted and ano_anterior not in cores_por_ano:
+        cores_por_ano[ano_anterior] = "#2980b9"  # azul para ano anterior
+
+    # atribui cores únicas para os demais anos
+    idx_cor = 0
+    for a in anos_sorted:
+        if a in cores_por_ano:
+            continue
+        if idx_cor >= len(palette_outros):
+            # se acabar a paleta, recomeça (caso raro de muitos anos)
+            idx_cor = 0
+        cores_por_ano[a] = palette_outros[idx_cor]
+        idx_cor += 1
+
     fig_mm = go.Figure()
     for ano in anos_multiselect:
         df_ano = fat_mensal[fat_mensal["ano"] == ano].sort_values("mes")
@@ -905,7 +1187,7 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
             continue
         is_atual = ano == ano_atual
         is_prev = ano_anterior is not None and ano == ano_anterior
-        color = "#9b59b6" if is_atual else ("#2980b9" if is_prev else "#bdc3c7")
+        color = cores_por_ano.get(ano, "#bdc3c7")
         width = 3 if is_atual else (2 if is_prev else 1)
         msize = 8 if is_atual else (6 if is_prev else 4)
         opacity = 1.0 if is_atual else (0.7 if is_prev else 0.3)
@@ -927,15 +1209,30 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
         )
     fig_mm.add_hline(y=0, line_color="#888", line_dash="dash", opacity=0.7)
     fig_mm.update_layout(
-        title="Faturamento Mensal (por ano)",
+        title=dict(text="Faturamento Mensal (por ano)", font=dict(size=title_size)),
         xaxis_title="Mês",
         yaxis_title="Faturamento (R$)",
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
     )
+    if is_mobile:
+        fig_mm.update_traces(text=None, texttemplate=None)
 
     ranking = fat_mensal.copy()
     ranking["label"] = ranking.apply(lambda r: f"{MESES_LABELS[int(r['mes']) - 1]}/{int(r['ano'])}", axis=1)
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
+    fig_rank.update_layout(
+        height=height,
+        font=dict(size=font_size),
+        title=dict(font=dict(size=title_size)),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+    )
 
     pivot = (
         fat_mensal
@@ -952,30 +1249,59 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
             hoverongaps=False,
         )
     )
-    fig_heat.update_layout(title="Heatmap de Faturamento")
+    fig_heat.update_layout(
+        title=dict(text="Heatmap de Faturamento", font=dict(size=title_size)),
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+    )
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.plotly_chart(fig_fat_ano, use_container_width=True)
-    with col2:
-        st.plotly_chart(fig_mm, use_container_width=True)
-        tabela_mm = (
-            fat_mensal.pivot(index="ano", columns="mes_label", values="total")
-            .reindex(columns=MESES_LABELS, fill_value=0.0)
-            .fillna(0.0)
-        )
-        tabela_mm = tabela_mm.reset_index().rename(columns={"ano": "Ano"})
-        tabela_mm_styled = tabela_mm.style.format(
-            {m: _fmt_currency for m in MESES_LABELS}
-        )
-        st.markdown("**Faturamento Mês a Mês (R$)**")
-        st.dataframe(tabela_mm_styled, use_container_width=True)
+    if is_mobile:
+        with st.container():
+            st.plotly_chart(fig_fat_ano, use_container_width=True)
+        with st.container():
+            st.plotly_chart(fig_mm, use_container_width=True)
+            tabela_mm = (
+                fat_mensal.pivot(index="ano", columns="mes_label", values="total")
+                .reindex(columns=MESES_LABELS, fill_value=0.0)
+                .fillna(0.0)
+            )
+            tabela_mm = tabela_mm.reset_index().rename(columns={"ano": "Ano"})
+            tabela_mm_styled = tabela_mm.style.format(
+                {m: _fmt_currency for m in MESES_LABELS}
+            )
+            st.markdown("**Faturamento Mês a Mês (R$)**")
+            st.dataframe(tabela_mm_styled, use_container_width=True)
 
-    col3, col4 = st.columns(2)
-    with col3:
-        st.plotly_chart(fig_rank, use_container_width=True)
-    with col4:
-        st.plotly_chart(fig_heat, use_container_width=True)
+        with st.container():
+            st.plotly_chart(fig_rank, use_container_width=True)
+        with st.container():
+            st.plotly_chart(fig_heat, use_container_width=True)
+    else:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.plotly_chart(fig_fat_ano, use_container_width=True)
+        with col2:
+            st.plotly_chart(fig_mm, use_container_width=True)
+            tabela_mm = (
+                fat_mensal.pivot(index="ano", columns="mes_label", values="total")
+                .reindex(columns=MESES_LABELS, fill_value=0.0)
+                .fillna(0.0)
+            )
+            tabela_mm = tabela_mm.reset_index().rename(columns={"ano": "Ano"})
+            tabela_mm_styled = tabela_mm.style.format(
+                {m: _fmt_currency for m in MESES_LABELS}
+            )
+            st.markdown("**Faturamento Mês a Mês (R$)**")
+            st.dataframe(tabela_mm_styled, use_container_width=True)
+
+        col3, col4 = st.columns(2)
+        with col3:
+            st.plotly_chart(fig_rank, use_container_width=True)
+        with col4:
+            st.plotly_chart(fig_heat, use_container_width=True)
 
 
 def _prepare_fat_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> Optional[pd.DataFrame]:
@@ -990,7 +1316,7 @@ def _prepare_fat_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -
     return fat_mensal
 
 
-def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> None:
+def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
     st.subheader("Faturamento Anual")
     fat_mensal = _prepare_fat_mensal(df_entrada, anos_multiselect)
     if fat_mensal is None or fat_mensal.empty:
@@ -1007,13 +1333,34 @@ def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: L
         markers=True,
         title="Faturamento Anual",
         labels={"ano": "Ano", "total": "Faturamento"},
-        text="total_fmt",
     )
-    fig_fat_ano.update_traces(textposition="top center")
+    fig_fat_ano.update_traces(
+        mode="lines+markers+text",
+        text=fat_anual["total_fmt"],
+        textposition="top center",
+        cliponaxis=False,
+        line=dict(color="#9b59b6"),
+        marker=dict(color="#9b59b6"),
+    )
+    fig_fat_ano.update_xaxes(dtick=1, tickformat="d")
+    if is_mobile:
+        fig_fat_ano.update_traces(text=None, texttemplate=None)
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
+    fig_fat_ano.update_layout(
+        height=height,
+        font=dict(size=font_size),
+        title=dict(font=dict(size=title_size)),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+        margin=dict(t=80, b=40),
+    )
     st.plotly_chart(fig_fat_ano, use_container_width=True)
 
 
-def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> None:
+def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
     st.subheader("Faturamento Mensal por Ano")
     fat_mensal = _prepare_fat_mensal(df_entrada, anos_multiselect)
     if fat_mensal is None or fat_mensal.empty:
@@ -1049,6 +1396,40 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
             yoy_labels_full[m] = lbl
             yoy_colors_full[m] = color
 
+    palette_outros = [
+        "#e67e22",  # laranja
+        "#1abc9c",  # verde água
+        "#e74c3c",  # vermelho
+        "#f1c40f",  # amarelo
+        "#8e44ad",  # roxo escuro
+        "#16a085",  # verde
+        "#d35400",  # laranja escuro
+        "#2ecc71",  # verde claro
+        "#3498db",  # azul claro
+        "#9b59b6",  # roxo extra
+    ]
+
+    anos_sorted = sorted(anos_multiselect)
+    cores_por_ano = {}
+
+    # reserva cores fixas para ano atual e ano anterior
+    if ano_atual is not None and ano_atual in anos_sorted:
+        cores_por_ano[ano_atual] = "#9b59b6"  # roxo para ano atual
+
+    if ano_anterior is not None and ano_anterior in anos_sorted and ano_anterior not in cores_por_ano:
+        cores_por_ano[ano_anterior] = "#2980b9"  # azul para ano anterior
+
+    # atribui cores únicas para os demais anos
+    idx_cor = 0
+    for a in anos_sorted:
+        if a in cores_por_ano:
+            continue
+        if idx_cor >= len(palette_outros):
+            # se acabar a paleta, recomeça (caso raro de muitos anos)
+            idx_cor = 0
+        cores_por_ano[a] = palette_outros[idx_cor]
+        idx_cor += 1
+
     fig_mm = go.Figure()
     for ano in anos_multiselect:
         df_ano = fat_mensal[fat_mensal["ano"] == ano].sort_values("mes")
@@ -1056,7 +1437,7 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
             continue
         is_atual = ano == ano_atual
         is_prev = ano_anterior is not None and ano == ano_anterior
-        color = "#9b59b6" if is_atual else ("#2980b9" if is_prev else "#bdc3c7")
+        color = cores_por_ano.get(ano, "#bdc3c7")
         width = 3 if is_atual else (2 if is_prev else 1)
         msize = 8 if is_atual else (6 if is_prev else 4)
         opacity = 1.0 if is_atual else (0.7 if is_prev else 0.3)
@@ -1075,13 +1456,20 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
                 textposition="top center",
                 textfont=dict(color=text_colors, size=12),
             )
-        )
+    )
     fig_mm.add_hline(y=0, line_color="#888", line_dash="dash", opacity=0.7)
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
     fig_mm.update_layout(
-        title="Faturamento Mensal (por ano)",
+        title=dict(text="Faturamento Mensal (por ano)", font=dict(size=title_size)),
         xaxis_title="Mês",
         yaxis_title="Faturamento (R$)",
-        height=480,
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -1091,6 +1479,8 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
         ),
         margin=dict(b=90),
     )
+    if is_mobile:
+        fig_mm.update_traces(text=None, texttemplate=None)
 
     tabela_mm = (
         fat_mensal.pivot(index="ano", columns="mes_label", values="total")
@@ -1107,7 +1497,7 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
     st.dataframe(tabela_mm_styled, use_container_width=True)
 
 
-def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> None:
+def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
     st.subheader("Top meses (Faturamento)")
     fat_mensal = _prepare_fat_mensal(df_entrada, anos_multiselect)
     if fat_mensal is None or fat_mensal.empty:
@@ -1117,10 +1507,21 @@ def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]
     ranking["label"] = ranking.apply(lambda r: f"{MESES_LABELS[int(r['mes']) - 1]}/{int(r['ano'])}", axis=1)
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
+    fig_rank.update_layout(
+        height=height,
+        font=dict(size=font_size),
+        title=dict(font=dict(size=title_size)),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+    )
     st.plotly_chart(fig_rank, use_container_width=True)
 
 
-def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> None:
+def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
     st.subheader("Heatmap de Faturamento")
     fat_mensal = _prepare_fat_mensal(df_entrada, anos_multiselect)
     if fat_mensal is None or fat_mensal.empty:
@@ -1141,11 +1542,21 @@ def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
             hoverongaps=False,
         )
     )
-    fig_heat.update_layout(title="Heatmap de Faturamento")
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
+    fig_heat.update_layout(
+        title=dict(text="Heatmap de Faturamento", font=dict(size=title_size)),
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
+    )
     st.plotly_chart(fig_heat, use_container_width=True)
 
 
-def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
+def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path: str, is_mobile: bool = False) -> None:
     st.subheader("Lucro Líquido")
     meses = list(range(1, 13))
     lucro_labels = [MESES_LABELS[m - 1] for m in meses]
@@ -1160,8 +1571,56 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
         except Exception:
             v = None
         lucros_plot.append(v if v not in (None, 0) else None)
+    # Lê depreciação mensal padrão das Variáveis DRE (injeção do dashboard tem prioridade)
+    deprec_mensal = 0.0
+    if isinstance(vars_dre, dict):
+        for key in ("_dashboard_deprec_mensal", "depreciacao_mensal_padrao"):
+            if key in vars_dre:
+                try:
+                    deprec_mensal = float(vars_dre.get(key) or 0.0)
+                except Exception:
+                    deprec_mensal = 0.0
+                break
+
+    # Se ainda estiver 0, tenta ler diretamente da tabela dre_variaveis (registro mais recente)
+    if not deprec_mensal and db_path:
+        try:
+            with get_conn(db_path) as conn:
+                df_dep = pd.read_sql(
+                    'SELECT valor_num FROM "dre_variaveis" WHERE chave = "depreciacao_mensal_padrao" ORDER BY id DESC LIMIT 1',
+                    conn,
+                )
+                if not df_dep.empty:
+                    v = pd.to_numeric(df_dep["valor_num"], errors="coerce").dropna()
+                    if not v.empty:
+                        deprec_mensal = float(v.iloc[0])
+        except Exception:
+            deprec_mensal = deprec_mensal
+    lucros_antes_plot = [
+        (v + deprec_mensal) if v is not None else None
+        for v in lucros_plot
+    ]
+    debug_rows = []
+    for label, ll, la in zip(lucro_labels, lucros_plot, lucros_antes_plot):
+        if ll is None:
+            continue
+        debug_rows.append(
+            {
+                "Mês": label,
+                "Lucro Líquido": _fmt_currency(ll),
+                "Antes da Depreciação": _fmt_currency(la) if la is not None else "—",
+                "Depreciação usada": _fmt_currency(deprec_mensal),
+            }
+        )
+    antes_pos = [v if (v is not None and v > 0) else None for v in lucros_antes_plot]
+    antes_neg = [v if (v is not None and v < 0) else None for v in lucros_antes_plot]
+    antes_pos_text = [_fmt_currency(v) if v is not None else None for v in antes_pos]
+    antes_neg_text = [_fmt_currency(v) if v is not None else None for v in antes_neg]
     fig_lucro = None
     show_lucro = False
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
     if ano == 2025:
         show_lucro = any(v is not None for v in lucros_plot)
         if show_lucro:
@@ -1169,6 +1628,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
             neg_vals = [v if (v is not None and v < 0) else None for v in lucros_plot]
             pos_text = [_fmt_currency(v) if v is not None else None for v in pos_vals]
             neg_text = [_fmt_currency(v) if v is not None else None for v in neg_vals]
+            texto_antes = [_fmt_currency(v) if v is not None else None for v in lucros_antes_plot]
 
             fig_lucro = go.Figure()
             fig_lucro.add_trace(
@@ -1197,8 +1657,41 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
                     connectgaps=False,
                 )
             )
+            fig_lucro.add_trace(
+                go.Scatter(
+                    x=lucro_labels,
+                    y=antes_pos,
+                    mode="lines+markers+text",
+                    name="Antes da Depreciação (+)",
+                    line=dict(color="#2ecc71", width=3, dash="dot"),
+                    marker=dict(color="#2ecc71"),
+                    text=antes_pos_text,
+                    textposition="top center",
+                    textfont=dict(size=11),
+                    connectgaps=False,
+                )
+            )
+            fig_lucro.add_trace(
+                go.Scatter(
+                    x=lucro_labels,
+                    y=antes_neg,
+                    mode="lines+markers+text",
+                    name="Antes da Depreciação (-)",
+                    line=dict(color="#e74c3c", width=3, dash="dot"),
+                    marker=dict(color="#e74c3c"),
+                    text=antes_neg_text,
+                    textposition="top center",
+                    textfont=dict(size=11),
+                    connectgaps=False,
+                )
+            )
             fig_lucro.update_layout(
-                title=f"Lucro Líquido – {ano}",
+                title=dict(text=f"Lucro Líquido – {ano}", font=dict(size=title_size)),
+                height=height,
+                font=dict(size=font_size),
+                dragmode="zoom",
+                hovermode="x unified",
+                showlegend=not is_mobile,
                 legend=dict(
                     orientation="h",
                     yanchor="top",
@@ -1206,19 +1699,25 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
                     xanchor="center",
                     x=0.5,
                 ),
-                margin=dict(b=90),
+                margin=dict(t=80, b=90),
             )
+            if is_mobile:
+                fig_lucro.update_traces(text=None, texttemplate=None)
 
     if ano != 2025:
         st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
     else:
         if show_lucro and fig_lucro is not None:
             st.plotly_chart(fig_lucro, use_container_width=True)
+            if debug_rows:
+                import pandas as pd
+                st.markdown("**Debug Lucro x Antes da Depreciação**")
+                st.table(pd.DataFrame(debug_rows))
         else:
             st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
 
 
-def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame, ano: int) -> None:
+def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame, ano: int, is_mobile: bool = False) -> None:
     st.subheader("Balanço Mensal")
     meses = list(range(1, 13))
     meses_labels = [MESES_LABELS[m - 1] for m in meses]
@@ -1277,9 +1776,12 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
             textfont=dict(size=14, color="#ffffff"),
         )
     )
+    font_size = 14 if is_mobile else 10
+    title_size = 22 if is_mobile else 18
+    height = 550 if is_mobile else 350
     fig_balanco.update_layout(
         barmode="group",
-        title=f"Balanço Mensal – {ano}",
+        title=dict(text=f"Balanço Mensal – {ano}", font=dict(size=title_size)),
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -1288,7 +1790,14 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
             x=0.5,
         ),
         margin=dict(b=90),
+        height=height,
+        font=dict(size=font_size),
+        dragmode="zoom",
+        hovermode="x unified",
+        showlegend=not is_mobile,
     )
+    if is_mobile:
+        fig_balanco.update_traces(text=None, texttemplate=None)
 
     with st.container():
         st.plotly_chart(fig_balanco, use_container_width=True)
@@ -1354,6 +1863,23 @@ def render_dashboard(caminho_banco: Optional[str]):
     """
     db_path = _resolve_db_path(caminho_banco)
     vars_dre = _load_vars_runtime(db_path)
+    # Garante depreciação mensal padrão disponível para o dashboard
+    deprec_mensal_dashboard = 0.0
+    try:
+        with get_conn(db_path) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT valor_num FROM dre_variaveis WHERE chave = ? ORDER BY id DESC LIMIT 1",
+                ("depreciacao_mensal_padrao",),
+            )
+            row = cur.fetchone()
+            if row and row[0] is not None:
+                deprec_mensal_dashboard = float(row[0] or 0.0)
+    except Exception:
+        deprec_mensal_dashboard = 0.0
+
+    if isinstance(vars_dre, dict):
+        vars_dre["_dashboard_deprec_mensal"] = deprec_mensal_dashboard
     df_entrada, df_saida = _load_entradas_saidas(db_path)
     df_mercadorias = _load_mercadorias(db_path)
 
@@ -1378,6 +1904,14 @@ def render_dashboard(caminho_banco: Optional[str]):
 
     metrics = _calc_monthly_metrics(db_path, int(ano_selecionado), vars_dre)
 
+    modo_mobile = st.toggle(
+        "Visualização simplificada (mobile)",
+        key="fd_modo_mobile",
+        value=st.session_state.get("fd_modo_mobile", False),
+        help="Reduz textos e poluição visual para facilitar a leitura no celular.",
+    )
+    IS_MOBILE = bool(modo_mobile)
+
     with st.container():
         render_chips_principais(df_entrada, db_path, int(ano_selecionado), vars_dre)
 
@@ -1385,25 +1919,51 @@ def render_dashboard(caminho_banco: Optional[str]):
         render_endividamento(db_path)
 
     with st.container():
-        col1, col2 = st.columns(2)
-        with col1:
-            render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect])
-        with col2:
-            render_bloco_lucro_liquido(metrics, int(ano_selecionado))
+        if IS_MOBILE:
+            with st.container():
+                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with st.container():
+                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with col2:
+                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
 
     with st.container():
-        col1, col2 = st.columns(2)
-        with col1:
-            render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect])
-        with col2:
-            render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado))
+        if IS_MOBILE:
+            with st.container():
+                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with st.container():
+                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with col2:
+                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
 
     with st.container():
-        col1, col2 = st.columns(2)
-        with col1:
-            render_bloco_top_meses(df_entrada, [int(a) for a in anos_multiselect])
-        with col2:
-            render_bloco_heatmap(df_entrada, [int(a) for a in anos_multiselect])
+        if IS_MOBILE:
+            with st.container():
+                render_bloco_top_meses(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with st.container():
+                render_bloco_heatmap(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                render_bloco_top_meses(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with col2:
+                render_bloco_heatmap(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
 
     with st.container():
         render_reposicao(df_mercadorias, metrics)
+
+
+def render(caminho_banco: Optional[str] = None):
+    """
+    Wrapper para compatibilidade com o carregador de páginas do FlowDash.
+    Apenas delega para render_dashboard.
+    """
+    return render_dashboard(caminho_banco)
