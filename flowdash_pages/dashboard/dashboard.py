@@ -546,7 +546,6 @@ def render_chips_principais(
 
 
 def render_endividamento(db_path: str) -> None:
-    st.subheader("Endividamento")
     db = cap.DB(db_path)
     df_loans_raw = cap._load_loans_raw(db)
     df_loans_view = cap._build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
@@ -613,34 +612,63 @@ def render_endividamento(db_path: str) -> None:
         margin=dict(l=10, r=10, t=10, b=10),
     )
 
-    col_endiv, col_meta = st.columns([3, 2])
-    with col_endiv:
-        col_geral, col_emp = st.columns([3, 2])
-        with col_geral:
-            st.plotly_chart(fig_total, use_container_width=True)
-        with col_emp:
-            for card in mini_cards[:3]:
-                fig = go.Figure(
-                    data=[
-                        go.Pie(
-                            labels=["Pago", "Em aberto"],
-                            values=[card["pago"], card["aberto"]],
-                            hole=0.55,
-                            marker=dict(colors=["#2ecc71", "#e74c3c"]),
-                            text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
-                            textinfo="percent+text",
-                            showlegend=False,
-                        )
-                    ]
-                )
-                fig.update_layout(
-                    height=180,
-                    margin=dict(l=5, r=5, t=5, b=5),
-                )
-                st.plotly_chart(fig, use_container_width=True)
+    col_meta, col_endiv = st.columns(2)
     with col_meta:
         st.markdown("### Metas da Loja")
         render_metas_resumo_dashboard(db_path)
+    with col_endiv:
+        st.markdown("### Endividamento")
+        col_geral, col_emp = st.columns([3, 2])
+        with col_geral:
+            # layout em 2 colunas: donut à esquerda, texto à direita
+            col_donut, col_info = st.columns([3, 2])
+
+            with col_donut:
+                st.plotly_chart(fig_total, use_container_width=True)
+
+            with col_info:
+                st.caption("Dívida total em empréstimos")
+                valor_total = (total_pago or 0) + (total_aberto or 0)
+                st.markdown(f"**{_fmt_currency(valor_total)}**")
+        with col_emp:
+            # container com deslocamento maior para a esquerda
+            with st.container():
+                st.markdown("<div style='margin-left:-80px;'>", unsafe_allow_html=True)
+                for card in mini_cards[:3]:
+                    col_donut, col_info = st.columns([2, 1])
+
+                    with col_donut:
+                        fig = go.Figure(
+                            data=[
+                                go.Pie(
+                                    labels=["Pago", "Em aberto"],
+                                    values=[card["pago"], card["aberto"]],
+                                    hole=0.5,
+                                    marker=dict(colors=["#2ecc71", "#e74c3c"]),
+                                    text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
+                                    textinfo="percent+text",
+                                    showlegend=False,
+                                )
+                            ]
+                        )
+
+                        fig.update_traces(
+                            textposition="inside",
+                            textfont_size=11,
+                        )
+
+                        fig.update_layout(
+                            height=210,
+                            margin=dict(l=0, r=0, t=10, b=0),
+                        )
+
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with col_info:
+                        st.caption(card["descricao"])
+                        st.write(f"Contratado: {_fmt_currency(card['contratado'])}")
+
+                st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame) -> None:
@@ -695,7 +723,17 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                     connectgaps=False,
                 )
             )
-            fig_lucro.update_layout(title=f"Lucro Líquido – {ano}")
+            fig_lucro.update_layout(
+                title=f"Lucro Líquido – {ano}",
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.2,
+                    xanchor="center",
+                    x=0.5,
+                ),
+                margin=dict(b=80),
+            )
 
     # --- Balanço Mensal com dados reais de entrada/saída ---
     df_ent_ano = df_entrada[df_entrada["ano"] == ano] if not df_entrada.empty else pd.DataFrame(columns=["mes", "Valor"])
@@ -754,14 +792,24 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
             textfont=dict(size=14, color="#ffffff"),
         )
     )
-    fig_balanco.update_layout(barmode="group", title=f"Balanço Mensal – {ano}")
+    fig_balanco.update_layout(
+        barmode="group",
+        title=f"Balanço Mensal – {ano}",
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(b=90),
+    )
 
     col1, col2 = st.columns(2)
     with col1:
         if ano != 2025:
             st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
         else:
-            st.markdown("Este gráfico considera o lucro líquido apenas a partir de outubro de 2025. Meses anteriores foram ignorados por falta de dados consistentes.")
             if show_lucro and fig_lucro is not None:
                 st.plotly_chart(fig_lucro, use_container_width=True)
             else:
@@ -893,7 +941,12 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
 
-    pivot = fat_mensal.pivot(index="mes_label", columns="ano", values="total").fillna(0.0)
+    pivot = (
+        fat_mensal
+        .pivot(index="mes_label", columns="ano", values="total")
+        .reindex(index=list(reversed(MESES_LABELS)))
+        .fillna(0.0)
+    )
     fig_heat = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
@@ -1033,6 +1086,14 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
         xaxis_title="Mês",
         yaxis_title="Faturamento (R$)",
         height=480,
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(b=90),
     )
 
     tabela_mm = (
@@ -1069,7 +1130,12 @@ def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int]) 
     if fat_mensal is None or fat_mensal.empty:
         st.info("Sem dados para os anos selecionados.")
         return
-    pivot = fat_mensal.pivot(index="mes_label", columns="ano", values="total").fillna(0.0)
+    pivot = (
+        fat_mensal
+        .pivot(index="mes_label", columns="ano", values="total")
+        .reindex(index=list(reversed(MESES_LABELS)))
+        .fillna(0.0)
+    )
     fig_heat = go.Figure(
         data=go.Heatmap(
             z=pivot.values,
@@ -1135,12 +1201,21 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int) -> None:
                     connectgaps=False,
                 )
             )
-            fig_lucro.update_layout(title=f"Lucro Líquido – {ano}")
+            fig_lucro.update_layout(
+                title=f"Lucro Líquido – {ano}",
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.25,
+                    xanchor="center",
+                    x=0.5,
+                ),
+                margin=dict(b=90),
+            )
 
     if ano != 2025:
         st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
     else:
-        st.markdown("Este gráfico considera o lucro líquido apenas a partir de outubro de 2025. Meses anteriores foram ignorados por falta de dados consistentes.")
         if show_lucro and fig_lucro is not None:
             st.plotly_chart(fig_lucro, use_container_width=True)
         else:
@@ -1206,7 +1281,18 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
             textfont=dict(size=14, color="#ffffff"),
         )
     )
-    fig_balanco.update_layout(barmode="group", title=f"Balanço Mensal – {ano}")
+    fig_balanco.update_layout(
+        barmode="group",
+        title=f"Balanço Mensal – {ano}",
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.25,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(b=90),
+    )
 
     with st.container():
         st.plotly_chart(fig_balanco, use_container_width=True)
@@ -1250,7 +1336,18 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
     fig = go.Figure()
     fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["Valor Reposto"], name="Valor reposto"))
     fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["CMV"], name="CMV"))
-    fig.update_layout(barmode="group", title=f"Reposição x Custo Mercadoria – {ano_reposicao}")
+    fig.update_layout(
+        barmode="group",
+        title=f"Reposição x Custo Mercadoria – {ano_reposicao}",
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.2,
+            xanchor="center",
+            x=0.5,
+        ),
+        margin=dict(b=80),
+    )
     st.plotly_chart(fig, use_container_width=True)
 
 
