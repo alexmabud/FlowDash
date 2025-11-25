@@ -612,63 +612,59 @@ def render_endividamento(db_path: str) -> None:
         margin=dict(l=10, r=10, t=10, b=10),
     )
 
-    col_meta, col_endiv = st.columns(2)
+    # duas colunas principais: Endividamento (esquerda) e Metas (direita)
+    col_endiv, col_meta = st.columns(2)
+
+    # --- coluna de Endividamento (donut total + donuts por empréstimo) ---
+    with col_endiv:
+        st.markdown("### Endividamento")
+
+        # coluna do donut total e coluna dos donuts por empréstimo
+        col_geral, col_emp = st.columns([3, 2])
+
+        # donut total
+        with col_geral:
+            st.plotly_chart(fig_total, use_container_width=True)
+            st.caption("Dívida total em empréstimos")
+            valor_total = (total_pago or 0) + (total_aberto or 0)
+            st.markdown(f"**{_fmt_currency(valor_total)}**")
+
+        # donuts individuais por empréstimo (empilhados na vertical)
+        with col_emp:
+            for card in mini_cards[:3]:
+                st.caption(card["descricao"])
+                st.write(f"Contratado: {_fmt_currency(card['contratado'])}")
+
+                fig = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=["Pago", "Em aberto"],
+                            values=[card["pago"], card["aberto"]],
+                            hole=0.5,
+                            marker=dict(colors=["#2ecc71", "#e74c3c"]),
+                            text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
+                            textinfo="percent+text",
+                            showlegend=False,
+                        )
+                    ]
+                )
+
+                fig.update_traces(
+                    textposition="inside",
+                    textfont_size=11,
+                )
+
+                fig.update_layout(
+                    height=210,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+
+    # --- coluna de Metas da Loja (fica à direita) ---
     with col_meta:
         st.markdown("### Metas da Loja")
         render_metas_resumo_dashboard(db_path)
-    with col_endiv:
-        st.markdown("### Endividamento")
-        col_geral, col_emp = st.columns([3, 2])
-        with col_geral:
-            # layout em 2 colunas: donut à esquerda, texto à direita
-            col_donut, col_info = st.columns([3, 2])
-
-            with col_donut:
-                st.plotly_chart(fig_total, use_container_width=True)
-
-            with col_info:
-                st.caption("Dívida total em empréstimos")
-                valor_total = (total_pago or 0) + (total_aberto or 0)
-                st.markdown(f"**{_fmt_currency(valor_total)}**")
-        with col_emp:
-            # container com deslocamento maior para a esquerda
-            with st.container():
-                st.markdown("<div style='margin-left:-80px;'>", unsafe_allow_html=True)
-                for card in mini_cards[:3]:
-                    col_donut, col_info = st.columns([2, 1])
-
-                    with col_donut:
-                        fig = go.Figure(
-                            data=[
-                                go.Pie(
-                                    labels=["Pago", "Em aberto"],
-                                    values=[card["pago"], card["aberto"]],
-                                    hole=0.5,
-                                    marker=dict(colors=["#2ecc71", "#e74c3c"]),
-                                    text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
-                                    textinfo="percent+text",
-                                    showlegend=False,
-                                )
-                            ]
-                        )
-
-                        fig.update_traces(
-                            textposition="inside",
-                            textfont_size=11,
-                        )
-
-                        fig.update_layout(
-                            height=210,
-                            margin=dict(l=0, r=0, t=10, b=0),
-                        )
-
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    with col_info:
-                        st.caption(card["descricao"])
-                        st.write(f"Contratado: {_fmt_currency(card['contratado'])}")
-
-                st.markdown("</div>", unsafe_allow_html=True)
 
 
 def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame) -> None:
