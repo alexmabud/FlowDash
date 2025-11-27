@@ -1096,7 +1096,6 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
         )
     )
     fig_balanco.update_traces(hovertemplate="R$ %{y:,.2f}<extra></extra>")
-    fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
     fig_balanco.update_layout(
         barmode="group",
         title=dict(text=f"Balanço Mensal – {ano}", font=dict(size=title_size)),
@@ -1117,6 +1116,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
     if is_mobile:
         fig_balanco.update_traces(text=None, texttemplate=None)
 
+    fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
     if is_mobile:
         with st.container():
             if ano != 2025:
@@ -1128,7 +1128,6 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 else:
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with st.container():
-            fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
             st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mes = pd.DataFrame(
                 [fat, saidas, resultado],
@@ -1158,7 +1157,6 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with col2:
             with st.container():
-                fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
                 st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 tabela_mes = pd.DataFrame(
                     [fat, saidas, resultado],
@@ -1977,6 +1975,7 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
         margin=dict(b=80),
         hovermode="x unified",
     )
+    fig = _apply_simplified_view(fig, simplified)
     st.plotly_chart(fig, use_container_width=True, config=_plotly_config(simplified=simplified))
 
 
