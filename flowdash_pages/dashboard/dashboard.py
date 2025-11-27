@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from shared.db import ensure_db_path_or_raise, get_conn
-from flowdash_pages.lancamentos.pagina.ui_cards_pagina import render_card_row
+from flowdash_pages.lancamentos.pagina.ui_cards_pagina import render_card_row, render_card_rows
 from flowdash_pages.dataframes import dataframes as df_utils
 from flowdash_pages.dataframes import contas_a_pagar as cap
 from flowdash_pages.dre.dre import (
@@ -644,14 +644,20 @@ def render_chips_principais(
     # =======================
     st.markdown("## Indicadores de Vendas")
 
-    # --- Bloco 1 – Vendas & Saldo (card igual ao Resumo do Dia) ---
-    render_card_row(
+    # --- Bloco 1 – Vendas & Saldo (2 linhas no mesmo card) ---
+    render_card_rows(
         "📊 Vendas & Saldo",
         [
-            ("Vendas do dia", vendas_dia, True),          # moeda
-            ("Vendas do mês", vendas_mes, True),          # moeda
-            ("Vendas do ano", vendas_ano, True),          # moeda
-            ("Saldo disponível", saldo_disponivel, True), # moeda
+            # Linha 1: 3 indicadores lado a lado
+            [
+                ("Vendas do dia", vendas_dia, True),
+                ("Vendas do mês", vendas_mes, True),
+                ("Vendas do ano", vendas_ano, True),
+            ],
+            # Linha 2: Saldo disponível ocupando a linha toda
+            [
+                ("Saldo disponível", saldo_disponivel, True),
+            ],
         ],
     )
 
@@ -702,15 +708,21 @@ def render_chips_principais(
         val_comp_ano_melhor_txt = f"{val_comp_ano_melhor_txt} ({_fmt_currency(delta_ano_melhor_valor)})"
     val_comp_ano_melhor = _colorize_val(val_comp_ano_melhor_txt, comp_ano_melhor_pct)
 
-    # --- Bloco 2 – Crescimento & Comparações (percentuais em texto, centralizados) ---
-    render_card_row(
+    # --- Bloco 2 – Crescimento & Comparações (2 linhas no mesmo card) ---
+    render_card_rows(
         "📈 Crescimento & Comparações",
         [
-            ("Crescimento m/m", [val_cres_mm], False),
-            ("Mês vs mesmo período ano anterior", [val_comp_mes_anoant], False),
-            (label_mes_melhor, [val_comp_mes_melhor], False),
-            ("Ano atual vs ano anterior", [val_comp_ano_ant], False),
-            (label_ano_melhor, [val_comp_ano_melhor], False),
+            # Linha 1: 3 indicadores
+            [
+                ("Crescimento m/m", [val_cres_mm], False),
+                ("Mês vs mesmo período ano anterior", [val_comp_mes_anoant], False),
+                (label_mes_melhor, [val_comp_mes_melhor], False),
+            ],
+            # Linha 2: 2 indicadores do ano
+            [
+                ("Ano atual vs ano anterior", [val_comp_ano_ant], False),
+                (label_ano_melhor, [val_comp_ano_melhor], False),
+            ],
         ],
     )
 
@@ -821,33 +833,31 @@ def render_endividamento(db_path: str) -> None:
 
         st.plotly_chart(fig, use_container_width=True)
 
-    # duas colunas principais: Metas (esquerda) e Endividamento (direita)
-    col_meta, col_endiv = st.columns(2)
+    st.markdown("### Endividamento")
 
-    # --- coluna de Metas da Loja (fica à esquerda) ---
-    with col_meta:
-        st.markdown("### Metas da Loja")
-        render_metas_resumo_dashboard(db_path)
+    # Se não houver empréstimos, mostra apenas o total
+    if not mini_cards:
+        st.plotly_chart(fig_total, use_container_width=True)
+        st.caption("Dívida total em empréstimos")
+        valor_total = (total_pago or 0) + (total_aberto or 0)
+        st.markdown(f"**{_fmt_currency(valor_total)}**")
+        return
 
-    # --- coluna de Endividamento (donut total + donuts por empréstimo) ---
-    with col_endiv:
-        st.markdown("### Endividamento")
+    # 1 coluna grande para o total + 1 coluna para CADA empréstimo
+    col_weights = [2] + [1] * len(mini_cards)
+    cols = st.columns(col_weights)
 
-        col_big, col_c1, col_c2 = st.columns([2, 1, 1])
+    # Donut total (maior) na primeira coluna
+    with cols[0]:
+        st.plotly_chart(fig_total, use_container_width=True)
+        st.caption("Dívida total em empréstimos")
+        valor_total = (total_pago or 0) + (total_aberto or 0)
+        st.markdown(f"**{_fmt_currency(valor_total)}**")
 
-        with col_big:
-            st.plotly_chart(fig_total, use_container_width=True)
-            st.caption("Dívida total em empréstimos")
-            valor_total = (total_pago or 0) + (total_aberto or 0)
-            st.markdown(f"**{_fmt_currency(valor_total)}**")
-
-        col_c1_container = col_c1.container()
-        col_c2_container = col_c2.container()
-
-        for idx, card in enumerate(mini_cards):
-            target_col = col_c1_container if idx % 2 == 0 else col_c2_container
-            with target_col:
-                _render_mini_loan_card(card)
+    # Todos os donuts individuais na MESMA LINHA, ao lado do total
+    for col, card in zip(cols[1:], mini_cards):
+        with col:
+            _render_mini_loan_card(card)
 
 
 def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame, is_mobile: bool = False) -> None:
@@ -1915,34 +1925,39 @@ def render_dashboard(caminho_banco: Optional[str]):
     with st.container():
         render_chips_principais(df_entrada, db_path, int(ano_selecionado), vars_dre)
 
+    # Bloco de Metas da Loja – continua no topo, ocupando a largura toda
+    with st.container():
+        st.markdown("### Metas da Loja")
+        render_metas_resumo_dashboard(db_path)
+
+    with st.container():
+        if IS_MOBILE:
+            with st.container():
+                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with st.container():
+                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with col2:
+                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
+
+    with st.container():
+        if IS_MOBILE:
+            with st.container():
+                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with st.container():
+                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
+            with col2:
+                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
+
     with st.container():
         render_endividamento(db_path)
-
-    with st.container():
-        if IS_MOBILE:
-            with st.container():
-                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
-            with st.container():
-                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                render_bloco_faturamento_anual(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
-            with col2:
-                render_bloco_lucro_liquido(metrics, int(ano_selecionado), vars_dre, db_path, is_mobile=IS_MOBILE)
-
-    with st.container():
-        if IS_MOBILE:
-            with st.container():
-                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
-            with st.container():
-                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
-        else:
-            col1, col2 = st.columns(2)
-            with col1:
-                render_bloco_faturamento_mensal(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
-            with col2:
-                render_bloco_balanco_mensal(df_entrada, df_saida, int(ano_selecionado), is_mobile=IS_MOBILE)
 
     with st.container():
         if IS_MOBILE:
