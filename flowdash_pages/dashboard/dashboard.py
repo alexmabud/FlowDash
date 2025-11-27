@@ -90,25 +90,33 @@ def _hover_currency(label_prefix: str | None = None, show_x: bool = False) -> st
 def _plotly_config(simplified: bool = False) -> dict:
     """
     Retorna a configuração padrão de exibição dos gráficos Plotly.
-    Se simplified=True, desativa zoom/pan, mas mantém hover.
+    Se simplified=True, desativa zoom/pan e esconde botões, mantendo hover.
     """
     if simplified:
         return {
             "displaylogo": False,
             "scrollZoom": False,
-            "doubleClick": "reset",
+            "doubleClick": False,
+            "displayModeBar": False,
+            "responsive": True,
         }
-    return {"displaylogo": False}
+    return {
+        "displaylogo": False,
+        "responsive": True,
+    }
 
 
 def _apply_simplified_view(fig, simplified: bool):
     """
-    Se simplified=True, trava zoom/pan nos eixos, mantendo hover ativo.
+    Se simplified=True, trava zoom/pan em todos os eixos, mantendo hover ativo.
     """
     if not simplified or fig is None:
         return fig
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+    for attr in dir(fig.layout):
+        if attr.startswith("xaxis") or attr.startswith("yaxis"):
+            axis = getattr(fig.layout, attr, None)
+            if axis is not None:
+                axis.fixedrange = True
     fig.update_layout(dragmode=False)
     return fig
 
@@ -1115,10 +1123,12 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
             else:
                 if show_lucro and fig_lucro is not None:
+                    fig_lucro = _apply_simplified_view(fig_lucro, is_mobile)
                     st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 else:
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with st.container():
+            fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
             st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mes = pd.DataFrame(
                 [fat, saidas, resultado],
@@ -1142,11 +1152,13 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
             else:
                 if show_lucro and fig_lucro is not None:
+                    fig_lucro = _apply_simplified_view(fig_lucro, is_mobile)
                     st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 else:
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with col2:
             with st.container():
+                fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
                 st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 tabela_mes = pd.DataFrame(
                     [fat, saidas, resultado],
@@ -1376,8 +1388,10 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
 
     if is_mobile:
         with st.container():
+            fig_fat_ano = _apply_simplified_view(fig_fat_ano, is_mobile)
             st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with st.container():
+            fig_mm = _apply_simplified_view(fig_mm, is_mobile)
             st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mm = (
                 fat_mensal.pivot(index="ano", columns="mes_label", values="total")
@@ -1392,14 +1406,18 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
             st.dataframe(tabela_mm_styled, use_container_width=True)
 
         with st.container():
+            fig_rank = _apply_simplified_view(fig_rank, is_mobile)
             st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with st.container():
+            fig_heat = _apply_simplified_view(fig_heat, is_mobile)
             st.plotly_chart(fig_heat, use_container_width=True, config=_plotly_config(simplified=is_mobile))
     else:
         col1, col2 = st.columns(2)
         with col1:
+            fig_fat_ano = _apply_simplified_view(fig_fat_ano, is_mobile)
             st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with col2:
+            fig_mm = _apply_simplified_view(fig_mm, is_mobile)
             st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mm = (
                 fat_mensal.pivot(index="ano", columns="mes_label", values="total")
@@ -1415,8 +1433,10 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
 
         col3, col4 = st.columns(2)
         with col3:
+            fig_rank = _apply_simplified_view(fig_rank, is_mobile)
             st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with col4:
+            fig_heat = _apply_simplified_view(fig_heat, is_mobile)
             st.plotly_chart(fig_heat, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
@@ -1474,6 +1494,7 @@ def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: L
         showlegend=not is_mobile,
         margin=dict(t=80, b=40),
     )
+    fig_fat_ano = _apply_simplified_view(fig_fat_ano, is_mobile)
     st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
@@ -1610,6 +1631,7 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
         {m: _fmt_currency for m in MESES_LABELS}
     )
 
+    fig_mm = _apply_simplified_view(fig_mm, is_mobile)
     st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
     st.markdown("**Faturamento Mês a Mês (R$)**")
     st.dataframe(tabela_mm_styled, use_container_width=True)
@@ -1637,6 +1659,7 @@ def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]
         hovermode="x unified",
         showlegend=not is_mobile,
     )
+    fig_rank = _apply_simplified_view(fig_rank, is_mobile)
     st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
@@ -1661,6 +1684,7 @@ def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
             hoverongaps=False,
         )
     )
+    fig_heat = _apply_simplified_view(fig_heat, is_mobile)
     font_size = 14 if is_mobile else 10
     title_size = 22 if is_mobile else 18
     height = 550 if is_mobile else 350
