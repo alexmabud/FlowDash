@@ -72,6 +72,47 @@ def _fmt_percent(v: float) -> str:
         return "0,0%"
 
 
+def _hover_currency(label_prefix: str | None = None, show_x: bool = False) -> str:
+    """
+    Gera um hovertemplate padrão para valores em R$.
+    Exemplo: "%{x}<br>R$ %{y:,.2f}<extra></extra>"
+    """
+    base = "R$ %{y:,.2f}"
+    parts: List[str] = []
+    if show_x:
+        parts.append("%{x}")
+    if label_prefix:
+        parts.append(label_prefix)
+    parts.append(base)
+    return "<br>".join(parts) + "<extra></extra>"
+
+
+def _plotly_config(simplified: bool = False) -> dict:
+    """
+    Retorna a configuração padrão de exibição dos gráficos Plotly.
+    Se simplified=True, desativa zoom/pan, mas mantém hover.
+    """
+    if simplified:
+        return {
+            "displaylogo": False,
+            "scrollZoom": False,
+            "doubleClick": "reset",
+        }
+    return {"displaylogo": False}
+
+
+def _apply_simplified_view(fig, simplified: bool):
+    """
+    Se simplified=True, trava zoom/pan nos eixos, mantendo hover ativo.
+    """
+    if not simplified or fig is None:
+        return fig
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
+    fig.update_layout(dragmode=False)
+    return fig
+
+
 def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     cols_lower = {c.lower(): c for c in df.columns}
     for cand in candidates:
@@ -431,6 +472,7 @@ def _extrair_metas_completo_dashboard(df_metas_vig: pd.DataFrame, vendedor_upper
 
 
 def render_metas_resumo_dashboard(db_path: str) -> None:
+    simplified = bool(st.session_state.get("fd_modo_mobile", False))
     ref_day = date.today()
     inicio_sem = _inicio_semana_dashboard(ref_day)
     inicio_mes = ref_day.replace(day=1)
@@ -461,16 +503,28 @@ def render_metas_resumo_dashboard(db_path: str) -> None:
 
     c1, c2, c3 = st.columns(3)
     c1.plotly_chart(
-        build_meta_gauge_dashboard("Meta do Dia", perc_dia, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_dia)),
+        _apply_simplified_view(
+            build_meta_gauge_dashboard("Meta do Dia", perc_dia, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_dia)),
+            simplified,
+        ),
         use_container_width=True,
+        config=_plotly_config(simplified=simplified),
     )
     c2.plotly_chart(
-        build_meta_gauge_dashboard("Meta da Semana", perc_sem, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_sem)),
+        _apply_simplified_view(
+            build_meta_gauge_dashboard("Meta da Semana", perc_sem, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_sem)),
+            simplified,
+        ),
         use_container_width=True,
+        config=_plotly_config(simplified=simplified),
     )
     c3.plotly_chart(
-        build_meta_gauge_dashboard("Meta do Mês", perc_mes, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_mes)),
+        _apply_simplified_view(
+            build_meta_gauge_dashboard("Meta do Mês", perc_mes, bronze_pct_calc, prata_pct_calc, _fmt_currency(valor_mes)),
+            simplified,
+        ),
         use_container_width=True,
+        config=_plotly_config(simplified=simplified),
     )
 
     def _tabela_periodo(label: str, meta_base: float, val: float) -> pd.DataFrame:
@@ -633,11 +687,19 @@ def render_chips_principais(
     # -------------------------
     # Bloco 3 – Eficiência de Vendas
     # -------------------------
-    # Usa os metrics do DRE para pegar n_vendas (ano atual) e ticket médio
-    metrics_ano_atual = _calc_monthly_metrics(db_path, ano_atual, vars_dre)
-    receita_bruta_ano = sum(m.get("fat", 0.0) or 0.0 for m in metrics_ano_atual)
-    n_vendas_ano = sum(m.get("n_vendas", 0) or 0 for m in metrics_ano_atual)
-    ticket_medio_ano = (receita_bruta_ano / n_vendas_ano) if n_vendas_ano else 0.0
+    # Cálculo direto a partir da tabela entrada (cada linha = 1 venda)
+
+    # Número de vendas no mês atual (linhas da tabela entrada)
+    n_vendas_mes = int(df.loc[mask_mes_atual].shape[0])
+
+    # Número de vendas no ano atual
+    n_vendas_ano = int(df.loc[mask_ano_atual].shape[0])
+
+    # Ticket médio do mês: vendas_mes / n_vendas_mes
+    ticket_medio_mes = (vendas_mes / n_vendas_mes) if n_vendas_mes > 0 else 0.0
+
+    # Ticket médio do ano: vendas_ano / n_vendas_ano
+    ticket_medio_ano = (vendas_ano / n_vendas_ano) if n_vendas_ano > 0 else 0.0
 
     # =======================
     # Renderização dos blocos (cards estilo Lançamentos)
@@ -726,17 +788,26 @@ def render_chips_principais(
         ],
     )
 
-    # --- Bloco 3 – Eficiência de Vendas ---
-    render_card_row(
+    # --- Bloco 3 – Eficiência de Vendas (2 linhas no mesmo card) ---
+    render_card_rows(
         "🎯 Eficiência de Vendas",
         [
-            ("Ticket médio (ano)", ticket_medio_ano, True),       # moeda
-            ("Nº de vendas (ano)", [str(int(n_vendas_ano))], False),     # número simples (texto para não virar R$)
+            # Linha 1: Ticket médio mês/ano
+            [
+                ("Ticket médio (mês)", ticket_medio_mes, True),
+                ("Ticket médio (ano)", ticket_medio_ano, True),
+            ],
+            # Linha 2: Nº de vendas mês/ano
+            [
+                ("Nº de vendas (mês)", [str(int(n_vendas_mes))], False),
+                ("Nº de vendas (ano)", [str(int(n_vendas_ano))], False),
+            ],
         ],
     )
 
 
 def render_endividamento(db_path: str) -> None:
+    simplified = bool(st.session_state.get("fd_modo_mobile", False))
     db = cap.DB(db_path)
     df_loans_raw = cap._load_loans_raw(db)
     df_loans_view = cap._build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
@@ -795,6 +866,7 @@ def render_endividamento(db_path: str) -> None:
                 text=[_fmt_currency(total_pago), _fmt_currency(total_aberto)],
                 textinfo="percent+text",
                 showlegend=False,
+                hovertemplate="%{label}<br>R$ %{value:,.2f}<extra></extra>",
             )
         ]
     )
@@ -817,6 +889,7 @@ def render_endividamento(db_path: str) -> None:
                     text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
                     textinfo="percent+text",
                     showlegend=False,
+                    hovertemplate="%{label}<br>R$ %{value:,.2f}<extra></extra>",
                 )
             ]
         )
@@ -831,13 +904,13 @@ def render_endividamento(db_path: str) -> None:
             margin=dict(l=0, r=0, t=0, b=0),
         )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(_apply_simplified_view(fig, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
 
     st.markdown("### Endividamento")
 
     # Se não houver empréstimos, mostra apenas o total
     if not mini_cards:
-        st.plotly_chart(fig_total, use_container_width=True)
+        st.plotly_chart(_apply_simplified_view(fig_total, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
         st.caption("Dívida total em empréstimos")
         valor_total = (total_pago or 0) + (total_aberto or 0)
         st.markdown(f"**{_fmt_currency(valor_total)}**")
@@ -849,7 +922,7 @@ def render_endividamento(db_path: str) -> None:
 
     # Donut total (maior) na primeira coluna
     with cols[0]:
-        st.plotly_chart(fig_total, use_container_width=True)
+        st.plotly_chart(_apply_simplified_view(fig_total, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
         st.caption("Dívida total em empréstimos")
         valor_total = (total_pago or 0) + (total_aberto or 0)
         st.markdown(f"**{_fmt_currency(valor_total)}**")
@@ -900,6 +973,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                     text=pos_text,
                     textposition="top center",
                     connectgaps=False,
+                    hovertemplate=_hover_currency(show_x=True),
                 )
             )
             fig_lucro.add_trace(
@@ -913,8 +987,10 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                     text=neg_text,
                     textposition="top center",
                     connectgaps=False,
+                    hovertemplate=_hover_currency(show_x=True),
                 )
             )
+            fig_lucro = _apply_simplified_view(fig_lucro, is_mobile)
             fig_lucro.update_layout(
                 title=dict(text=f"Lucro Líquido – {ano}", font=dict(size=title_size)),
                 legend=dict(
@@ -950,14 +1026,31 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
     res_zero = [v if v == 0 else None for v in resultado]
 
     fig_balanco = go.Figure()
-    fig_balanco.add_trace(go.Bar(x=df_balanco["Mês"], y=df_balanco["Faturamento"], name="Entrada", marker_color="#2980b9"))
-    fig_balanco.add_trace(go.Bar(x=df_balanco["Mês"], y=df_balanco["Saída"], name="Saída", marker_color="#e67e22"))
+    fig_balanco.add_trace(
+        go.Bar(
+            x=df_balanco["Mês"],
+            y=df_balanco["Faturamento"],
+            name="Entrada",
+            marker_color="#2980b9",
+            hovertemplate="Entrada: R$ %{y:,.2f}<extra></extra>",
+        )
+    )
+    fig_balanco.add_trace(
+        go.Bar(
+            x=df_balanco["Mês"],
+            y=df_balanco["Saída"],
+            name="Saída",
+            marker_color="#e67e22",
+            hovertemplate="Saída: R$ %{y:,.2f}<extra></extra>",
+        )
+    )
     fig_balanco.add_trace(
         go.Bar(
             x=df_balanco["Mês"],
             y=res_pos,
             name="Resultado (+)",
             marker_color="#27ae60",
+            hovertemplate="Resultado: R$ %{y:,.2f}<extra></extra>",
         )
     )
     fig_balanco.add_trace(
@@ -966,6 +1059,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
             y=res_neg,
             name="Resultado (-)",
             marker_color="#e74c3c",
+            hovertemplate="Resultado: R$ %{y:,.2f}<extra></extra>",
         )
     )
     if any(v is not None for v in res_zero):
@@ -975,6 +1069,7 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 y=res_zero,
                 name="Resultado (0)",
                 marker_color="#95a5a6",
+                hovertemplate="Resultado: R$ %{y:,.2f}<extra></extra>",
             )
         )
     linha_text = [_fmt_currency(v) for v in resultado]
@@ -989,8 +1084,11 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
             text=linha_text,
             textposition="top center",
             textfont=dict(size=14, color="#ffffff"),
+            hovertemplate=_hover_currency(show_x=True),
         )
     )
+    fig_balanco.update_traces(hovertemplate="R$ %{y:,.2f}<extra></extra>")
+    fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
     fig_balanco.update_layout(
         barmode="group",
         title=dict(text=f"Balanço Mensal – {ano}", font=dict(size=title_size)),
@@ -1017,11 +1115,11 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
             else:
                 if show_lucro and fig_lucro is not None:
-                    st.plotly_chart(fig_lucro, use_container_width=True)
+                    st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 else:
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with st.container():
-            st.plotly_chart(fig_balanco, use_container_width=True)
+            st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mes = pd.DataFrame(
                 [fat, saidas, resultado],
                 index=["Entrada", "Saída", "Resultado"],
@@ -1044,12 +1142,12 @@ def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFr
                 st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
             else:
                 if show_lucro and fig_lucro is not None:
-                    st.plotly_chart(fig_lucro, use_container_width=True)
+                    st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 else:
                     st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
         with col2:
             with st.container():
-                st.plotly_chart(fig_balanco, use_container_width=True)
+                st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
                 tabela_mes = pd.DataFrame(
                     [fat, saidas, resultado],
                     index=["Entrada", "Saída", "Resultado"],
@@ -1215,6 +1313,7 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
                 text=text_vals,
                 textposition="top center",
                 textfont=dict(color=text_colors, size=12),
+                hovertemplate=_hover_currency(show_x=True),
             )
         )
     fig_mm.add_hline(y=0, line_color="#888", line_dash="dash", opacity=0.7)
@@ -1235,6 +1334,8 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
     ranking["label"] = ranking.apply(lambda r: f"{MESES_LABELS[int(r['mes']) - 1]}/{int(r['ano'])}", axis=1)
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
+    fig_rank.update_traces(hovertemplate=_hover_currency(show_x=True))
+    fig_rank.update_traces(hovertemplate=_hover_currency(show_x=True))
     fig_rank.update_layout(
         height=height,
         font=dict(size=font_size),
@@ -1259,6 +1360,11 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
             hoverongaps=False,
         )
     )
+    fig_heat.update_traces(hovertemplate="%{y} - %{x}<br>Faturamento: R$ %{z:,.2f}<extra></extra>")
+    fig_heat.update_traces(hovertemplate="%{y} - %{x}<br>Faturamento: R$ %{z:,.2f}<extra></extra>")
+    fig_heat.update_traces(hovertemplate="%{x} – %{y}<br>R$ %{z:,.2f}<extra></extra>")
+    fig_heat.update_traces(hovertemplate="%{x} – %{y}<br>R$ %{z:,.2f}<extra></extra>")
+    fig_heat.update_traces(hovertemplate="%{x} – %{y}<br>R$ %{z:,.2f}<extra></extra>")
     fig_heat.update_layout(
         title=dict(text="Heatmap de Faturamento", font=dict(size=title_size)),
         height=height,
@@ -1270,9 +1376,9 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
 
     if is_mobile:
         with st.container():
-            st.plotly_chart(fig_fat_ano, use_container_width=True)
+            st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with st.container():
-            st.plotly_chart(fig_mm, use_container_width=True)
+            st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mm = (
                 fat_mensal.pivot(index="ano", columns="mes_label", values="total")
                 .reindex(columns=MESES_LABELS, fill_value=0.0)
@@ -1286,15 +1392,15 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
             st.dataframe(tabela_mm_styled, use_container_width=True)
 
         with st.container():
-            st.plotly_chart(fig_rank, use_container_width=True)
+            st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with st.container():
-            st.plotly_chart(fig_heat, use_container_width=True)
+            st.plotly_chart(fig_heat, use_container_width=True, config=_plotly_config(simplified=is_mobile))
     else:
         col1, col2 = st.columns(2)
         with col1:
-            st.plotly_chart(fig_fat_ano, use_container_width=True)
+            st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with col2:
-            st.plotly_chart(fig_mm, use_container_width=True)
+            st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
             tabela_mm = (
                 fat_mensal.pivot(index="ano", columns="mes_label", values="total")
                 .reindex(columns=MESES_LABELS, fill_value=0.0)
@@ -1309,9 +1415,9 @@ def render_analise_anual(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
 
         col3, col4 = st.columns(2)
         with col3:
-            st.plotly_chart(fig_rank, use_container_width=True)
+            st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         with col4:
-            st.plotly_chart(fig_heat, use_container_width=True)
+            st.plotly_chart(fig_heat, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
 def _prepare_fat_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int]) -> Optional[pd.DataFrame]:
@@ -1351,6 +1457,7 @@ def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: L
         cliponaxis=False,
         line=dict(color="#9b59b6"),
         marker=dict(color="#9b59b6"),
+        hovertemplate=_hover_currency(show_x=True),
     )
     fig_fat_ano.update_xaxes(dtick=1, tickformat="d")
     if is_mobile:
@@ -1367,7 +1474,7 @@ def render_bloco_faturamento_anual(df_entrada: pd.DataFrame, anos_multiselect: L
         showlegend=not is_mobile,
         margin=dict(t=80, b=40),
     )
-    st.plotly_chart(fig_fat_ano, use_container_width=True)
+    st.plotly_chart(fig_fat_ano, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
 def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
@@ -1465,8 +1572,9 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
                 text=text_vals,
                 textposition="top center",
                 textfont=dict(color=text_colors, size=12),
+                hovertemplate=_hover_currency(show_x=True),
             )
-    )
+        )
     fig_mm.add_hline(y=0, line_color="#888", line_dash="dash", opacity=0.7)
     font_size = 14 if is_mobile else 10
     title_size = 22 if is_mobile else 18
@@ -1502,7 +1610,7 @@ def render_bloco_faturamento_mensal(df_entrada: pd.DataFrame, anos_multiselect: 
         {m: _fmt_currency for m in MESES_LABELS}
     )
 
-    st.plotly_chart(fig_mm, use_container_width=True)
+    st.plotly_chart(fig_mm, use_container_width=True, config=_plotly_config(simplified=is_mobile))
     st.markdown("**Faturamento Mês a Mês (R$)**")
     st.dataframe(tabela_mm_styled, use_container_width=True)
 
@@ -1517,6 +1625,7 @@ def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]
     ranking["label"] = ranking.apply(lambda r: f"{MESES_LABELS[int(r['mes']) - 1]}/{int(r['ano'])}", axis=1)
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
+    fig_rank.update_traces(hovertemplate=_hover_currency(show_x=True))
     font_size = 14 if is_mobile else 10
     title_size = 22 if is_mobile else 18
     height = 550 if is_mobile else 350
@@ -1528,7 +1637,7 @@ def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]
         hovermode="x unified",
         showlegend=not is_mobile,
     )
-    st.plotly_chart(fig_rank, use_container_width=True)
+    st.plotly_chart(fig_rank, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
 def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int], is_mobile: bool = False) -> None:
@@ -1563,7 +1672,7 @@ def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
         hovermode="x unified",
         showlegend=not is_mobile,
     )
-    st.plotly_chart(fig_heat, use_container_width=True)
+    st.plotly_chart(fig_heat, use_container_width=True, config=_plotly_config(simplified=is_mobile))
 
 
 def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path: str, is_mobile: bool = False) -> None:
@@ -1571,6 +1680,8 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
     meses = list(range(1, 13))
     lucro_labels = [MESES_LABELS[m - 1] for m in meses]
     lucros_raw = [metrics[m - 1].get("lucro_liq", None) if m - 1 < len(metrics) else None for m in meses]
+
+    # Prepara a série principal de Lucro Líquido
     lucros_plot = []
     for idx, val in enumerate(lucros_raw, start=1):
         if idx < 10:
@@ -1581,7 +1692,8 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
         except Exception:
             v = None
         lucros_plot.append(v if v not in (None, 0) else None)
-    # Lê depreciação mensal padrão das Variáveis DRE (injeção do dashboard tem prioridade)
+
+    # 1) Tenta ler depreciação das variáveis já carregadas
     deprec_mensal = 0.0
     if isinstance(vars_dre, dict):
         for key in ("_dashboard_deprec_mensal", "depreciacao_mensal_padrao"):
@@ -1592,109 +1704,88 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
                     deprec_mensal = 0.0
                 break
 
-    # Se ainda estiver 0, tenta ler diretamente da tabela dre_variaveis (registro mais recente)
+    # 2) Se ainda for 0, busca diretamente no banco de forma robusta
     if not deprec_mensal and db_path:
         try:
             with get_conn(db_path) as conn:
-                df_dep = pd.read_sql(
-                    'SELECT valor_num FROM "dre_variaveis" WHERE chave = "depreciacao_mensal_padrao" ORDER BY id DESC LIMIT 1',
-                    conn,
+                cur = conn.cursor()
+                cur.execute(
+                    """
+                    SELECT valor_num
+                    FROM dre_variaveis
+                    WHERE chave = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    ("depreciacao_mensal_padrao",),
                 )
-                if not df_dep.empty:
-                    v = pd.to_numeric(df_dep["valor_num"], errors="coerce").dropna()
-                    if not v.empty:
-                        deprec_mensal = float(v.iloc[0])
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    deprec_mensal = float(row[0])
         except Exception:
-            deprec_mensal = deprec_mensal
-    lucros_antes_plot = [
-        (v + deprec_mensal) if v is not None else None
-        for v in lucros_plot
-    ]
-    debug_rows = []
-    for label, ll, la in zip(lucro_labels, lucros_plot, lucros_antes_plot):
+            pass
+
+    serie_lucro_liquido = lucros_plot
+
+    # Cria a série de depreciação mensal (constante ou 0)
+    serie_deprec_mensal = [deprec_mensal for _ in serie_lucro_liquido]
+
+    # 3) Calcula a série "Antes da Depreciação" somando (Lucro + Depreciação)
+    serie_lucro_antes_deprec = []
+    for ll, dep in zip(serie_lucro_liquido, serie_deprec_mensal):
         if ll is None:
-            continue
-        debug_rows.append(
-            {
-                "Mês": label,
-                "Lucro Líquido": _fmt_currency(ll),
-                "Antes da Depreciação": _fmt_currency(la) if la is not None else "—",
-                "Depreciação usada": _fmt_currency(deprec_mensal),
-            }
-        )
-    antes_pos = [v if (v is not None and v > 0) else None for v in lucros_antes_plot]
-    antes_neg = [v if (v is not None and v < 0) else None for v in lucros_antes_plot]
-    antes_pos_text = [_fmt_currency(v) if v is not None else None for v in antes_pos]
-    antes_neg_text = [_fmt_currency(v) if v is not None else None for v in antes_neg]
+            serie_lucro_antes_deprec.append(None)
+        else:
+            serie_lucro_antes_deprec.append((ll or 0.0) + (dep or 0.0))
+
+    text_liq = [_fmt_currency(v) if v is not None else None for v in serie_lucro_liquido]
+    text_antes = [_fmt_currency(v) if v is not None else None for v in serie_lucro_antes_deprec]
+    colors_liq = ["#2ecc71" if (v is not None and v >= 0) else "#e74c3c" for v in serie_lucro_liquido]
+    colors_antes = ["#2ecc71" if (v is not None and v >= 0) else "#e74c3c" for v in serie_lucro_antes_deprec]
+
     fig_lucro = None
     show_lucro = False
     font_size = 14 if is_mobile else 10
     title_size = 22 if is_mobile else 18
     height = 550 if is_mobile else 350
-    if ano == 2025:
-        show_lucro = any(v is not None for v in lucros_plot)
-        if show_lucro:
-            pos_vals = [v if (v is not None and v > 0) else None for v in lucros_plot]
-            neg_vals = [v if (v is not None and v < 0) else None for v in lucros_plot]
-            pos_text = [_fmt_currency(v) if v is not None else None for v in pos_vals]
-            neg_text = [_fmt_currency(v) if v is not None else None for v in neg_vals]
-            texto_antes = [_fmt_currency(v) if v is not None else None for v in lucros_antes_plot]
 
+    if ano == 2025:
+        show_lucro = any(v is not None for v in serie_lucro_liquido)
+        if show_lucro:
             fig_lucro = go.Figure()
+            # Linha 1: Lucro Líquido
             fig_lucro.add_trace(
                 go.Scatter(
                     x=lucro_labels,
-                    y=pos_vals,
+                    y=serie_lucro_liquido,
                     mode="lines+markers+text",
-                    name="Lucro Líquido (+)",
-                    line=dict(color="#2ecc71"),
-                    marker=dict(color="#2ecc71"),
-                    text=pos_text,
+                    name="Lucro Líquido",
+                    line=dict(color="#34495e", width=3),
+                    marker=dict(color=colors_liq, size=8, line=dict(width=2, color=colors_liq)),
+                    text=text_liq,
                     textposition="top center",
+                    textfont=dict(color=colors_liq, size=12, family="Arial Black"),
                     connectgaps=False,
+                    hovertemplate=_hover_currency(show_x=True),
                 )
             )
+            # Linha 2: Lucro Líquido antes da Depreciação
             fig_lucro.add_trace(
                 go.Scatter(
                     x=lucro_labels,
-                    y=neg_vals,
+                    y=serie_lucro_antes_deprec,
                     mode="lines+markers+text",
-                    name="Lucro Líquido (-)",
-                    line=dict(color="#e74c3c"),
-                    marker=dict(color="#e74c3c"),
-                    text=neg_text,
-                    textposition="top center",
+                    name="Lucro Líquido antes da Depreciação",
+                    line=dict(color="#95a5a6", width=2, dash="dot"),
+                    marker=dict(color=colors_antes, size=6, symbol="circle-open", line=dict(width=2, color=colors_antes)),
+                    text=text_antes,
+                    textposition="bottom center",
+                    textfont=dict(color=colors_antes, size=10),
                     connectgaps=False,
+                    hovertemplate=_hover_currency(show_x=True),
                 )
             )
-            fig_lucro.add_trace(
-                go.Scatter(
-                    x=lucro_labels,
-                    y=antes_pos,
-                    mode="lines+markers+text",
-                    name="Antes da Depreciação (+)",
-                    line=dict(color="#2ecc71", width=3, dash="dot"),
-                    marker=dict(color="#2ecc71"),
-                    text=antes_pos_text,
-                    textposition="top center",
-                    textfont=dict(size=11),
-                    connectgaps=False,
-                )
-            )
-            fig_lucro.add_trace(
-                go.Scatter(
-                    x=lucro_labels,
-                    y=antes_neg,
-                    mode="lines+markers+text",
-                    name="Antes da Depreciação (-)",
-                    line=dict(color="#e74c3c", width=3, dash="dot"),
-                    marker=dict(color="#e74c3c"),
-                    text=antes_neg_text,
-                    textposition="top center",
-                    textfont=dict(size=11),
-                    connectgaps=False,
-                )
-            )
+
             fig_lucro.update_layout(
                 title=dict(text=f"Lucro Líquido – {ano}", font=dict(size=title_size)),
                 height=height,
@@ -1718,11 +1809,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
         st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
     else:
         if show_lucro and fig_lucro is not None:
-            st.plotly_chart(fig_lucro, use_container_width=True)
-            if debug_rows:
-                import pandas as pd
-                st.markdown("**Debug Lucro x Antes da Depreciação**")
-                st.table(pd.DataFrame(debug_rows))
+            st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         else:
             st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
 
@@ -1784,6 +1871,7 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
             text=linha_text,
             textposition="top center",
             textfont=dict(size=14, color="#ffffff"),
+            hovertemplate="Mês: %{x}<br>Balanço: R$ %{y:,.2f}<extra></extra>",
         )
     )
     font_size = 14 if is_mobile else 10
@@ -1810,7 +1898,7 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
         fig_balanco.update_traces(text=None, texttemplate=None)
 
     with st.container():
-        st.plotly_chart(fig_balanco, use_container_width=True)
+        st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         tabela_mes = pd.DataFrame(
             [fat, saidas, resultado],
             index=["Entrada", "Saída", "Resultado"],
@@ -1828,6 +1916,7 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
         st.dataframe(tabela_fmt, use_container_width=True)
 
 def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
+    simplified = bool(st.session_state.get("fd_modo_mobile", False))
     st.subheader("Reposição / Estoque")
     if df_mercadorias.empty:
         st.info("Sem dados de mercadorias.")
@@ -1849,8 +1938,8 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
         }
     )
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["Valor Reposto"], name="Valor reposto"))
-    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["CMV"], name="CMV"))
+    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["Valor Reposto"], name="Valor reposto", hovertemplate=_hover_currency(show_x=True)))
+    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["CMV"], name="CMV", hovertemplate=_hover_currency(show_x=True)))
     fig.update_layout(
         barmode="group",
         title=f"Reposição x Custo Mercadoria – {ano_reposicao}",
@@ -1862,8 +1951,9 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
             x=0.5,
         ),
         margin=dict(b=80),
+        hovermode="x unified",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config=_plotly_config(simplified=simplified))
 
 
 # ========================= Entrada principal =========================
@@ -1879,12 +1969,21 @@ def render_dashboard(caminho_banco: Optional[str]):
         with get_conn(db_path) as conn:
             cur = conn.cursor()
             cur.execute(
-                "SELECT valor_num FROM dre_variaveis WHERE chave = ? ORDER BY id DESC LIMIT 1",
+                """
+                SELECT valor_num
+                FROM dre_variaveis
+                WHERE chave = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
                 ("depreciacao_mensal_padrao",),
             )
             row = cur.fetchone()
             if row and row[0] is not None:
-                deprec_mensal_dashboard = float(row[0] or 0.0)
+                try:
+                    deprec_mensal_dashboard = float(row[0])
+                except Exception:
+                    deprec_mensal_dashboard = 0.0
     except Exception:
         deprec_mensal_dashboard = 0.0
 
