@@ -1831,6 +1831,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
         st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
     else:
         if show_lucro and fig_lucro is not None:
+            fig_lucro = _apply_simplified_view(fig_lucro, is_mobile)
             st.plotly_chart(fig_lucro, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         else:
             st.warning("Não há dados de lucro líquido registrados entre outubro e dezembro de 2025.")
@@ -1920,6 +1921,7 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
         fig_balanco.update_traces(text=None, texttemplate=None)
 
     with st.container():
+        fig_balanco = _apply_simplified_view(fig_balanco, is_mobile)
         st.plotly_chart(fig_balanco, use_container_width=True, config=_plotly_config(simplified=is_mobile))
         tabela_mes = pd.DataFrame(
             [fat, saidas, resultado],
