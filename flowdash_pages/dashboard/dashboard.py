@@ -1777,55 +1777,56 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
         show_lucro = any(v is not None for v in serie_lucro_liquido)
         if show_lucro:
             fig_lucro = go.Figure()
-            # Linha 1: Lucro Líquido
+
+            # 1. Barras para o Lucro Líquido (Verde para Positivo, Vermelho para Negativo)
+            # Define as cores baseadas no valor: Verde (#2ecc71) se > 0, Vermelho (#e74c3c) se < 0
+            colors_liq_condicional = ["#2ecc71" if (v is not None and v >= 0) else "#e74c3c" for v in serie_lucro_liquido]
+            
             fig_lucro.add_trace(
-                go.Scatter(
+                go.Bar(
                     x=lucro_labels,
                     y=serie_lucro_liquido,
-                    mode="lines+markers+text",
                     name="Lucro Líquido",
-                    line=dict(color="#34495e", width=3),
-                    marker=dict(color=colors_liq, size=8, line=dict(width=2, color=colors_liq)),
+                    marker_color=colors_liq_condicional, 
                     text=text_liq,
-                    textposition="top center",
-                    textfont=dict(color=colors_liq, size=12, family="Arial Black"),
-                    connectgaps=False,
-                    hovertemplate=_hover_currency(show_x=True),
+                    textposition="auto",
+                    hovertemplate="Lucro Líquido: %{y:,.2f}<extra></extra>"
                 )
             )
-            # Linha 2: Lucro Líquido antes da Depreciação
+
+            # 2. Linha para o Lucro Antes da Depreciação (Roxo e Destacada)
             fig_lucro.add_trace(
                 go.Scatter(
                     x=lucro_labels,
                     y=serie_lucro_antes_deprec,
-                    mode="lines+markers+text",
-                    name="Lucro Líquido antes da Depreciação",
-                    line=dict(color="#95a5a6", width=2, dash="dot"),
-                    marker=dict(color=colors_antes, size=6, symbol="circle-open", line=dict(width=2, color=colors_antes)),
-                    text=text_antes,
-                    textposition="bottom center",
-                    textfont=dict(color=colors_antes, size=10),
-                    connectgaps=False,
-                    hovertemplate=_hover_currency(show_x=True),
+                    name="Antes da Deprec.",
+                    mode="lines+markers+text", # Adiciona texto na linha
+                    line=dict(color="#9b59b6", width=4), # Roxo e mais espessa
+                    marker=dict(size=8, color="#ffffff", line=dict(width=2, color="#9b59b6")),
+                    text=text_antes, # Valores da linha
+                    textposition="top center",
+                    textfont=dict(color="white", size=11, family="Arial Black"), # Texto branco para contraste
+                    hovertemplate="Antes Deprec.: %{y:,.2f}<extra></extra>"
                 )
             )
 
             fig_lucro.update_layout(
-                title=dict(text=f"Lucro Líquido – {ano}", font=dict(size=title_size)),
+                title=dict(text=f"Lucro Líquido vs. Operacional – {ano}", font=dict(size=title_size)),
+                legend=dict(
+                    orientation="h",
+                    yanchor="top",
+                    y=-0.2,
+                    xanchor="center",
+                    x=0.5,
+                ),
+                margin=dict(t=80, b=90),
                 height=height,
                 font=dict(size=font_size),
                 dragmode="zoom",
                 hovermode="x unified",
                 showlegend=not is_mobile,
-                legend=dict(
-                    orientation="h",
-                    yanchor="top",
-                    y=-0.25,
-                    xanchor="center",
-                    x=0.5,
-                ),
-                margin=dict(t=80, b=90),
             )
+            
             if is_mobile:
                 fig_lucro.update_traces(text=None, texttemplate=None)
 
