@@ -909,36 +909,60 @@ def render_endividamento(db_path: str) -> None:
 
         fig.update_layout(
             height=180,
-            margin=dict(l=0, r=0, t=0, b=0),
-        )
+    st.header("Endividamento")
 
-        st.plotly_chart(_apply_simplified_view(fig, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
+    # Implementação do layout de 3 colunas para os gráficos de endividamento
+    col1, col2, col3 = st.columns(3)
 
-    st.markdown("### Endividamento")
+    # Distribui os cards nas colunas
+    cols = [col1, col2, col3]
+    
+    # Se não houver empréstimos, mostra apenas o total (mas a estrutura pede colunas para os gráficos)
+    # O user pediu explicitamente para mover e envolver os comandos que exibem esses três gráficos
+    # Assumindo que mini_cards tem os itens na ordem desejada ou que devemos preencher as colunas
+    
+    # Iterar sobre os cards e colocar cada um em uma coluna
+    for i, card in enumerate(mini_cards):
+        # Garante que não exceda o número de colunas se houver mais cards (embora o user mencione 3)
+        if i < 3:
+            with cols[i]:
+                st.subheader(card["descricao"])
+                # Código do gráfico individual
+                fig = go.Figure(
+                    data=[
+                        go.Pie(
+                            labels=["Pago", "Em aberto"],
+                            values=[card["pago"], card["aberto"]],
+                            hole=0.5,
+                            marker=dict(colors=["#2ecc71", "#e74c3c"]),
+                            text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
+                            textinfo="percent+text",
+                            showlegend=False,
+                            hovertemplate="%{label}<br>R$ %{value:,.2f}<extra></extra>",
+                        )
+                    ]
+                )
 
-    # Se não houver empréstimos, mostra apenas o total
-    if not mini_cards:
-        st.plotly_chart(_apply_simplified_view(fig_total, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
-        st.caption("Dívida total em empréstimos")
-        valor_total = (total_pago or 0) + (total_aberto or 0)
-        st.markdown(f"**{_fmt_currency(valor_total)}**")
-        return
+                fig.update_traces(
+                    textposition="inside",
+                    textfont_size=11,
+                )
 
-    # 1 coluna grande para o total + 1 coluna para CADA empréstimo
-    col_weights = [2] + [1] * len(mini_cards)
-    cols = st.columns(col_weights)
+                fig.update_layout(
+                    height=180,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                )
 
-    # Donut total (maior) na primeira coluna
-    with cols[0]:
-        st.plotly_chart(_apply_simplified_view(fig_total, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
-        st.caption("Dívida total em empréstimos")
-        valor_total = (total_pago or 0) + (total_aberto or 0)
-        st.markdown(f"**{_fmt_currency(valor_total)}**")
+                st.plotly_chart(_apply_simplified_view(fig, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
+                st.markdown(f"**Contratado:** {_fmt_currency(card['contratado'])}")
 
-    # Todos os donuts individuais na MESMA LINHA, ao lado do total
-    for col, card in zip(cols[1:], mini_cards):
-        with col:
-            _render_mini_loan_card(card)
+    st.markdown("---") 
+    st.markdown("Dívida total em empréstimos")
+    
+    # Mostra o gráfico total e valor total abaixo
+    st.plotly_chart(_apply_simplified_view(fig_total, simplified), use_container_width=True, config=_plotly_config(simplified=simplified))
+    valor_total = (total_pago or 0) + (total_aberto or 0)
+    st.markdown(f"**{_fmt_currency(valor_total)}**")
 
 
 def render_graficos_mensais(metrics: List[Dict], ano: int, df_entrada: pd.DataFrame, df_saida: pd.DataFrame, is_mobile: bool = False) -> None:
