@@ -2216,13 +2216,15 @@ def render_dashboard(caminho_banco: Optional[str]):
 
 
 
-def render(caminho_banco: Optional[str] = None):
-    """
-    Wrapper para compatibilidade com o carregador de páginas do FlowDash.
-    Apenas delega para render_dashboard.
-    """
-    return render_dashboard(caminho_banco)
+# def render(caminho_banco: Optional[str] = None):
+#     """
+#     Wrapper para compatibilidade com o carregador de páginas do FlowDash.
+#     Apenas delega para render_dashboard.
+#     """
+#     return render_dashboard(caminho_banco)
 
+def main():
+    render_dashboard(None)
 
 def app():
-    render(None)
+    main()
