@@ -43,6 +43,9 @@ VAL_COLS = [
     "valor_liquido",
     "valor_bruto",
     "valor_previsto",
+    "Valor_Recebido",
+    "Valor_Recebdio",
+    "valor_recebido",
 ]
 PAGAMENTO_COLS = [
     "Forma_Pagamento",
@@ -1644,7 +1647,7 @@ def render_bloco_top_meses(df_entrada: pd.DataFrame, anos_multiselect: List[int]
     ranking["label"] = ranking.apply(lambda r: f"{MESES_LABELS[int(r['mes']) - 1]}/{int(r['ano'])}", axis=1)
     top = ranking.sort_values("total", ascending=False).head(8)
     fig_rank = px.bar(top, x="label", y="total", title="Top meses (Faturamento)", labels={"label": "Mês/Ano", "total": "Faturamento"})
-    fig_rank.update_traces(hovertemplate=_hover_currency(show_x=True))
+    fig_rank.update_traces(hovertemplate=_hover_currency(show_x=True), marker_color="#9b59b6")
     font_size = 14 if is_mobile else 10
     title_size = 22 if is_mobile else 18
     height = 550 if is_mobile else 350
@@ -1677,7 +1680,7 @@ def render_bloco_heatmap(df_entrada: pd.DataFrame, anos_multiselect: List[int], 
             z=pivot.values,
             x=[str(c) for c in pivot.columns],
             y=pivot.index,
-            colorscale="Blues",
+            colorscale="Purples",
             hoverongaps=False,
         )
     )
@@ -1953,6 +1956,11 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
     reposicao = df_ano.groupby("mes")["Valor"].sum().reindex(range(1, 13)).fillna(0.0)
     cmv = [metrics[m - 1].get("cmv", 0.0) if m - 1 < len(metrics) else 0.0 for m in range(1, 13)]
 
+    # Cores da paleta roxa
+    cor_reposto = "#9b59b6"  # Roxo mais claro
+    cor_cmv = "#6c3483"      # Roxo mais escuro
+
+    # Gráfico Mensal
     df_rep = pd.DataFrame(
         {
             "Mês": [MESES_LABELS[i] for i in range(12)],
@@ -1961,11 +1969,11 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
         }
     )
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["Valor Reposto"], name="Valor reposto", hovertemplate=_hover_currency(show_x=True)))
-    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["CMV"], name="CMV", hovertemplate=_hover_currency(show_x=True)))
+    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["Valor Reposto"], name="Valor reposto", marker_color=cor_reposto, hovertemplate=_hover_currency(show_x=True)))
+    fig.add_trace(go.Bar(x=df_rep["Mês"], y=df_rep["CMV"], name="CMV", marker_color=cor_cmv, hovertemplate=_hover_currency(show_x=True)))
     fig.update_layout(
         barmode="group",
-        title=f"Reposição x Custo Mercadoria – {ano_reposicao}",
+        title=f"Reposição x Custo Mercadoria – {ano_reposicao} (Mensal)",
         legend=dict(
             orientation="h",
             yanchor="top",
@@ -1977,7 +1985,33 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
         hovermode="x unified",
     )
     fig = _apply_simplified_view(fig, simplified)
-    st.plotly_chart(fig, use_container_width=True, config=_plotly_config(simplified=simplified))
+
+    # Gráfico Anual (Resumo)
+    total_reposicao = reposicao.sum()
+    total_cmv = sum(cmv)
+    
+    fig_anual = go.Figure()
+    fig_anual.add_trace(go.Bar(x=["Valor Reposto"], y=[total_reposicao], name="Valor Reposto", marker_color=cor_reposto, text=[_fmt_currency(total_reposicao)], textposition="auto"))
+    fig_anual.add_trace(go.Bar(x=["CMV"], y=[total_cmv], name="CMV", marker_color=cor_cmv, text=[_fmt_currency(total_cmv)], textposition="auto"))
+    
+    fig_anual.update_layout(
+        title=f"Resumo Anual – {ano_reposicao}",
+        showlegend=False,
+        margin=dict(b=40),
+        hovermode="x unified",
+    )
+    fig_anual.update_traces(hovertemplate="%{x}<br>%{text}<extra></extra>")
+    fig_anual = _apply_simplified_view(fig_anual, simplified)
+
+    if simplified:
+        st.plotly_chart(fig, use_container_width=True, config=_plotly_config(simplified=simplified))
+        st.plotly_chart(fig_anual, use_container_width=True, config=_plotly_config(simplified=simplified))
+    else:
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            st.plotly_chart(fig, use_container_width=True, config=_plotly_config(simplified=simplified))
+        with c2:
+            st.plotly_chart(fig_anual, use_container_width=True, config=_plotly_config(simplified=simplified))
 
 
 # ========================= Entrada principal =========================
