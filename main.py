@@ -53,7 +53,7 @@ from auth.auth import (
     exibir_usuario_logado,
     limpar_todas_as_paginas,
 )
-from utils.utils import garantir_trigger_totais_saldos_caixas  # (import mantido; chamada desativada)
+from utils.utils import garantir_trigger_totais_saldos_caixas, fechar_sidebar_automaticamente
 
 # Legado (opcional, só para bootstrap com access_token curto)
 from shared.db_from_dropbox_api import ensure_local_db_api
@@ -71,7 +71,12 @@ from shared.branding import sidebar_brand, page_header, login_brand
 # -----------------------------------------------------------------------------
 # Config inicial
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="FlowDash", layout="wide")
+# Define estado inicial da sidebar (padrão expanded, mas collapsed ao navegar)
+initial_sidebar = st.session_state.get("sidebar_state", "expanded")
+st.set_page_config(page_title="FlowDash", layout="wide", initial_sidebar_state=initial_sidebar)
+
+# Reseta para o próximo ciclo (opcional, para que F5 volte ao normal se desejado, 
+# mas aqui vamos manter o controle explícito na navegação)
 
 
 # === Logos ===
@@ -632,6 +637,7 @@ st.sidebar.markdown("## 🧭 Menu de Navegação")
 for title in ["📊 Dashboard", "📉 DRE", "🧾 Lançamentos", "💼 Fechamento de Caixa", "🎯 Metas"]:
     if st.sidebar.button(title, use_container_width=True):
         st.session_state.pagina_atual = title
+        st.session_state["sidebar_state"] = "collapsed"
         st.rerun()
 
 with st.sidebar.expander("📋 DataFrames", expanded=False):
@@ -641,6 +647,7 @@ with st.sidebar.expander("📋 DataFrames", expanded=False):
     ]:
         if st.button(title, use_container_width=True):
             st.session_state.pagina_atual = title
+            st.session_state["sidebar_state"] = "collapsed"
             st.rerun()
 
 if perfil == "Administrador":
@@ -652,6 +659,7 @@ if perfil == "Administrador":
         ]:
             if st.button(title, use_container_width=True):
                 st.session_state.pagina_atual = title
+                st.session_state["sidebar_state"] = "collapsed"
                 st.rerun()
 
 
@@ -727,3 +735,9 @@ else:
 # Auto PUSH (depois da página) — SDK + refresh
 # -----------------------------------------------------------------------------
 _auto_push_if_local_changed()
+
+# -----------------------------------------------------------------------------
+# Hybrid Auto-Close: Garante fechamento via JS se o nativo falhar
+# -----------------------------------------------------------------------------
+# Passamos key=time.time() para forçar o componente a ser recriado a cada rerun
+fechar_sidebar_automaticamente(key=str(time.time()))

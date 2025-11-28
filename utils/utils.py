@@ -396,3 +396,54 @@ def resolve_db_path(obj) -> str:
             return str(getattr(obj, key))
 
     raise TypeError(f"expected str, bytes or os.PathLike object, got {type(obj).__name__}")
+
+
+# ---------------------------------------------------------------------
+# UI / UX Helpers
+# ---------------------------------------------------------------------
+import streamlit.components.v1 as components
+
+
+
+def fechar_sidebar_automaticamente(key=None):
+    """
+    Injeta JS para verificar se a sidebar está aberta e fechá-la.
+    Executa em todo rerun para garantir o estado 'collapsed' na navegação.
+    Recebe 'key' para forçar re-renderização do componente.
+    """
+    js_code = f"""
+    <script>
+        (function() {{
+            // Key: {key} (Forces re-execution)
+            // Aggressive Mode: Tenta por 3 segundos (30 checks de 100ms)
+            var attempts = 0;
+            var maxAttempts = 30;
+            
+            var interval = setInterval(function() {{
+                attempts++;
+                var doc = window.parent.document;
+                
+                // Procura DIRETAMENTE pelo botão de "Collapse" (que só existe/está visível se a sidebar estiver aberta)
+                var collapseBtn = doc.querySelector('button[aria-label="Collapse sidebar"]')
+                               || doc.querySelector('[data-testid="stSidebarCollapseButton"]');
+                
+                if (collapseBtn) {{
+                    // Se achou o botão de colapsar, é porque está aberta. Clica nele.
+                    collapseBtn.click();
+                    clearInterval(interval); // Sucesso
+                }} else {{
+                    // Se não achou o botão de collapse, talvez já esteja fechada ou o botão tem outro nome.
+                    // Tenta o seletor mobile específico se necessário, ou apenas continua tentando.
+                    
+                    // Opcional: Fallback ESC apenas se detectarmos que a sidebar "parece" estar lá
+                    // mas por segurança, vamos confiar no botão "Collapse".
+                }}
+                
+                if (attempts >= maxAttempts) {{
+                    clearInterval(interval);
+                }}
+            }}, 100);
+        }})();
+    </script>
+    """
+    components.html(js_code, height=0, width=0)
