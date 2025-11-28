@@ -2222,3 +2222,7 @@ def render(caminho_banco: Optional[str] = None):
     Apenas delega para render_dashboard.
     """
     return render_dashboard(caminho_banco)
+
+
+def app():
+    render(None)

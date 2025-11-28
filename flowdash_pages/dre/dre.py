@@ -939,7 +939,7 @@ def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[
     return None
 
 # ============================== Queries (cache) ==============================
-@st.cache_data(show_spinner=False, ttl=5)
+@st.cache_resource(show_spinner=False, ttl=5)
 def _load_vars(db_path: str) -> VarsDRE:
     q = """
     SELECT chave, COALESCE(valor_num, 0) AS v
