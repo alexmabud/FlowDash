@@ -883,32 +883,7 @@ def render_endividamento(db_path: str) -> None:
         margin=dict(l=10, r=10, t=10, b=10),
     )
 
-    def _render_mini_loan_card(card: Dict) -> None:
-        st.caption(card["descricao"])
-        st.markdown(f"**Contratado:** {_fmt_currency(card['contratado'])}")
 
-        fig = go.Figure(
-            data=[
-                go.Pie(
-                    labels=["Pago", "Em aberto"],
-                    values=[card["pago"], card["aberto"]],
-                    hole=0.5,
-                    marker=dict(colors=["#2ecc71", "#e74c3c"]),
-                    text=[_fmt_currency(card["pago"]), _fmt_currency(card["aberto"])],
-                    textinfo="percent+text",
-                    showlegend=False,
-                    hovertemplate="%{label}<br>R$ %{value:,.2f}<extra></extra>",
-                )
-            ]
-        )
-
-        fig.update_traces(
-            textposition="inside",
-            textfont_size=11,
-        )
-
-        fig.update_layout(
-            height=180,
     st.header("Endividamento")
 
     # Implementação do layout de 3 colunas para os gráficos de endividamento
