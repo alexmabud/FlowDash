@@ -451,9 +451,9 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     # Flag: já fechado?
     ja_fechado = _fechamento_existe(caminho_banco, data_ref)
     if ja_fechado:
-        st.success("✅ Este dia já foi fechado. O botão de salvar está desativado para evitar duplicidade.")
+        st.toast("✅ Este dia já foi fechado. Botão desativado.", icon="🔒")
     else:
-        st.info("ℹ️ Este dia ainda não foi fechado.")
+        st.toast("ℹ️ Dia aberto para fechamento.", icon="📝")
 
     # --- Cartões do topo ---
     valor_dinheiro, valor_pix = _dinheiro_e_pix_por_data(caminho_banco, data_sel)
@@ -542,10 +542,10 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
 
     if salvar:
         if ja_fechado:
-            st.warning("⚠️ Já existe um fechamento salvo para esta data.")
+            st.toast("⚠️ Já existe um fechamento salvo para esta data.", icon="⚠️")
             return
         if not confirmar:
-            st.warning("⚠️ Você precisa confirmar que o saldo está correto antes de salvar.")
+            st.toast("⚠️ Você precisa confirmar que o saldo está correto.", icon="✋")
             return
 
         b1, b2, b3, b4 = _get_saldos_bancos_ate(caminho_banco, data_ref)
@@ -556,7 +556,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                     (str(data_sel),),
                 ).fetchone()
                 if existe:
-                    st.warning("⚠️ Já existe um fechamento salvo para esta data.")
+                    st.toast("⚠️ Já existe um fechamento salvo para esta data.", icon="⚠️")
                     return
 
                 conn.execute(
@@ -581,7 +581,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
                     ),
                 )
                 conn.commit()
-                st.success("✅ Fechamento salvo com sucesso!")
+                st.toast("✅ Fechamento salvo com sucesso!", icon="🎉")
                 st.balloons()
         except Exception as e:
             st.error(f"❌ Erro ao salvar fechamento: {e}")
