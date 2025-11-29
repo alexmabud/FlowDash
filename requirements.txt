@@ -5,8 +5,6 @@ workalendar>=17.0
 matplotlib>=3.8
 requests>=2.32
 dropbox==11.36.2
-setuptools
-Cython
 prophet>=1.1.5
 python-bcb>=0.2.0
 sidrapy>=0.2.0
