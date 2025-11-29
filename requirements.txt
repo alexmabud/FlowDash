@@ -1,0 +1,21 @@
+streamlit>=1.36
+# TRAVA IMPORTANTE: NumPy antigo para não quebrar o Prophet
+numpy<2.0.0
+pandas>=2.2
+# Dependências de compilação
+cython
+setuptools
+wheel
+# Prophet
+cmdstanpy>=1.0.0
+prophet>=1.1.5
+# Gráficos
+plotly>=5.22
+matplotlib>=3.8
+# Dados - CORREÇÃO DE VERSÃO
+python-bcb>=0.2.0
+sidrapy==0.1.4
+# Utils
+workalendar>=17.0
+requests>=2.32
+dropbox
