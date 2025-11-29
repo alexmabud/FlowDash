@@ -7,4 +7,5 @@ requests>=2.32,<3
 dropbox==11.36.2
 setuptools>=68
 prophet
-
+python-bcb>=0.2.0
+sidrapy>=0.2.0

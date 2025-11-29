@@ -2,116 +2,207 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from prophet import Prophet
+from bcb import sgs
+import sidrapy
+import numpy as np
+from typing import Tuple, Optional
 
-from typing import Tuple
+def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> pd.DataFrame:
+    """
+    Busca os 8 indicadores macroeconômicos combinados.
+    Retorna DataFrame mensal (MS) alinhado.
+    """
+    hoje = pd.Timestamp.now().normalize()
+    data_fim = hoje + pd.DateOffset(months=meses_futuro + 6)
+    start_date = data_inicio - pd.DateOffset(months=6) # Margem de segurança
 
-@st.cache_data
-def criar_grafico_previsao(df_input: pd.DataFrame, meses_futuro: int = 12) -> Tuple[go.Figure, pd.DataFrame]:
-    """
-    Gera um gráfico de previsão de faturamento usando Prophet.
+    # 1. Dados do BCB (SGS)
+    # IBC-Br (24363) é o "PIB Mensal"
+    codigos_bcb = {
+        'selic': 432,
+        'ipca': 433,
+        'dolar': 1,
+        'pib_mensal': 24363, # IBC-Br (Proxy do PIB)
+        'confianca': 4393    # Índice de Confiança de Serviços (FGV via BCB) ou similar disponível
+    }
     
-    Args:
-        df_input: DataFrame com colunas 'data' e 'valor'.
-        meses_futuro: Quantidade de meses para prever.
-        
-    Returns:
-        go.Figure: Gráfico Plotly com histórico e previsão.
-    """
-    # 1. Preparação dos dados para o Prophet (ds, y)
-    df_prophet = df_input.rename(columns={'data': 'ds', 'valor': 'y'}).copy()
+    try:
+        df_macro = sgs.get(codigos_bcb, start=start_date)
+        df_macro = df_macro.resample('MS').mean()
+    except Exception:
+        # Fallback seguro
+        idx = pd.date_range(start=start_date, end=hoje, freq='MS')
+        df_macro = pd.DataFrame(index=idx, columns=codigos_bcb.keys())
+
+    # 2. Dados do IBGE (Sidrapy) - PMC, Desemprego, Renda
+    def buscar_sidra(table_code, variable, classification=None):
+        try:
+            if classification:
+                raw = sidrapy.get_table(table_code=table_code, territorial_level="1", ibge_territorial_code="all", variable=variable, classification=classification)
+            else:
+                raw = sidrapy.get_table(table_code=table_code, territorial_level="1", ibge_territorial_code="all", variable=variable)
+            
+            if not raw.empty and 'V' in raw.columns:
+                df = raw.iloc[1:].copy()
+                df['data'] = pd.to_datetime(df['D2C'], format="%Y%m", errors='coerce')
+                df = df.dropna(subset=['data'])
+                s = df.set_index('data')['V'].astype(float)
+                return s.resample('MS').mean()
+        except:
+            return None
+        return None
+
+    # PMC (Varejo Ampliado) - Tabela 3416
+    s_pmc = buscar_sidra("3416", "564", "11046/40311")
+    if s_pmc is not None: df_macro['pmc'] = s_pmc
+    else: df_macro['pmc'] = 0
+
+    # Taxa de Desocupação (PNAD) - Tabela 6381
+    s_desemprego = buscar_sidra("6381", "4099") 
+    if s_desemprego is not None: df_macro['desemprego'] = s_desemprego
+    else: df_macro['desemprego'] = 0
+
+    # Rendimento Médio Real - Tabela 6381 (Var 5932)
+    s_renda = buscar_sidra("6381", "5932")
+    if s_renda is not None: df_macro['renda_media'] = s_renda
+    else: df_macro['renda_media'] = 0
+
+    # 3. Consolidação
+    idx_full = pd.date_range(start=df_macro.index.min(), end=data_fim, freq='MS')
+    df_macro = df_macro.reindex(idx_full)
+    df_macro = df_macro.ffill().bfill().fillna(0)
     
-    # Garante que as datas estejam ordenadas
-    df_prophet = df_prophet.sort_values('ds')
+    return df_macro
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12) -> Tuple[go.Figure, pd.DataFrame]:
+    # --- Parte 1: Tratamento de Vendas (Mantenha a lógica existente de resample) ---
+    if df_vendas_bruto.empty: return go.Figure(), pd.DataFrame()
+    df = df_vendas_bruto.copy()
     
-    # 2. Configuração e Treinamento do Modelo
-    # growth='linear' é o padrão, mas deixamos explícito. 
-    # yearly_seasonality=True para capturar padrões anuais.
-    modelo = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
+    # Identificar colunas de data e valor
+    cols_lower = {c.lower(): c for c in df.columns}
     
-    # Adiciona feriados brasileiros
+    # Tenta achar coluna de data
+    col_data = None
+    for cand in ['data', 'data_venda', 'dt_venda', 'date']:
+        if cand in cols_lower:
+            col_data = cols_lower[cand]
+            break
+            
+    # Tenta achar coluna de valor
+    col_valor = None
+    for cand in ['valor', 'valor_total', 'vlr', 'total']:
+        if cand in cols_lower:
+            col_valor = cols_lower[cand]
+            break
+            
+    if not col_data or not col_valor:
+        return go.Figure(), pd.DataFrame()
+
+    df['ds'] = pd.to_datetime(df[col_data], errors='coerce')
+    df['y'] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+    df = df.dropna(subset=['ds'])
+    
+    # FILTRO DE QUALIDADE: Removemos 2021 (dados de implantação/incompletos)
+    df = df[df['ds'].dt.year >= 2022]
+    
+    # Agrupa por mês (MS)
+    df_mensal = df.set_index('ds').resample('MS')['y'].sum().reset_index()
+    
+    first_valid = df_mensal[df_mensal['y'] > 0].index.min()
+    if pd.notna(first_valid): df_mensal = df_mensal.loc[first_valid:].copy()
+    
+    if len(df_mensal) < 6:
+        fig = go.Figure()
+        fig.add_annotation(text="Dados insuficientes para previsão (mínimo 6 meses)", showarrow=False)
+        return fig, pd.DataFrame()
+
+    # --- Parte 2: Buscar 8 Regressores ---
+    data_inicio = df_mensal['ds'].min()
+    df_macro = _buscar_regressores_macro(data_inicio, meses_futuro)
+    
+    # --- Parte 3: Merge ---
+    df_prophet = df_mensal.merge(df_macro, left_on='ds', right_index=True, how='left')
+    df_prophet = df_prophet.ffill().bfill().fillna(0)
+    
+    # --- Parte 4: Treino ---
+    modelo = Prophet(
+        yearly_seasonality=True, 
+        weekly_seasonality=False, 
+        daily_seasonality=False, 
+        growth='linear',
+        seasonality_prior_scale=20.0
+    )
     modelo.add_country_holidays(country_name='BR')
     
+    # LISTA ATUALIZADA - APENAS OS PILARES ESTÁVEIS
+    # Mantendo apenas Selic, IPCA e Desemprego para reduzir ruído e evitar dupla sazonalidade.
+    regressores_alvo = [
+        'selic',       # Custo do dinheiro/crédito
+        'ipca',        # Poder de compra
+        'desemprego'   # Renda disponível
+    ]
+    
+    for reg in regressores_alvo:
+        if reg in df_prophet.columns:
+            modelo.add_regressor(reg)
+            
     modelo.fit(df_prophet)
     
-    # 3. Previsão
-    # Cria dataframe futuro mensal (freq='MS' = Month Start)
+    # --- Parte 5: Previsão ---
     futuro = modelo.make_future_dataframe(periods=meses_futuro, freq='MS')
+    futuro = futuro.merge(df_macro, left_on='ds', right_index=True, how='left')
+    futuro = futuro.ffill().bfill().fillna(0)
+    
     previsao = modelo.predict(futuro)
     
-    # 4. Visualização com Plotly
+    # --- Parte 6: Visualização (Plotly) ---
     fig = go.Figure()
     
-    # Helper de formatação
     def _fmt(x):
         return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    # Histórico (Realizado)
+    # Histórico
     df_prophet['y_fmt'] = df_prophet['y'].apply(_fmt)
-    
     fig.add_trace(go.Scatter(
-        x=df_prophet['ds'],
-        y=df_prophet['y'],
-        mode='lines+markers',
-        name='Realizado',
-        text=df_prophet['y_fmt'],
-        hovertemplate='%{text}<extra></extra>',
-        line=dict(color='black', width=2),
-        marker=dict(size=6)
+        x=df_prophet['ds'], y=df_prophet['y'],
+        mode='lines+markers', name='Realizado',
+        text=df_prophet['y_fmt'], hovertemplate='%{text}<extra></extra>',
+        line=dict(color='black', width=2), marker=dict(size=6)
     ))
     
-    # Previsão (Futuro) - Linha azul pontilhada
-    # Filtramos apenas a parte futura para não sobrepor o histórico visualmente, 
-    # ou plotamos tudo. O padrão do Prophet é plotar tudo, mas aqui vamos destacar o futuro.
-    df_futuro_plot = previsao[previsao['ds'] > df_prophet['ds'].max()].copy()
+    # Previsão
+    # Filtra apenas o futuro para plotar pontilhado
+    data_corte = df_prophet['ds'].max()
+    df_futuro_plot = previsao[previsao['ds'] > data_corte].copy()
     df_futuro_plot['yhat_fmt'] = df_futuro_plot['yhat'].apply(_fmt)
     
     fig.add_trace(go.Scatter(
-        x=df_futuro_plot['ds'],
-        y=df_futuro_plot['yhat'],
-        mode='lines',
-        name='Previsão',
-        text=df_futuro_plot['yhat_fmt'],
-        hovertemplate='%{text}<extra>Previsão</extra>',
+        x=df_futuro_plot['ds'], y=df_futuro_plot['yhat'],
+        mode='lines', name='Previsão',
+        text=df_futuro_plot['yhat_fmt'], hovertemplate='%{text}<extra>Previsão</extra>',
         line=dict(color='#2980b9', width=2, dash='dot')
     ))
     
-    # Intervalo de Confiança (Área Sombreada)
-    # Upper Bound
+    # Intervalo de Confiança
     fig.add_trace(go.Scatter(
-        x=df_futuro_plot['ds'],
-        y=df_futuro_plot['yhat_upper'],
-        mode='lines',
-        line=dict(width=0),
-        showlegend=False,
-        hoverinfo='skip'
+        x=df_futuro_plot['ds'], y=df_futuro_plot['yhat_upper'],
+        mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_futuro_plot['ds'], y=df_futuro_plot['yhat_lower'],
+        mode='lines', line=dict(width=0), fill='tonexty',
+        fillcolor='rgba(41, 128, 185, 0.2)', name='Incerteza',
+        showlegend=True, hoverinfo='skip'
     ))
     
-    # Lower Bound (com preenchimento 'tonexty')
-    fig.add_trace(go.Scatter(
-        x=df_futuro_plot['ds'],
-        y=df_futuro_plot['yhat_lower'],
-        mode='lines',
-        line=dict(width=0),
-        fill='tonexty',
-        fillcolor='rgba(41, 128, 185, 0.2)', # Azul translúcido
-        name='Incerteza',
-        showlegend=True,
-        hoverinfo='skip'
-    ))
-    
-    # Layout
     fig.update_layout(
-        title="Previsão de Faturamento (Prophet)",
+        title="Previsão de Faturamento (IA + 8 Indicadores Macro)",
         xaxis_title="Data",
         yaxis_title="Valor (R$)",
         hovermode="x unified",
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="right",
-            x=1
-        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=20, r=20, t=60, b=20)
     )
     

@@ -1933,7 +1933,7 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
             columns=meses_labels,
         )
         tabela_fmt = (
-            tabela_mes.style.format(_fmt_currency).applymap(
+            tabela_mes.style.format(_fmt_currency).map(
                 lambda v: "color:green"
                 if isinstance(v, (int, float)) and v > 0
                 else ("color:red" if isinstance(v, (int, float)) and v < 0 else ""),
@@ -2097,74 +2097,57 @@ def render_dashboard(caminho_banco: Optional[str]):
         # Slider para escolher meses futuros
         meses_futuro = st.slider("Meses para prever", min_value=1, max_value=24, value=12)
         
-        # Preparação dos dados: Agrupamento Mensal
-        # df_entrada tem colunas 'Data' e 'Valor' (normalizadas em _normalize_df)
-        # Precisamos renomear para 'data' e 'valor' minúsculos para compatibilidade com a função ou ajustar lá.
-        # A função espera 'data' e 'valor'.
-        
+        # Apenas chama a função. O "engine" se vira para buscar IPCA, Selic, tratar dados, etc.
         if not df_entrada.empty:
-            # Resample mensal para somar vendas por mês
-            # df_entrada já tem 'Data' como datetime.
-            df_prophet_input = (
-                df_entrada.set_index("Data")
-                .resample("MS")["Valor"]
-                .sum()
-                .reset_index()
-                .rename(columns={"Data": "data", "Valor": "valor"})
-            )
+            with st.spinner("O Oráculo está consultando o Banco Central e prevendo o futuro..."):
+                # Passa o df_entrada BRUTO
+                fig_previsao, dados_futuros = criar_grafico_previsao(df_entrada, meses_futuro)
             
-            # Filtra apenas meses com valor > 0 para evitar distorções de meses futuros vazios no input
-            df_prophet_input = df_prophet_input[df_prophet_input["valor"] > 0]
-
-            if len(df_prophet_input) >= 6: # Mínimo de dados para uma previsão razoável
-                with st.spinner("Gerando previsão com IA..."):
-                    fig_previsao, dados_futuros = criar_grafico_previsao(df_prophet_input, meses_futuro)
+            # Exibe Cards com o próximo mês
+            if not dados_futuros.empty:
+                prox_mes = dados_futuros.iloc[0]
+                data_ref = prox_mes['ds'].strftime('%B/%Y') # Ex: Janeiro/2024 (depende do locale, mas ok)
                 
-                # Exibe Cards com o próximo mês
-                if not dados_futuros.empty:
-                    prox_mes = dados_futuros.iloc[0]
-                    data_ref = prox_mes['ds'].strftime('%B/%Y') # Ex: Janeiro/2024 (depende do locale, mas ok)
-                    
-                    st.markdown(f"**Previsão para o próximo mês ({data_ref})**")
-                    c_pess, c_real, c_otim = st.columns(3)
-                    
-                    c_pess.metric("🔻 Cenário Pessimista", _fmt_currency(prox_mes['yhat_lower']))
-                    c_real.metric("🎯 Previsão Realista", _fmt_currency(prox_mes['yhat']))
-                    c_otim.metric("🚀 Cenário Otimista", _fmt_currency(prox_mes['yhat_upper']))
-
-                fig_previsao = _apply_simplified_view(fig_previsao, IS_MOBILE)
-                st.plotly_chart(fig_previsao, use_container_width=True, config=_plotly_config(simplified=IS_MOBILE))
-
-                # Tabela Detalhada (Transposta)
-                st.markdown("##### Detalhamento da Previsão")
+                st.markdown(f"**Previsão para o próximo mês ({data_ref})**")
+                c_pess, c_real, c_otim = st.columns(3)
                 
-                if not dados_futuros.empty:
-                    # Seleciona e ordena: Otimista -> Realista -> Pessimista
-                    df_t = dados_futuros[['ds', 'yhat_upper', 'yhat', 'yhat_lower']].copy()
-                    
-                    # Helper para formatar data usando MESES_LABELS (Ex: Nov/2025)
-                    def _fmt_data_pt(d):
-                        return f"{MESES_LABELS[d.month-1]}/{d.year}"
-                    
-                    df_t['ds_label'] = df_t['ds'].apply(_fmt_data_pt)
-                    
-                    # Define a coluna de data como índice e transpõe
-                    # Transpõe apenas as colunas de valor
-                    df_t = df_t.set_index('ds_label')[['yhat_upper', 'yhat', 'yhat_lower']].T
-                    
-                    # Renomeia as linhas
-                    df_t = df_t.rename(index={
-                        'yhat_upper': 'Máximo (Otimista)',
-                        'yhat': 'Previsão Realista',
-                        'yhat_lower': 'Mínimo (Pessimista)'
-                    })
-                    
-                    # Formata valores para R$ (usando map em vez de applymap para Pandas 2.x)
-                    df_t = df_t.map(_fmt_currency)
-                    
-                    st.dataframe(df_t, use_container_width=True)
+                c_pess.metric("🔻 Cenário Pessimista", _fmt_currency(prox_mes['yhat_lower']))
+                c_real.metric("🎯 Previsão Realista", _fmt_currency(prox_mes['yhat']))
+                c_otim.metric("🚀 Cenário Otimista", _fmt_currency(prox_mes['yhat_upper']))
+
+            fig_previsao = _apply_simplified_view(fig_previsao, IS_MOBILE)
+            st.plotly_chart(fig_previsao, use_container_width=True, config=_plotly_config(simplified=IS_MOBILE))
+
+            # Tabela Detalhada (Transposta)
+            st.markdown("##### Detalhamento da Previsão")
+            
+            if not dados_futuros.empty:
+                # Seleciona e ordena: Otimista -> Realista -> Pessimista
+                df_t = dados_futuros[['ds', 'yhat_upper', 'yhat', 'yhat_lower']].copy()
+                
+                # Helper para formatar data usando MESES_LABELS (Ex: Nov/2025)
+                def _fmt_data_pt(d):
+                    return f"{MESES_LABELS[d.month-1]}/{d.year}"
+                
+                df_t['ds_label'] = df_t['ds'].apply(_fmt_data_pt)
+                
+                # Define a coluna de data como índice e transpõe
+                # Transpõe apenas as colunas de valor
+                df_t = df_t.set_index('ds_label')[['yhat_upper', 'yhat', 'yhat_lower']].T
+                
+                # Renomeia as linhas
+                df_t = df_t.rename(index={
+                    'yhat_upper': 'Máximo (Otimista)',
+                    'yhat': 'Previsão Realista',
+                    'yhat_lower': 'Mínimo (Pessimista)'
+                })
+                
+                # Formata valores para R$ (usando map em vez de applymap para Pandas 2.x)
+                df_t = df_t.map(_fmt_currency)
+                
+                st.dataframe(df_t, use_container_width=True)
             else:
-                st.warning("Dados insuficientes para gerar previsão (mínimo 6 meses de histórico).")
+                 st.warning("Dados insuficientes para gerar previsão (mínimo 6 meses de histórico).")
         else:
             st.info("Sem dados de entrada para previsão.")
 
