@@ -1,0 +1,17 @@
+name: flowdash
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - streamlit
+  - pandas
+  - plotly
+  - matplotlib
+  - requests
+  - prophet
+  - pip
+  - pip:
+    - workalendar
+    - dropbox==11.36.2
+    - python-bcb>=0.2.0
+    - sidrapy>=0.2.0
