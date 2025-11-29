@@ -6,7 +6,6 @@ dependencies:
   - streamlit
   - pandas
   - plotly
-  - matplotlib
   - requests
   - prophet
   - pip
