@@ -1968,18 +1968,23 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     margem_liquida_pct_val = m.get("margem_liquida_pct")
     margem_contrib_pct_val = margem_contrib_pct
 
-    status_margem_bruta = _chip_status("margem_bruta", margem_bruta_pct_val)
-    status_margem_ebitda = _chip_status("margem_ebitda_pct", margem_ebitda_pct_val)
-    status_margem_operacional = _chip_status("margem_operacional", margem_operacional_pct_val)
-    status_margem_liquida = _chip_status("margem_liquida", margem_liquida_pct_val)
+    # CORREÇÃO DE STATUS: Multiplicar por 100 apenas para a verificação de cor (0.55 -> 55.0)
+    status_margem_bruta = _chip_status("margem_bruta", margem_bruta_pct_val * 100.0 if margem_bruta_pct_val is not None else None)
+    status_margem_ebitda = _chip_status("margem_ebitda_pct", margem_ebitda_pct_val * 100.0 if margem_ebitda_pct_val is not None else None)
+    status_margem_operacional = _chip_status("margem_operacional", margem_operacional_pct_val * 100.0 if margem_operacional_pct_val is not None else None)
+    status_margem_liquida = _chip_status("margem_liquida", margem_liquida_pct_val * 100.0 if margem_liquida_pct_val is not None else None)
+    
+    # (Margem de contribuição já é calculada como 0-100 localmente, não precisa alterar)
     status_margem_contrib = _chip_status("margem_contribuicao", margem_contrib_pct_val)
     lucro_liq_status = _lucro_liquido_status(lucro_liq_pct_rl)
     roe_pct_val = _safe(m.get("roe_pct"))
     roi_pct_val = _safe(m.get("roi_pct"))
     roa_pct_val = _safe(m.get("roa_pct"))
-    roe_status = _roe_status(roe_pct_val)
-    roi_status = _roi_status(roi_pct_val)
-    roa_status = _roa_status(roa_pct_val)
+    
+    # Corrigir também ROE/ROI/ROA para status
+    roe_status = _roe_status(roe_pct_val * 100.0 if roe_pct_val is not None else None)
+    roi_status = _roi_status(roi_pct_val * 100.0 if roi_pct_val is not None else None)
+    roa_status = _roa_status(roa_pct_val * 100.0 if roa_pct_val is not None else None)
 
     def _status_or_none(v: Optional[str]) -> Optional[str]:
         return v if v and v != "⚪" else None
