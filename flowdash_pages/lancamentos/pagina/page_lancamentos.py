@@ -104,9 +104,15 @@ def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float
 # ===================== Page =====================
 def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     """Renderiza a página agregadora de Lançamentos."""
-    # Mensagem de sucesso de operações anteriores
+    
+    # --- MUDANÇA: Captura msg do state e exibe Toast ---
     if "msg_ok" in st.session_state:
-        st.success(st.session_state.pop("msg_ok"))
+        msg = st.session_state.pop("msg_ok")
+        # Pega o tipo (success ou warning) ou define padrão success
+        tipo = st.session_state.pop("msg_ok_type", "success")
+        icon = "✅" if tipo == "success" else "⚠️"
+        st.toast(msg, icon=icon)
+    # ---------------------------------------------------
 
     # Data de referência do lançamento
     data_lanc = st.date_input(

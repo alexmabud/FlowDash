@@ -1,7 +1,6 @@
 # ===================== Page: Venda =====================
 """
 Página principal de Venda — monta layout e chama forms/actions.
-
 """
 
 from __future__ import annotations
@@ -22,20 +21,13 @@ __all__ = ["render_venda"]
 def render_venda(state) -> None:
     """
     Renderiza a página de Venda.
-
-    Parâmetros
-    ----------
-    state : object
-        Objeto de estado (compatível com _safe_call) contendo:
-        - caminho_banco / db_path: caminho do SQLite
-        - data_lanc: data selecionada no topo da página
     """
     # --- Extrai do state -----------------------------------------------------
     caminho_banco = getattr(state, "caminho_banco", getattr(state, "db_path", None))
     data_lanc_raw = getattr(state, "data_lanc", None)
 
-    # --- Normaliza para datetime.date (evita erro de .strftime em string) ----
-    data_lanc: date = coerce_data(data_lanc_raw)  # [no-behavior-change]
+    # --- Normaliza para datetime.date ----
+    data_lanc: date = coerce_data(data_lanc_raw)
 
     # --- Toggle ---------------------------------------------------------------
     if st.button("🟢 Nova Venda", use_container_width=True, key="btn_venda_toggle"):
@@ -52,9 +44,9 @@ def render_venda(state) -> None:
         return
 
     if not form:
-        return  # UI já exibiu o aviso correspondente
+        return
 
-    # --- Botão Salvar (mesma trava do original: exige confirmação) -----------
+    # --- Botão Salvar ---------------------------------------------------------
     if not form.get("confirmado"):
         st.button("💾 Salvar Venda", use_container_width=True, key="venda_salvar", disabled=True)
         return
@@ -65,21 +57,22 @@ def render_venda(state) -> None:
     # --- Execução -------------------------------------------------------------
     try:
         res = registrar_venda(
-            db_like=caminho_banco,   # alinhado com a nova API
-            data_lanc=data_lanc,     # usa a data selecionada no topo
+            db_like=caminho_banco,
+            data_lanc=data_lanc,
             payload=form,
         )
 
         if res.get("ok"):
+            # Define a mensagem no state para ser pega pelo page_lancamentos (Toast)
             st.session_state["msg_ok"] = res.get("msg", "Venda registrada.")
+            st.session_state["msg_ok_type"] = "success"  # Opcional, reforça ícone verde
             st.session_state.form_venda = False
-            st.success(res.get("msg", "Venda registrada com sucesso."))
-
+            
             # 🔄 força recarregar o Resumo do Dia / cards
             st.session_state["_resumo_dirty"] = time.time()
 
-            # ✅ limpa caches de @st.cache_data para garantir recomputo do resumo
-            st.cache_data.clear()  # [no-behavior-change]
+            # ✅ limpa caches
+            st.cache_data.clear()
 
             st.rerun()
         else:

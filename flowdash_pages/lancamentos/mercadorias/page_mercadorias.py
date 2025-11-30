@@ -4,12 +4,6 @@
 Responsável por montar o layout e orquestrar os formulários de:
 - Compra de Mercadorias
 - Recebimento de Mercadorias
-
-Regras:
-    - O botão "Salvar" só habilita após o usuário marcar "Confirmo os dados"
-      dentro de cada formulário.
-    - A mensagem de sucesso é exibida no banner global do app (hub), usando
-      `st.session_state["msg_ok"]` e `st.session_state["msg_ok_type"]`.
 """
 
 from __future__ import annotations
@@ -46,42 +40,21 @@ def _inject_borderless_css() -> None:
 
 
 def _limpar_campos_recebimento_do_payload(d: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove do payload de COMPRA os campos exclusivos de RECEBIMENTO.
-
-    Args:
-        d: Dicionário retornado pelo formulário de compra.
-
-    Returns:
-        Cópia do dicionário sem campos de recebimento.
-    """
+    """Remove do payload de COMPRA os campos exclusivos de RECEBIMENTO."""
     if not isinstance(d, dict):
         return d
     campos_receb = [
-        "Faturamento",
-        "Recebimento",
-        "Valor_Recebido",
-        "Frete_Cobrado",
-        "Recebimento_Obs",
-        # aliases do form de recebimento
-        "fat_dt",
-        "rec_dt",
-        "valor_recebido",
-        "frete_cobrado",
-        "obs",
+        "Faturamento", "Recebimento", "Valor_Recebido", "Frete_Cobrado", "Recebimento_Obs",
+        "fat_dt", "rec_dt", "valor_recebido", "frete_cobrado", "obs",
     ]
-    out = dict(d)  # cópia rasa para não mutar o original
+    out = dict(d)
     for k in campos_receb:
         out.pop(k, None)
     return out
 
 
 def render_mercadorias(caminho_banco: str, data_lanc: Optional[date] = None) -> None:
-    """Renderiza a página de Mercadorias (Compra e Recebimento).
-
-    Args:
-        caminho_banco: Caminho para o arquivo do banco sqlite.
-        data_lanc: Data padrão a ser usada nos formulários (opcional).
-    """
+    """Renderiza a página de Mercadorias (Compra e Recebimento)."""
     data_lanc = coerce_data(data_lanc)
     _inject_borderless_css()
 
@@ -106,7 +79,8 @@ def render_mercadorias(caminho_banco: str, data_lanc: Optional[date] = None) -> 
                 # Limpa campos indevidos antes de persistir COMPRA
                 payload_compra_limpo = _limpar_campos_recebimento_do_payload(payload_compra)
                 msg = salvar_compra(caminho_banco, payload_compra_limpo)
-                # Banner global no hub:
+                
+                # Toast setup
                 st.session_state["msg_ok"] = msg
                 st.session_state["msg_ok_type"] = "success"
                 st.session_state["show_merc_compra"] = False
@@ -124,7 +98,7 @@ def render_mercadorias(caminho_banco: str, data_lanc: Optional[date] = None) -> 
     if receb_visivel():
         mostrar_todas = st.checkbox("Mostrar já recebidas", value=False, key=SHOW_TODAS_KEY)
 
-        # Carrega lista de compras (pendentes ou todas)
+        # Carrega lista de compras
         try:
             compras: List[Dict[str, Any]] = carregar_compras(caminho_banco, incluir_recebidas=mostrar_todas)
         except Exception as e:
@@ -166,7 +140,8 @@ def render_mercadorias(caminho_banco: str, data_lanc: Optional[date] = None) -> 
         if salvar_r:
             try:
                 msg = salvar_recebimento(caminho_banco, payload_receb)
-                # Banner global no hub:
+                
+                # Toast setup
                 st.session_state["msg_ok"] = msg
                 st.session_state["msg_ok_type"] = "success"
                 st.session_state["show_merc_receb"] = False

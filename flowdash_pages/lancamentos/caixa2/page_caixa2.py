@@ -1,22 +1,7 @@
 # ===================== Page: Caixa 2 =====================
 """
 Page: Caixa 2
-
-Resumo:
-    Página principal do Caixa 2: monta layout, exibe o formulário e dispara a ação
-    de transferência (Caixa/Caixa Vendas → Caixa 2).
-
-Fluxo:
-    1) Resolve inputs (caminho do banco e data).
-    2) Toggle do formulário via botão.
-    3) Renderiza UI do form (data + valor) e aguarda confirmação.
-    4) Valida o valor (> 0).
-    5) Chama a action `transferir_para_caixa2`, fecha o form e informa sucesso.
-
-Observação importante:
-    NÃO cria linha automática na tabela `saldos_caixas` ao renderizar a página.
-    A eventual criação/replicação de linha ocorre SOMENTE dentro da action,
-    quando há uma operação confirmada.
+Resumo: Transferência para Caixa 2.
 """
 
 from __future__ import annotations
@@ -28,7 +13,7 @@ import streamlit as st
 
 from .state_caixa2 import toggle_form, form_visivel, close_form
 from .ui_forms_caixa2 import render_form
-from .actions_caixa2 import transferir_para_caixa2  # <- sem _ensure_snapshot_do_dia
+from .actions_caixa2 import transferir_para_caixa2
 
 __all__ = ["render_caixa2"]
 
@@ -38,7 +23,7 @@ def _coalesce_state(
     caminho_banco: Optional[str],
     data_lanc: Optional[Any],
 ) -> tuple[str, str]:
-    """Extrai (caminho_banco, data_lanc_str) com fallback e normaliza a data para 'YYYY-MM-DD'."""
+    """Extrai (caminho_banco, data_lanc_str)."""
     db = None
     dt = None
     if state is not None:
@@ -73,20 +58,15 @@ def _coalesce_state(
 
 
 def _parse_valor_br(raw: Any) -> float:
-    """
-    Converte entradas tipo '60', '60,00', '1.234,56', 'R$ 1.234,56' em float.
-    Retorna 0.0 se não for possível converter.
-    """
+    """Converte entradas tipo '60,00', '1.234,56' em float."""
     try:
         s = str(raw or "").strip()
         if not s:
             return 0.0
         s = s.replace("R$", "").replace(" ", "")
-        # Caso '1.234,56' (ponto milhar + vírgula decimal)
         if "," in s and "." in s and s.rfind(",") > s.rfind("."):
             s = s.replace(".", "").replace(",", ".")
         else:
-            # Caso '60,00' ou só '60'
             s = s.replace(",", ".")
         return float(s)
     except Exception:
@@ -101,7 +81,7 @@ def render_caixa2(
     caminho_banco: Optional[str] = None,
     data_lanc: Optional[Any] = None,
 ) -> None:
-    """Renderiza a página de transferência para o Caixa 2 e executa a operação quando confirmada."""
+    """Renderiza a página de transferência para o Caixa 2."""
     # 1) Inputs
     try:
         _db_path, _data_lanc = _coalesce_state(state, caminho_banco, data_lanc)
@@ -109,25 +89,25 @@ def render_caixa2(
         st.error(f"❌ Configuração incompleta: {e}")
         return
 
-    # 2) Toggle do formulário (padrão visual alinhado aos outros botões)
+    # 2) Toggle do formulário
     if st.button("📦 Transferência para Caixa 2", use_container_width=True, key="btn_caixa2_toggle"):
         toggle_form()
 
     if not form_visivel():
         return
 
-    # 3) Form UI (sem uso de session_state para data)
+    # 3) Form UI
     form = render_form(_data_lanc)
     if not form.get("submit"):
         return
 
-    # 4) Validação do valor (tolerante a formatos BRL)
+    # 4) Validação do valor
     v = _parse_valor_br(form.get("valor", 0))
     if v <= 0:
         st.warning("⚠️ Valor inválido.")
         return
 
-    # 5) Resolve usuário logado (string mesmo se vier dict no session_state)
+    # 5) Resolve usuário logado
     usuario = (
         st.session_state.get("usuario_logado")
         or st.session_state.get("usuario")
@@ -144,7 +124,7 @@ def render_caixa2(
             or "sistema"
         )
 
-    # 6) Executa a ação (só aqui pode criar linha do dia e aplicar a movimentação)
+    # 6) Executa a ação
     try:
         res = transferir_para_caixa2(
             caminho_banco=_db_path,
@@ -154,10 +134,10 @@ def render_caixa2(
         )
         if isinstance(res, dict) and res.get("ok"):
             st.session_state["msg_ok"] = res.get("msg", "Transferência realizada.")
+            st.session_state["msg_ok_type"] = "success"  # Toast Verde
             close_form()
-            st.success(res.get("msg", "Transferência realizada com sucesso."))
-
-            # Limpa campos do form para evitar conflito no próximo render
+            
+            # Limpa campos do form para evitar conflito
             for k in ("caixa2_confirma_widget", "caixa2_valor"):
                 if k in st.session_state:
                     del st.session_state[k]

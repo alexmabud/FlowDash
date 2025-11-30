@@ -1,17 +1,6 @@
 # ===================== Page: Saída =====================
 """
 Página principal da Saída – monta layout e chama forms/actions.
-
-Mantém o comportamento do arquivo original:
-- Toggle do formulário
-- Campos e fluxos idênticos (incluindo Pagamentos: Fatura/Boletos/Empréstimos)
-- Validações e mensagens
-- st.rerun() após sucesso
-
-Compatibilidade:
-- Funciona com versões NOVAS (carregar_listas_para_form retorna 8 itens
-  e render_form_saida aceita 2 providers novos) e com versões ANTIGAS
-  (6 itens / sem os dois kwargs).
 """
 
 from __future__ import annotations
@@ -20,7 +9,7 @@ from typing import Any, Optional, Tuple
 import datetime as _dt
 import streamlit as st
 
-from utils.utils import coerce_data  # normaliza para datetime.date
+from utils.utils import coerce_data
 
 from .state_saida import toggle_form, form_visivel, invalidate_confirm
 from .ui_forms_saida import render_form_saida
@@ -67,8 +56,7 @@ def render_saida(
     data_lanc: Optional[Any] = None,
 ) -> None:
     """
-    Preferencial: render_saida(state)
-    Compatível:   render_saida(None, caminho_banco='...', data_lanc=date|'YYYY-MM-DD')
+    Renderiza a página de Saída.
     """
     # Resolver entradas
     try:
@@ -88,10 +76,9 @@ def render_saida(
     usuario = st.session_state.get("usuario_logado", {"nome": "Sistema"})
     usuario_nome = usuario.get("nome", "Sistema")
 
-    # Carrega listas/repos necessárias para o formulário (compatível 6 OU 8 retornos)
+    # Carrega listas/repos necessárias
     try:
         carregado = carregar_listas_para_form(_db_path)
-        # Versão nova: 8 itens
         if isinstance(carregado, (list, tuple)) and len(carregado) >= 8:
             (
                 nomes_bancos,
@@ -99,11 +86,10 @@ def render_saida(
                 df_categorias,
                 listar_subcategorias_fn,
                 listar_destinos_fatura_em_aberto_fn,
-                carregar_opcoes_pagamentos_fn,   # legado/compat
-                listar_boletos_em_aberto_fn,     # NOVO
-                listar_empfin_em_aberto_fn,      # NOVO
+                carregar_opcoes_pagamentos_fn,
+                listar_boletos_em_aberto_fn,
+                listar_empfin_em_aberto_fn,
             ) = carregado[:8]
-        # Versão antiga: 6 itens -> criar providers vazios
         else:
             (
                 nomes_bancos,
@@ -119,10 +105,10 @@ def render_saida(
         st.error(f"❌ Falha ao preparar formulário: {e}")
         return
 
-    # Render UI (retorna payload). Tentar com providers novos; se a função não aceitar, cair para chamada antiga.
+    # Render UI
     try:
         payload = render_form_saida(
-            data_lanc=_data_lanc,  # datetime.date
+            data_lanc=_data_lanc,
             invalidate_cb=invalidate_confirm,
             nomes_bancos=nomes_bancos,
             nomes_cartoes=nomes_cartoes,
@@ -130,11 +116,11 @@ def render_saida(
             listar_subcategorias_fn=listar_subcategorias_fn,
             listar_destinos_fatura_em_aberto_fn=listar_destinos_fatura_em_aberto_fn,
             carregar_opcoes_pagamentos_fn=carregar_opcoes_pagamentos_fn,
-            listar_boletos_em_aberto_fn=listar_boletos_em_aberto_fn,   # pode não existir em versão antiga
-            listar_empfin_em_aberto_fn=listar_empfin_em_aberto_fn,     # pode não existir em versão antiga
+            listar_boletos_em_aberto_fn=listar_boletos_em_aberto_fn,
+            listar_empfin_em_aberto_fn=listar_empfin_em_aberto_fn,
         )
     except TypeError:
-        # Fallback para assinatura antiga (sem os dois kwargs finais)
+        # Fallback
         payload = render_form_saida(
             data_lanc=_data_lanc,
             invalidate_cb=invalidate_confirm,
@@ -146,7 +132,7 @@ def render_saida(
             carregar_opcoes_pagamentos_fn=carregar_opcoes_pagamentos_fn,
         )
 
-    # Botão salvar: mesma trava do original
+    # Botão salvar
     save_disabled = not st.session_state.get("confirmar_saida", False)
     if not st.button("💾 Salvar Saída", use_container_width=True, key="btn_salvar_saida", disabled=save_disabled):
         return
@@ -156,21 +142,18 @@ def render_saida(
         st.warning("⚠️ Confirme os dados antes de salvar.")
         return
 
-    # ===== Compat: preencher aliases de valor esperados pelo actions =====
+    # ===== Compat: preencher aliases de valor =====
     try:
         if payload.get("is_pagamentos"):
             v = float(payload.get("valor_saida") or 0.0)
             tipo = (payload.get("tipo_pagamento_sel") or "").lower()
-            # Fatura: alguns actions antigos esperam 'valor_a_pagar_fatura' (e/ou 'valor_pagamento')
             if "fatura" in tipo:
                 payload.setdefault("valor_a_pagar_fatura", v)
                 payload.setdefault("valor_pagamento", v)
-            # Boletos / Empréstimos: comum esperarem 'valor_pagamento'
             elif ("boleto" in tipo) or ("emprést" in tipo) or ("emprest" in tipo) or ("financi" in tipo):
                 payload.setdefault("valor_pagamento", v)
     except Exception:
         pass
-    # ====================================================================
 
     # Execução
     try:
@@ -181,14 +164,15 @@ def render_saida(
             payload=payload,
         )
 
-        # Normaliza mensagem (idempotência -> sucesso simples)
         raw_msg = (res or {}).get("msg") or (res or {}).get("mensagem") or ""
         msg = (raw_msg or "").strip()
         if "idempot" in msg.lower():
             msg = "Pagamento registrado com sucesso."
 
-        # Feedbacks (com mensagem normalizada)
-        st.session_state["msg_ok"] = msg
+        # Feedbacks (Toast flow)
+        st.session_state["msg_ok"] = msg or "Pagamento registrado com sucesso."
+        st.session_state["msg_ok_type"] = "success"  # Define ícone verde no toast
+        st.session_state.form_saida = False
 
         # Info de classificação (somente para Pagamentos fora de Boletos)
         if payload.get("is_pagamentos") and payload.get("tipo_pagamento_sel") != "Boletos":
@@ -197,8 +181,6 @@ def render_saida(
                 f"{payload.get('destino_pagamento_sel') or '—'}"
             )
 
-        st.session_state.form_saida = False
-        st.success(msg or "Pagamento registrado com sucesso.")
         st.rerun()
 
     except ValueError as ve:
