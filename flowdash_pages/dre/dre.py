@@ -1499,12 +1499,12 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         "n_vendas": n_vendas,
         "ticket_medio": ticket_medio,
 
-        # margens
-        "margem_bruta_pct": margem_bruta_pct * 100.0,
-        "margem_ebitda_pct": margem_ebitda_pct * 100.0,
-        "margem_operacional_pct": margem_operacional_pct * 100.0,
-        "margem_liquida_pct": margem_liquida_pct * 100.0,
-        "margem_contrib_pct": margem_contrib_pct * 100.0,
+        # margens (CORRIGIDO: Removido * 100.0)
+        "margem_bruta_pct": margem_bruta_pct,
+        "margem_ebitda_pct": margem_ebitda_pct,
+        "margem_operacional_pct": margem_operacional_pct,
+        "margem_liquida_pct": margem_liquida_pct,
+        "margem_contrib_pct": margem_contrib_pct,
 
         # eficiência/gestão
         "custo_fixo_sobre_receita_pct": custo_fixo_sobre_receita_pct * 100.0,
@@ -1523,11 +1523,11 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         "ativos_totais_rt": ativos_totais_rt,
         "ativos_totais_warning": ativos_totais_warning,
 
-        # avançados
+        # avançados (CORRIGIDO: Removido * 100.0)
         "dep_extra": dep_extra,
-        "roe_pct": (_nz_div(lucro_liq, vars_dre.pl_base) * 100.0) if vars_dre.pl_base > 0 else 0.0,
-        "roi_pct": (_nz_div(lucro_liq, vars_dre.inv_base) * 100.0) if vars_dre.inv_base > 0 else 0.0,
-        "roa_pct": (_nz_div(lucro_liq, vars_dre.atv_base) * 100.0) if vars_dre.atv_base > 0 else 0.0,
+        "roe_pct": _nz_div(lucro_liq, vars_dre.pl_base) if vars_dre.pl_base > 0 else 0.0,
+        "roi_pct": _nz_div(lucro_liq, vars_dre.inv_base) if vars_dre.inv_base > 0 else 0.0,
+        "roa_pct": _nz_div(lucro_liq, vars_dre.atv_base) if vars_dre.atv_base > 0 else 0.0,
     }
 
 # ============================== UI / Página ==============================
@@ -1757,7 +1757,16 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         st.warning(ativos_totais_warning)
 
     try:
-        crec = _crescimento_mtd(db_path, ano, mes)
+        # CORREÇÃO CRESCIMENTO: Usa totais fechados do mês vs mês anterior
+        fat_atual = m['fat']
+        ano_ant, mes_ant = _mes_anterior(ano, mes)
+        ini_ant, fim_ant, _ = _periodo_ym(ano_ant, mes_ant)
+        fat_mes_anterior, _, _ = _query_entradas(db_path, ini_ant, fim_ant)
+        
+        if fat_mes_anterior > 0:
+            crec = ((fat_atual - fat_mes_anterior) / fat_mes_anterior) * 100.0
+        else:
+            crec = 0.0
     except Exception:
         crec = 0.0
 
@@ -1791,18 +1800,20 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     lucro_liq_rs = _safe(m.get("lucro_liq"))
     lucro_liq_pct_rl = _derive_pct(lucro_liq_rs, receita_liq_val)
 
-    # >>> BLOCO NOVO / SUBSTITUI QUALQUER CÁLCULO ATUAL DE PE CONTÁBIL/FINANCEIRO <<<
-    custos_fixos_val = fixas_rs
-    custos_fixos_base = float(custos_fixos_val) if "custos_fixos_val" in locals() else 0.0
+    # >>> BLOCO NOVO CORRIGIDO: CÁLCULO DE PE CONTÁBIL/FINANCEIRO <<<
+    # Correção: Numerador deve incluir Despesas Operacionais (Marketing, Manutenção, etc) além dos Fixos
+    custos_fixos_base = fixas_rs + despesas_operacionais_kpi 
+    
     gastos_emp_base = float(gastos_emprestimos_val) if "gastos_emprestimos_val" in locals() else 0.0
     mc_pct_base = float(margem_contrib_pct) if "margem_contrib_pct" in locals() else 0.0
     mc_divisor = (mc_pct_base / 100.0) if mc_pct_base else 0.0
+    
     pe_contabil_val = (custos_fixos_base / mc_divisor) if mc_divisor else 0.0
     pe_financeiro_val = ((custos_fixos_base + gastos_emp_base) / mc_divisor) if mc_divisor else 0.0
-    if pe_contabil_val < 0:
-        pe_contabil_val = 0.0
-    if pe_financeiro_val < 0:
-        pe_financeiro_val = 0.0
+    
+    if pe_contabil_val < 0: pe_contabil_val = 0.0
+    if pe_financeiro_val < 0: pe_financeiro_val = 0.0
+    
     pe_contabil_val = round(pe_contabil_val, 2)
     pe_financeiro_val = round(pe_financeiro_val, 2)
     # <<< FIM BLOCO NOVO >>>
@@ -2079,7 +2090,7 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip("Gasto c/ Empréstimos (R$ | %)", gasto_emp_display,
               status_emoji=_status_or_none(gasto_emp_status)),
-        _chip("Dívida (Estoque)", divida_display,
+        _chip("Dívida (Estoque Atual)", divida_display,
               status_emoji=_status_or_none(divida_status)),
     ], "k-fluxo"))
 
