@@ -1777,6 +1777,19 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
     if ano == 2025:
         show_lucro = any(v is not None for v in serie_lucro_liquido)
         if show_lucro:
+            # Calcula limites para o eixo Y para evitar corte dos rótulos
+            all_vals = [v for v in serie_lucro_liquido + serie_lucro_antes_deprec if v is not None]
+            range_y_args = {}
+            if all_vals:
+                y_max = max(all_vals)
+                y_min = min(all_vals)
+                # Adiciona 20% de margem no topo para os labels
+                amplitude = y_max - y_min if y_max != y_min else abs(y_max) or 100
+                range_max = y_max + (amplitude * 0.25)
+                # Mantém o zero visível ou margem inferior se houver negativos
+                range_min = y_min - (amplitude * 0.1) if y_min < 0 else 0
+                range_y_args["range"] = [range_min, range_max]
+
             fig_lucro = go.Figure()
 
             # 1. Barras para o Lucro Líquido (Verde para Positivo, Vermelho para Negativo)
@@ -1807,6 +1820,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
                     text=text_antes, # Valores da linha
                     textposition="top center",
                     textfont=dict(color="white", size=11, family="Arial Black"), # Texto branco para contraste
+                    cliponaxis=False, # Permite que o texto saia da área de plotagem se necessário
                     hovertemplate="Antes Deprec.: %{y:,.2f}<extra></extra>"
                 )
             )
@@ -1826,6 +1840,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
                 dragmode="zoom",
                 hovermode="x unified",
                 showlegend=not is_mobile,
+                yaxis=range_y_args,
             )
             
             if is_mobile:
