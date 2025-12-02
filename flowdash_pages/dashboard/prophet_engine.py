@@ -5,7 +5,7 @@ from prophet import Prophet
 from bcb import sgs
 import sidrapy
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 
 def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> pd.DataFrame:
     """
@@ -75,9 +75,9 @@ def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> p
     return df_macro
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12) -> Tuple[go.Figure, pd.DataFrame]:
+def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12) -> Tuple[go.Figure, pd.DataFrame, Dict]:
     # --- Parte 1: Tratamento de Vendas (Mantenha a lógica existente de resample) ---
-    if df_vendas_bruto.empty: return go.Figure(), pd.DataFrame()
+    if df_vendas_bruto.empty: return go.Figure(), pd.DataFrame(), {}
     df = df_vendas_bruto.copy()
     
     # Identificar colunas de data e valor
@@ -98,7 +98,7 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
             break
             
     if not col_data or not col_valor:
-        return go.Figure(), pd.DataFrame()
+        return go.Figure(), pd.DataFrame(), {}
 
     df['ds'] = pd.to_datetime(df[col_data], errors='coerce')
     df['y'] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
@@ -116,14 +116,29 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
     if len(df_mensal) < 6:
         fig = go.Figure()
         fig.add_annotation(text="Dados insuficientes para previsão (mínimo 6 meses)", showarrow=False)
-        return fig, pd.DataFrame()
+        return fig, pd.DataFrame(), {}
+
+    # --- AJUSTE CIRÚRGICO: Separar Treino vs Mês Atual ---
+    hoje = pd.Timestamp.now().normalize()
+    data_atual = hoje.replace(day=1) # Primeiro dia do mês atual
+    
+    # Treino: Tudo ANTES do mês atual
+    df_treino = df_mensal[df_mensal['ds'] < data_atual].copy()
+    
+    # Dados do Mês Atual (para comparação)
+    df_mes_atual = df_mensal[df_mensal['ds'] == data_atual]
+    valor_realizado_atual = float(df_mes_atual['y'].iloc[0]) if not df_mes_atual.empty else 0.0
+    
+    if len(df_treino) < 6:
+         # Fallback se sobrar poucos dados após remover o mês atual
+         df_treino = df_mensal.copy()
 
     # --- Parte 2: Buscar 8 Regressores ---
-    data_inicio = df_mensal['ds'].min()
+    data_inicio = df_treino['ds'].min()
     df_macro = _buscar_regressores_macro(data_inicio, meses_futuro)
     
-    # --- Parte 3: Merge ---
-    df_prophet = df_mensal.merge(df_macro, left_on='ds', right_index=True, how='left')
+    # --- Parte 3: Merge (Usando df_treino) ---
+    df_prophet = df_treino.merge(df_macro, left_on='ds', right_index=True, how='left')
     df_prophet = df_prophet.ffill().bfill().fillna(0)
     
     # --- Parte 4: Treino ---
@@ -150,12 +165,27 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
             
     modelo.fit(df_prophet)
     
-    # --- Parte 5: Previsão ---
-    futuro = modelo.make_future_dataframe(periods=meses_futuro, freq='MS')
+    # --- Parte 5: Previsão (Incluindo Mês Atual como "Futuro") ---
+    # periods = meses_futuro + 1 (para incluir o mês atual na projeção)
+    futuro = modelo.make_future_dataframe(periods=meses_futuro + 1, freq='MS')
     futuro = futuro.merge(df_macro, left_on='ds', right_index=True, how='left')
     futuro = futuro.ffill().bfill().fillna(0)
     
     previsao = modelo.predict(futuro)
+    
+    # Extrair previsão para o mês atual
+    prev_atual_row = previsao[previsao['ds'] == data_atual]
+    valor_previsto_atual = float(prev_atual_row['yhat'].iloc[0]) if not prev_atual_row.empty else 0.0
+    valor_pessimista_atual = float(prev_atual_row['yhat_lower'].iloc[0]) if not prev_atual_row.empty else 0.0
+    valor_otimista_atual = float(prev_atual_row['yhat_upper'].iloc[0]) if not prev_atual_row.empty else 0.0
+    
+    metricas_mes_atual = {
+        'data': data_atual,
+        'realizado': valor_realizado_atual,
+        'previsto': valor_previsto_atual,
+        'pessimista': valor_pessimista_atual,
+        'otimista': valor_otimista_atual
+    }
     
     # --- Parte 6: Visualização (Plotly) ---
     fig = go.Figure()
@@ -163,24 +193,33 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
     def _fmt(x):
         return f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    # Histórico
+    # Histórico (Treino)
     df_prophet['y_fmt'] = df_prophet['y'].apply(_fmt)
     fig.add_trace(go.Scatter(
         x=df_prophet['ds'], y=df_prophet['y'],
-        mode='lines+markers', name='Realizado',
+        mode='lines+markers', name='Histórico Realizado',
         text=df_prophet['y_fmt'], hovertemplate='%{text}<extra></extra>',
         line=dict(color='black', width=2), marker=dict(size=6)
     ))
     
-    # Previsão
+    # Ponto do Mês Atual (Realizado) - Comparação Visual
+    if valor_realizado_atual > 0:
+        fig.add_trace(go.Scatter(
+            x=[data_atual], y=[valor_realizado_atual],
+            mode='markers', name='Realizado (Mês Atual)',
+            text=[_fmt(valor_realizado_atual)], hovertemplate='%{text}<extra>Atual</extra>',
+            marker=dict(color='#27ae60', size=10, symbol='diamond')
+        ))
+    
+    # Previsão (Começando do Mês Atual em diante)
     # Filtra apenas o futuro para plotar pontilhado
-    data_corte = df_prophet['ds'].max()
-    df_futuro_plot = previsao[previsao['ds'] > data_corte].copy()
+    data_corte_treino = df_prophet['ds'].max()
+    df_futuro_plot = previsao[previsao['ds'] > data_corte_treino].copy()
     df_futuro_plot['yhat_fmt'] = df_futuro_plot['yhat'].apply(_fmt)
     
     fig.add_trace(go.Scatter(
         x=df_futuro_plot['ds'], y=df_futuro_plot['yhat'],
-        mode='lines', name='Previsão',
+        mode='lines', name='Previsão (IA)',
         text=df_futuro_plot['yhat_fmt'], hovertemplate='%{text}<extra>Previsão</extra>',
         line=dict(color='#2980b9', width=2, dash='dot')
     ))
@@ -206,4 +245,8 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
         margin=dict(l=20, r=20, t=60, b=20)
     )
     
-    return fig, df_futuro_plot
+    # Remove o mês atual do df_futuro_plot retornado para não duplicar nos cards de "Próximo Mês"
+    # (Queremos que "Próximo Mês" seja o mês SEGUINTE ao atual)
+    df_futuro_cards = df_futuro_plot[df_futuro_plot['ds'] > data_atual].copy()
+    
+    return fig, df_futuro_cards, metricas_mes_atual

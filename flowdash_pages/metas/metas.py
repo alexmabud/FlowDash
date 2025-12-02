@@ -467,8 +467,13 @@ def render_metas_auto():
         st.error("Não encontrei os DataFrames de entrada/metas automaticamente."); return
     page_metas(df_e, df_m, perfil, usuario)
 
-def render(*_args, **_kwargs):
+def render(caminho_banco: Optional[str] = None):
+    if caminho_banco:
+        st.session_state["caminho_banco"] = caminho_banco
     render_metas_auto()
 
-def render_metas(*_args, **_kwargs):
-    render_metas_auto()
+def main():
+    render(None)
+
+def app():
+    main()

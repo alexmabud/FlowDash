@@ -2116,7 +2116,55 @@ def render_dashboard(caminho_banco: Optional[str]):
         if not df_entrada.empty:
             with st.spinner("O Oráculo está consultando o Banco Central e prevendo o futuro..."):
                 # Passa o df_entrada BRUTO
-                fig_previsao, dados_futuros = criar_grafico_previsao(df_entrada, meses_futuro)
+                fig_previsao, dados_futuros, metricas_atual = criar_grafico_previsao(df_entrada, meses_futuro)
+            
+            # --- NOVO: Exibir Comparativo do Mês Atual (Realizado vs Meta IA) ---
+            if metricas_atual and metricas_atual.get('previsto', 0) > 0:
+                mes_nome = MESES_LABELS[metricas_atual['data'].month - 1]
+                ano_atual = metricas_atual['data'].year
+                
+                st.markdown(f"##### Acompanhamento: {mes_nome}/{ano_atual}")
+                
+                c1, c2, c3, c4 = st.columns(4)
+                
+                v_real = metricas_atual.get('realizado', 0.0)
+                v_prev = metricas_atual.get('previsto', 0.0)
+                v_pess = metricas_atual.get('pessimista', 0.0)
+                v_otim = metricas_atual.get('otimista', 0.0)
+                
+                # Helper para calcular % e formatar delta composto
+                def _calc_delta_composto(real, meta):
+                    if meta <= 0: return "off", "0.0%"
+                    
+                    diff = real - meta
+                    pct = (real / meta) * 100.0
+                    
+                    # Formatação do valor da diferença (absoluto)
+                    diff_fmt = _fmt_currency(abs(diff))
+                    
+                    if diff >= 0:
+                        # Meta batida (Verde)
+                        return "normal", f"{pct:.1f}% (Superou {diff_fmt})"
+                    else:
+                        # Falta bater (Cinza/Padrão)
+                        return "off", f"{pct:.1f}% (Falta {diff_fmt})"
+
+                # Col 1: Realizado
+                c1.metric("Realizado", _fmt_currency(v_real))
+                
+                # Col 2: Pessimista
+                cor_pess, delta_pess = _calc_delta_composto(v_real, v_pess)
+                c2.metric("Meta Mínima (Pessimista)", _fmt_currency(v_pess), delta=delta_pess, delta_color=cor_pess)
+                
+                # Col 3: Realista
+                cor_prev, delta_prev = _calc_delta_composto(v_real, v_prev)
+                c3.metric("Meta Realista (IA)", _fmt_currency(v_prev), delta=delta_prev, delta_color=cor_prev)
+                
+                # Col 4: Otimista
+                cor_otim, delta_otim = _calc_delta_composto(v_real, v_otim)
+                c4.metric("Meta Otimista", _fmt_currency(v_otim), delta=delta_otim, delta_color=cor_otim)
+                
+                st.divider() # Separador visual antes do gráfico
             
             # Exibe Cards com o próximo mês
             if not dados_futuros.empty:
@@ -2214,12 +2262,12 @@ def render_dashboard(caminho_banco: Optional[str]):
 
 
 
-# def render(caminho_banco: Optional[str] = None):
-#     """
-#     Wrapper para compatibilidade com o carregador de páginas do FlowDash.
-#     Apenas delega para render_dashboard.
-#     """
-#     return render_dashboard(caminho_banco)
+def render(caminho_banco: Optional[str] = None):
+    """
+    Wrapper para compatibilidade com o carregador de páginas do FlowDash.
+    Apenas delega para render_dashboard.
+    """
+    return render_dashboard(caminho_banco)
 
 def main():
     render_dashboard(None)
