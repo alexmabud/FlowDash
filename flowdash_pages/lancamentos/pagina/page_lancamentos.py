@@ -177,8 +177,9 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     )
 
     # ----- Saldos (2 linhas no mesmo card) -----
-    # 1) Caixa e Caixa 2 — EXIBIÇÃO com "último saldo salvo até a data"
-    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
+    # 1) Caixa e Caixa 2 — EXIBIÇÃO com "saldo projetado" (acumulado real)
+    from flowdash_pages.fechamento.fechamento import _calcular_saldo_projetado
+    disp_caixa, disp_caixa2, disp_ref = _calcular_saldo_projetado(caminho_banco, data_lanc)
 
     # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
     saldos_bancos = resumo.get("saldos_bancos") or {}

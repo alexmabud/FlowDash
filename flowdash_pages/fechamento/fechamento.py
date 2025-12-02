@@ -463,8 +463,160 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     # Caixa do DIA (mantém lógica original para cálculos/salvamento)
     caixa_total_dia, caixa2_total_dia = _caixas_totais_no_dia(caminho_banco, data_sel)
 
-    # >>> NOVO: valores somente para EXIBIÇÃO (último saldo salvo até a data) <<<
-    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_sel)
+    # Total consolidado (até a data) – continua usando os valores do DIA (sem alteração de lógica)
+    # saldo_total = float(disp_caixa + disp_caixa2 + total_bancos)
+
+
+# ============== NOVO: Lógica de Saldo Projetado (Checkpoint + Movimentações) ==============
+def _calcular_saldo_projetado(caminho_banco: str, data_alvo: date) -> tuple[float, float, date | None]:
+    """
+    Calcula o saldo projetado de Caixa e Caixa 2 até a data_alvo.
+    Lógica:
+      1. Busca último fechamento (saldos_caixas) <= data_alvo (Checkpoint).
+      2. Soma Entradas (DINHEIRO) no intervalo (checkpoint, data_alvo].
+      3. Subtrai Saídas (Origem=Caixa/Caixa 2) no intervalo.
+      4. Aplica Movimentações (Transferências/Correções) no intervalo.
+    """
+    data_alvo_str = str(data_alvo)
+    
+    with sqlite3.connect(caminho_banco) as conn:
+        # 1. Checkpoint (último saldo salvo)
+        row = conn.execute(
+            """
+            SELECT DATE(data) as d, caixa_total, caixa2_total
+            FROM saldos_caixas
+            WHERE DATE(data) <= DATE(?)
+            ORDER BY DATE(data) DESC, ROWID DESC
+            LIMIT 1
+            """,
+            (data_alvo_str,)
+        ).fetchone()
+        
+        if row:
+            data_base = row[0] # String YYYY-MM-DD
+            base_caixa = float(row[1] or 0.0)
+            base_caixa2 = float(row[2] or 0.0)
+        else:
+            data_base = '2000-01-01' # Data muito antiga se não houver fechamento anterior
+            base_caixa = 0.0
+            base_caixa2 = 0.0
+            
+        # Se o checkpoint for exatamente hoje, já temos o saldo (mas vamos recalcular para garantir consistência se houver lançamentos posteriores ao fechamento no mesmo dia, embora o bloqueio deva impedir)
+        # Na verdade, a regra é: soma tudo ESTRITAMENTE MAIOR que data_base até data_alvo.
+        
+        # 2. Entradas (Vendas em DINHEIRO) -> Vai para CAIXA (Loja)
+        # Intervalo: data_base < Data <= data_alvo
+        vendas_dinheiro = conn.execute(
+            """
+            SELECT SUM(Valor) 
+            FROM entrada 
+            WHERE TRIM(UPPER(Forma_de_Pagamento)) = 'DINHEIRO'
+              AND DATE(Data) > DATE(?) 
+              AND DATE(Data) <= DATE(?)
+            """,
+            (data_base, data_alvo_str)
+        ).fetchone()[0] or 0.0
+        
+        # 3. Saídas (Caixa e Caixa 2)
+        # Intervalo: data_base < Data <= data_alvo
+        # Origem_Dinheiro pode ser 'Caixa', 'Caixa 2', 'Caixa 2 (Casa)', etc. Normalizar se necessário.
+        # Assumindo 'Caixa' e 'Caixa 2' como chaves principais.
+        saidas_caixa = conn.execute(
+            """
+            SELECT SUM(Valor) 
+            FROM saida 
+            WHERE Origem_Dinheiro = 'Caixa'
+              AND DATE(Data) > DATE(?) 
+              AND DATE(Data) <= DATE(?)
+            """,
+            (data_base, data_alvo_str)
+        ).fetchone()[0] or 0.0
+        
+        saidas_caixa2 = conn.execute(
+            """
+            SELECT SUM(Valor) 
+            FROM saida 
+            WHERE Origem_Dinheiro IN ('Caixa 2', 'Caixa 2 (Casa)')
+              AND DATE(Data) > DATE(?) 
+              AND DATE(Data) <= DATE(?)
+            """,
+            (data_base, data_alvo_str)
+        ).fetchone()[0] or 0.0
+
+        # 4. Movimentações Bancárias (Transferências, Depósitos, Correções)
+        # Tabela: movimentacoes_bancarias
+        # Colunas relevantes: data, valor, tipo (entrada/saida), origem, destino, banco
+        # Precisamos filtrar onde o 'banco' (ou origem/destino) afeta Caixa ou Caixa 2
+        
+        # Helper para somar movimentações de um "banco" específico (no caso, 'Caixa' ou 'Caixa 2')
+        def _calc_movs(nome_conta):
+            # Soma entradas (tipo='entrada' e banco=nome_conta)
+            entradas = conn.execute(
+                """
+                SELECT SUM(valor) 
+                FROM movimentacoes_bancarias 
+                WHERE banco = ? 
+                  AND tipo = 'entrada'
+                  AND DATE(data) > DATE(?) 
+                  AND DATE(data) <= DATE(?)
+                """,
+                (nome_conta, data_base, data_alvo_str)
+            ).fetchone()[0] or 0.0
+            
+            # Soma saídas (tipo='saida' e banco=nome_conta)
+            saidas = conn.execute(
+                """
+                SELECT SUM(valor) 
+                FROM movimentacoes_bancarias 
+                WHERE banco = ? 
+                  AND tipo = 'saida'
+                  AND DATE(data) > DATE(?) 
+                  AND DATE(data) <= DATE(?)
+                """,
+                (nome_conta, data_base, data_alvo_str)
+            ).fetchone()[0] or 0.0
+            
+            return entradas - saidas
+
+        movs_caixa = _calc_movs('Caixa')
+        movs_caixa2 = _calc_movs('Caixa 2')
+
+        # Cálculo Final
+        saldo_final_caixa = base_caixa + float(vendas_dinheiro) - float(saidas_caixa) + float(movs_caixa)
+        saldo_final_caixa2 = base_caixa2 - float(saidas_caixa2) + float(movs_caixa2) # Vendas dinheiro geralmente não vão pra caixa 2 direto, a menos que especificado.
+        
+        # Data de referência para retorno (data do checkpoint)
+        dref = datetime.strptime(data_base, "%Y-%m-%d").date() if data_base != '2000-01-01' else None
+        
+        return round(saldo_final_caixa, 2), round(saldo_final_caixa2, 2), dref
+
+
+# ========================= Página (layout) =========================
+def pagina_fechamento_caixa(caminho_banco: str) -> None:
+    """Renderiza a página de Fechamento de Caixa (Streamlit)."""
+
+    data_sel = st.date_input("📅 Data do Fechamento", value=date.today())
+    st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")
+    data_ref = str(data_sel)
+
+    # Flag: já fechado?
+    ja_fechado = _fechamento_existe(caminho_banco, data_ref)
+    if ja_fechado:
+        st.toast("✅ Este dia já foi fechado. Botão desativado.", icon="🔒")
+    else:
+        st.toast("ℹ️ Dia aberto para fechamento.", icon="📝")
+
+    # --- Cartões do topo ---
+    valor_dinheiro, valor_pix = _dinheiro_e_pix_por_data(caminho_banco, data_sel)
+    total_cartao_liquido = _cartao_d1_liquido_por_data_liq(caminho_banco, data_sel)
+    entradas_total_dia = float(valor_dinheiro + valor_pix + total_cartao_liquido)
+
+    # Caixa do DIA (mantém lógica original para cálculos/salvamento)
+    caixa_total_dia, caixa2_total_dia = _caixas_totais_no_dia(caminho_banco, data_sel)
+
+    # >>> NOVO: Saldo Projetado (Acumulado Real) <<<
+    # Substitui _ultimo_caixas_ate pela nova lógica
+    disp_caixa, disp_caixa2, disp_ref = _calcular_saldo_projetado(caminho_banco, data_sel)
 
     # Bancos (acumulado <= data)
     bancos_totais = _somar_bancos_totais(caminho_banco, data_sel)
@@ -475,7 +627,7 @@ def pagina_fechamento_caixa(caminho_banco: str) -> None:
     corr_dia = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     corr_acum = _correcoes_acumuladas_ate(caminho_banco, data_sel)
 
-    # Total consolidado (até a data) – continua usando os valores do DIA (sem alteração de lógica)
+    # Total consolidado (agora usa o saldo projetado correto)
     saldo_total = float(disp_caixa + disp_caixa2 + total_bancos)
 
 
