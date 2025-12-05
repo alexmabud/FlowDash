@@ -211,8 +211,8 @@ if _DEBUG:
                 st.write("st.secrets indisponível (ok em CLI/local).")
 
             st.write("token_source:", TOKEN_SOURCE_CFG)
-            st.write("access_token (mascarado):", mask_token(ACCESS_TOKEN_CFG))
-            st.write("token_length:", len(ACCESS_TOKEN_CFG))
+            st.write("access_token (mascarado):", mask_token(str(ACCESS_TOKEN_CFG)))
+            st.write("token_length:", len(str(ACCESS_TOKEN_CFG)))
             st.write("file_path:", DROPBOX_PATH_CFG)
             st.write("force_download:", "1" if FORCE_DOWNLOAD_CFG else "0")
 
@@ -357,7 +357,7 @@ _effective_token = "" if _DROPBOX_DISABLED else (ACCESS_TOKEN_CFG or "")
 _effective_path = DROPBOX_PATH_CFG
 _effective_force = FORCE_DOWNLOAD_CFG
 _caminho_banco, _db_origem = ensure_db_available(
-    _effective_token, _effective_path, _effective_force, _DROPBOX_DISABLED
+    str(_effective_token), str(_effective_path), _effective_force, _DROPBOX_DISABLED
 )
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
@@ -2190,7 +2191,10 @@ def render_dashboard(caminho_banco: Optional[str]):
                 
                 # Helper para formatar data usando MESES_LABELS (Ex: Nov/2025)
                 def _fmt_data_pt(d):
-                    return f"{MESES_LABELS[d.month-1]}/{d.year}"
+                    try:
+                        return f"{MESES_LABELS[d.month-1]}/{d.year}"
+                    except:
+                        return str(d)
                 
                 df_t['ds_label'] = df_t['ds'].apply(_fmt_data_pt)
                 
@@ -2209,6 +2213,8 @@ def render_dashboard(caminho_banco: Optional[str]):
                 df_t = df_t.map(_fmt_currency)
                 
                 st.dataframe(df_t, use_container_width=True)
+            elif metricas_atual and "error" in metricas_atual:
+                 st.error(f"Não foi possível gerar a previsão: {metricas_atual['error']}")
             else:
                  st.warning("Dados insuficientes para gerar previsão (mínimo 6 meses de histórico).")
         else:
