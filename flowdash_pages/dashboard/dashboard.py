@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from calendar import monthrange
+from calendar import monthrange, isleap
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -571,10 +571,8 @@ def render_chips_principais(
     vars_dre,
 ) -> None:
     """
-    Bloco de KPIs principais do dashboard (topo da página).
-
-    Indicadores calculados sempre com base na data de hoje (ano/mês/dia atuais),
-    independentemente do ano selecionado para os gráficos abaixo.
+    Bloco de KPIs principais do dashboard.
+    Lógica Ajustada: 'Melhor Mês Histórico' agora compara com o mês do Melhor Ano Geral.
     """
     hoje = date.today()
     ano_atual = hoje.year
@@ -586,235 +584,167 @@ def render_chips_principais(
         return
 
     df = df_entrada.copy()
-    # Garante colunas de apoio
     df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
     df["Data_date"] = df["Data"].dt.date
     df["ano"] = df["Data"].dt.year
     df["mes"] = df["Data"].dt.month
 
-    # -------------------------
-    # Bloco 1 – Vendas & Saldo
-    # -------------------------
-    # Vendas do dia
+    # --- Helpers Locais ---
+    def _sum_ytd(df_in: pd.DataFrame, target_year: int, ref_month: int, ref_day: int) -> float:
+        """Soma YTD (Year to Date) até o dia/mês de referência."""
+        if target_year not in df_in["ano"].unique():
+            return 0.0
+        try:
+            limit_date = date(target_year, ref_month, ref_day)
+        except ValueError:
+            limit_date = date(target_year, ref_month, 28)
+        start_date = date(target_year, 1, 1)
+        mask = (df_in["Data_date"] >= start_date) & (df_in["Data_date"] <= limit_date)
+        return float(df_in.loc[mask, "Valor"].sum())
+
+    def _fmt_kpi_html(current: float, ref: float) -> str:
+        """Gera HTML com cor condicional."""
+        if ref == 0:
+            pct = 0.0
+            delta = 0.0
+            txt_display = "0.0%"
+        else:
+            pct = (current - ref) / ref * 100.0
+            delta = current - ref
+            txt_display = f"{pct:.1f}% ({_fmt_currency(delta)})"
+
+        if pct > 0: color = "#2ecc71"
+        elif pct < 0: color = "#e74c3c"
+        else: color = "#ffffff"
+
+        return f"<span style='color:{color};font-size:18px;font-weight:600;'>{txt_display}</span>"
+
+    # --- Cálculos Principais ---
     mask_dia = df["Data_date"] == hoje
     vendas_dia = float(df.loc[mask_dia, "Valor"].sum())
+    mask_mes = (df["ano"] == ano_atual) & (df["mes"] == mes_atual)
+    vendas_mes = float(df.loc[mask_mes, "Valor"].sum())
+    mask_ano = df["ano"] == ano_atual
+    vendas_ano = float(df.loc[mask_ano, "Valor"].sum())
 
-    # Vendas do mês (ano atual + mês atual)
-    mask_mes_atual = (df["ano"] == ano_atual) & (df["mes"] == mes_atual)
-    vendas_mes = float(df.loc[mask_mes_atual, "Valor"].sum())
-
-    # Vendas do ano (ano atual)
-    mask_ano_atual = df["ano"] == ano_atual
-    vendas_ano = float(df.loc[mask_ano_atual, "Valor"].sum())
-
-    # Saldo disponível (bancos + caixa + caixa 2) usando helpers do fechamento
     bancos_dict = _somar_bancos_totais(db_path, hoje)
     disp_caixa, disp_caixa2, _ = _ultimo_caixas_ate(db_path, hoje)
-    saldo_disponivel = float(disp_caixa + disp_caixa2 + sum(bancos_dict.values()))
+    saldo_disp = float(disp_caixa + disp_caixa2 + sum(bancos_dict.values()))
 
-    # ------------------------------
-    # Bloco 2 – Crescimento & Comparações
-    # ------------------------------
-    # Crescimento m/m: mês atual vs mês anterior (ano atual)
-    fat_por_mes_ano = (
-        df[df["ano"] == ano_atual]
-        .groupby("mes")["Valor"]
-        .sum()
-    )
-
-    valor_mes_atual = float(fat_por_mes_ano.get(mes_atual, 0.0))
-    valor_mes_anterior = float(fat_por_mes_ano.get(mes_atual - 1, 0.0)) if mes_atual > 1 else 0.0
-    if valor_mes_anterior > 0:
-        crescimento_mm_pct = (valor_mes_atual - valor_mes_anterior) / valor_mes_anterior * 100.0
-        delta_mm_valor = valor_mes_atual - valor_mes_anterior
-    else:
-        crescimento_mm_pct = 0.0
-        delta_mm_valor = 0.0
-
-    # Comparação do mesmo período do mês x ano anterior
-    ano_anterior = ano_atual - 1
-    comp_mes_anoant_pct = 0.0
-    delta_mes_anoant_valor = 0.0
-    valor_periodo_atual = 0.0
-    valor_periodo_prev = 0.0
-
-    if ano_anterior in df["ano"].unique():
-        # Ajusta o dia final do mês anterior para não estourar (ex.: 31 vs fevereiro)
-        dia_limite_prev = monthrange(ano_anterior, mes_atual)[1]
-        dia_prev = min(dia_atual, dia_limite_prev)
-
-        atual_ini = date(ano_atual, mes_atual, 1)
-        atual_fim = hoje
-        prev_ini = date(ano_anterior, mes_atual, 1)
-        prev_fim = date(ano_anterior, mes_atual, dia_prev)
-
-        mask_periodo_atual = (df["Data_date"] >= atual_ini) & (df["Data_date"] <= atual_fim)
-        mask_periodo_prev = (df["Data_date"] >= prev_ini) & (df["Data_date"] <= prev_fim)
-
-        valor_periodo_atual = float(df.loc[mask_periodo_atual, "Valor"].sum())
-        valor_periodo_prev = float(df.loc[mask_periodo_prev, "Valor"].sum())
-
-        if valor_periodo_prev > 0:
-            comp_mes_anoant_pct = (valor_periodo_atual - valor_periodo_prev) / valor_periodo_prev * 100.0
-            delta_mes_anoant_valor = valor_periodo_atual - valor_periodo_prev
-
-    # Comparação do mês atual com o melhor mesmo mês dos anos anteriores
-    df_mes_hist = df[df["mes"] == mes_atual].groupby("ano")["Valor"].sum()
-    historico_mes_anteriores = df_mes_hist[df_mes_hist.index < ano_atual]
-    melhor_ano_mes = None
-    melhor_val_mes = 0.0
-    comp_mes_melhor_pct = 0.0
-    delta_mes_melhor_valor = 0.0
-
-    if not historico_mes_anteriores.empty:
-        melhor_ano_mes = int(historico_mes_anteriores.idxmax())
-        melhor_val_mes = float(historico_mes_anteriores.max())
-        if melhor_val_mes > 0:
-            comp_mes_melhor_pct = (valor_mes_atual - melhor_val_mes) / melhor_val_mes * 100.0
-            delta_mes_melhor_valor = valor_mes_atual - melhor_val_mes
-
-    # Comparação do ano atual com o ano anterior (total anual)
-    vendas_ano_anterior = float(df.loc[df["ano"] == ano_anterior, "Valor"].sum()) if ano_anterior in df["ano"].unique() else 0.0
-    if vendas_ano_anterior > 0:
-        comp_ano_anterior_pct = (vendas_ano - vendas_ano_anterior) / vendas_ano_anterior * 100.0
-        delta_ano_anterior_valor = vendas_ano - vendas_ano_anterior
-    else:
-        comp_ano_anterior_pct = 0.0
-        delta_ano_anterior_valor = 0.0
-
-    # Comparação do ano atual com o melhor ano de vendas (histórico)
+    # --- Identificação do Melhor Ano (Base para Comparações) ---
+    ano_prev = ano_atual - 1
+    
     vendas_por_ano = df.groupby("ano")["Valor"].sum()
-    historico_anos_anteriores = vendas_por_ano[vendas_por_ano.index < ano_atual]
-    melhor_ano_global = None
-    melhor_val_ano_global = 0.0
-    comp_ano_melhor_pct = 0.0
-    delta_ano_melhor_valor = 0.0
+    hist_anos = vendas_por_ano[vendas_por_ano.index < ano_atual]
+    
+    # Melhor Ano Geral (Faturamento Total)
+    if not hist_anos.empty:
+        best_ano = int(hist_anos.idxmax())
+        val_best_ano_total = float(hist_anos.max())
+    else:
+        best_ano = None
+        val_best_ano_total = 0.0
 
-    if not historico_anos_anteriores.empty:
-        melhor_ano_global = int(historico_anos_anteriores.idxmax())
-        melhor_val_ano_global = float(historico_anos_anteriores.max())
-        if melhor_val_ano_global > 0:
-            comp_ano_melhor_pct = (vendas_ano - melhor_val_ano_global) / melhor_val_ano_global * 100.0
-            delta_ano_melhor_valor = vendas_ano - melhor_val_ano_global
+    # --- 8 Indicadores ---
+    
+    # 1. Mês vs Mês Anterior
+    fat_meses = df[df["ano"] == ano_atual].groupby("mes")["Valor"].sum()
+    v_ant_mes = float(fat_meses.get(mes_atual - 1, 0.0)) if mes_atual > 1 else 0.0
+    kpi_mm = _fmt_kpi_html(vendas_mes, v_ant_mes)
+    
+    idx_mes_ant = (mes_atual - 2) % 12
+    lbl_mes_ant = MESES_LABELS[idx_mes_ant] if mes_atual > 1 else "Dez"
 
-    # -------------------------
-    # Bloco 3 – Eficiência de Vendas
-    # -------------------------
-    # Cálculo direto a partir da tabela entrada (cada linha = 1 venda)
+    # 2. Mês vs Ano Anterior (Mesmo Período)
+    v_mes_ano_ant = 0.0
+    if ano_prev in df["ano"].unique():
+        try:
+            lim = min(dia_atual, monthrange(ano_prev, mes_atual)[1])
+            msk = (df["ano"] == ano_prev) & (df["mes"] == mes_atual) & (df["Data"].dt.day <= lim)
+            v_mes_ano_ant = float(df.loc[msk, "Valor"].sum())
+        except: pass
+    kpi_ma = _fmt_kpi_html(vendas_mes, v_mes_ano_ant)
 
-    # Número de vendas no mês atual (linhas da tabela entrada)
-    n_vendas_mes = int(df.loc[mask_mes_atual].shape[0])
+    # 3. Mês vs Mês do Melhor Ano (Total do Mês)
+    # Lógica Ajustada: Pega o mês atual dentro do best_ano
+    val_mes_no_best_ano = 0.0
+    if best_ano:
+         mask_mba = (df["ano"] == best_ano) & (df["mes"] == mes_atual)
+         val_mes_no_best_ano = float(df.loc[mask_mba, "Valor"].sum())
+    
+    kpi_mh = _fmt_kpi_html(vendas_mes, val_mes_no_best_ano)
+    lbl_best_mes_data = f"{MESES_LABELS[mes_atual-1]}/{best_ano}" if best_ano else "N/A"
 
-    # Número de vendas no ano atual
-    n_vendas_ano = int(df.loc[mask_ano_atual].shape[0])
+    # 4. Mês vs Mesmo Período do Melhor Ano (Parcial)
+    v_mes_best_ano_parcial = 0.0
+    if best_ano:
+        try:
+            lim = min(dia_atual, monthrange(best_ano, mes_atual)[1])
+            msk = (df["ano"] == best_ano) & (df["mes"] == mes_atual) & (df["Data"].dt.day <= lim)
+            v_mes_best_ano_parcial = float(df.loc[msk, "Valor"].sum())
+        except: pass
+    kpi_mma = _fmt_kpi_html(vendas_mes, v_mes_best_ano_parcial)
+    lbl_best_ano = str(best_ano) if best_ano else "N/A"
 
-    # Ticket médio do mês: vendas_mes / n_vendas_mes
-    ticket_medio_mes = (vendas_mes / n_vendas_mes) if n_vendas_mes > 0 else 0.0
+    # 5. Ano vs Ano Ant (Total)
+    v_ano_ant_tot = float(df.loc[df["ano"] == ano_prev, "Valor"].sum()) if ano_prev in df["ano"].unique() else 0.0
+    kpi_at = _fmt_kpi_html(vendas_ano, v_ano_ant_tot)
 
-    # Ticket médio do ano: vendas_ano / n_vendas_ano
-    ticket_medio_ano = (vendas_ano / n_vendas_ano) if n_vendas_ano > 0 else 0.0
+    # 6. Ano vs Ano Ant (YTD)
+    v_ano_ant_ytd = _sum_ytd(df, ano_prev, mes_atual, dia_atual)
+    kpi_ay = _fmt_kpi_html(vendas_ano, v_ano_ant_ytd)
 
-    # =======================
-    # Renderização dos blocos (cards estilo Lançamentos)
-    # =======================
+    # 7. Ano vs Melhor Ano (Total)
+    kpi_amt = _fmt_kpi_html(vendas_ano, val_best_ano_total)
+
+    # 8. Ano vs Melhor Ano (YTD)
+    v_best_ano_ytd = _sum_ytd(df, best_ano, mes_atual, dia_atual) if best_ano else 0.0
+    kpi_amy = _fmt_kpi_html(vendas_ano, v_best_ano_ytd)
+
+    # --- Renderização ---
     st.markdown("## Indicadores de Vendas")
 
-    # --- Bloco 1 – Vendas & Saldo (2 linhas no mesmo card) ---
     render_card_rows(
         "📊 Vendas & Saldo",
         [
-            # Linha 1: 3 indicadores lado a lado
-            [
-                ("Vendas do dia", vendas_dia, True),
-                ("Vendas do mês", vendas_mes, True),
-                ("Vendas do ano", vendas_ano, True),
-            ],
-            # Linha 2: Saldo disponível ocupando a linha toda
-            [
-                ("Saldo disponível", saldo_disponivel, True),
-            ],
+            [("Vendas do dia", vendas_dia, True), ("Vendas do mês", vendas_mes, True), ("Vendas do ano", vendas_ano, True)],
+            [("Saldo disponível", saldo_disp, True)],
         ],
     )
 
-    # Monta labels dinâmicos reaproveitando as variáveis já calculadas
-    label_mes_melhor = (
-        f"Mês atual vs melhor {MESES_LABELS[mes_atual - 1]}/{melhor_ano_mes}"
-        if melhor_ano_mes is not None
-        else f"Mês atual vs melhor {MESES_LABELS[mes_atual - 1]} histórico"
-    )
-    label_ano_melhor = (
-        f"Ano atual vs melhor ano ({melhor_ano_global})"
-        if melhor_ano_global is not None
-        else "Ano atual vs melhor ano"
-    )
-
-    # monta valores com % e delta em R$ e aplica cor por sinal
-    def _colorize_val(texto: str, base_pct: float) -> str:
-        if base_pct > 0:
-            color = "#2ecc71"
-        elif base_pct < 0:
-            color = "#e74c3c"
-        else:
-            color = "#ffffff"
-        return f"<span style='color:{color};font-size:18px;font-weight:600;'>{texto}</span>"
-
-    val_cres_mm_txt = _fmt_percent(crescimento_mm_pct)
-    if delta_mm_valor:
-        val_cres_mm_txt = f"{val_cres_mm_txt} ({_fmt_currency(delta_mm_valor)})"
-    val_cres_mm = _colorize_val(val_cres_mm_txt, crescimento_mm_pct)
-
-    val_comp_mes_anoant_txt = _fmt_percent(comp_mes_anoant_pct)
-    if delta_mes_anoant_valor:
-        val_comp_mes_anoant_txt = f"{val_comp_mes_anoant_txt} ({_fmt_currency(delta_mes_anoant_valor)})"
-    val_comp_mes_anoant = _colorize_val(val_comp_mes_anoant_txt, comp_mes_anoant_pct)
-
-    val_comp_mes_melhor_txt = _fmt_percent(comp_mes_melhor_pct)
-    if delta_mes_melhor_valor:
-        val_comp_mes_melhor_txt = f"{val_comp_mes_melhor_txt} ({_fmt_currency(delta_mes_melhor_valor)})"
-    val_comp_mes_melhor = _colorize_val(val_comp_mes_melhor_txt, comp_mes_melhor_pct)
-
-    val_comp_ano_ant_txt = _fmt_percent(comp_ano_anterior_pct)
-    if delta_ano_anterior_valor:
-        val_comp_ano_ant_txt = f"{val_comp_ano_ant_txt} ({_fmt_currency(delta_ano_anterior_valor)})"
-    val_comp_ano_ant = _colorize_val(val_comp_ano_ant_txt, comp_ano_anterior_pct)
-
-    val_comp_ano_melhor_txt = _fmt_percent(comp_ano_melhor_pct)
-    if delta_ano_melhor_valor:
-        val_comp_ano_melhor_txt = f"{val_comp_ano_melhor_txt} ({_fmt_currency(delta_ano_melhor_valor)})"
-    val_comp_ano_melhor = _colorize_val(val_comp_ano_melhor_txt, comp_ano_melhor_pct)
-
-    # --- Bloco 2 – Crescimento & Comparações (2 linhas no mesmo card) ---
     render_card_rows(
         "📈 Crescimento & Comparações",
         [
-            # Linha 1: 3 indicadores
             [
-                ("Crescimento m/m", [val_cres_mm], False),
-                ("Mês vs mesmo período ano anterior", [val_comp_mes_anoant], False),
-                (label_mes_melhor, [val_comp_mes_melhor], False),
+                (f"Mês vs Mês Anterior ({lbl_mes_ant})", [kpi_mm], False),
+                (f"Mês vs Mesmo Período do Ano Anterior ({ano_prev})", [kpi_ma], False),
             ],
-            # Linha 2: 2 indicadores do ano
             [
-                ("Ano atual vs ano anterior", [val_comp_ano_ant], False),
-                (label_ano_melhor, [val_comp_ano_melhor], False),
+                (f"Mês vs Melhor Mês Histórico ({lbl_best_mes_data})", [kpi_mh], False),
+                (f"Mês vs Mesmo Período do Melhor Ano ({lbl_best_ano})", [kpi_mma], False),
             ],
-        ],
+            [
+                (f"Ano vs Ano Anterior ({ano_prev}) - Total", [kpi_at], False),
+                (f"Ano vs Mesmo Período do Ano Anterior ({ano_prev})", [kpi_ay], False),
+            ],
+            [
+                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Total", [kpi_amt], False),
+                (f"Ano vs Mesmo Período do Melhor Ano ({lbl_best_ano})", [kpi_amy], False),
+            ],
+        ]
     )
 
-    # --- Bloco 3 – Eficiência de Vendas (2 linhas no mesmo card) ---
+    # Eficiência
+    n_v_mes = int(df.loc[mask_mes].shape[0])
+    n_v_ano = int(df.loc[mask_ano].shape[0])
+    tk_mes = (vendas_mes / n_v_mes) if n_v_mes > 0 else 0.0
+    tk_ano = (vendas_ano / n_v_ano) if n_v_ano > 0 else 0.0
+
     render_card_rows(
         "🎯 Eficiência de Vendas",
         [
-            # Linha 1: Ticket médio mês/ano
-            [
-                ("Ticket médio (mês)", ticket_medio_mes, True),
-                ("Ticket médio (ano)", ticket_medio_ano, True),
-            ],
-            # Linha 2: Nº de vendas mês/ano
-            [
-                ("Nº de vendas (mês)", [str(int(n_vendas_mes))], False),
-                ("Nº de vendas (ano)", [str(int(n_vendas_ano))], False),
-            ],
+            [("Ticket médio (mês)", tk_mes, True), ("Ticket médio (ano)", tk_ano, True)],
+            [("Nº de vendas (mês)", [str(n_v_mes)], False), ("Nº de vendas (ano)", [str(n_v_ano)], False)],
         ],
     )
 
