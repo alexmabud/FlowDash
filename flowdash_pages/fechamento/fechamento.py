@@ -348,8 +348,8 @@ def pagina_fechamento_caixa(caminho_banco: str):
     corr_dia, corr_acum = _correcoes_caixa_do_dia(caminho_banco, data_sel)
     
     sys_caixa, sys_caixa2 = _calcular_saldo_projetado(conn, data_sel)
-    # Usa D-1 para bancos pois os movimentos de hoje (ajustes) ainda serão lançados/editados.
-    sys_bancos = _get_saldos_bancos_acumulados(conn, data_sel - timedelta(days=1), bancos_ativos)
+    # Alterado: Usa data_sel (hoje) para mostrar saldo acumulado até o momento, igual à pág. Lançamentos.
+    sys_bancos = _get_saldos_bancos_acumulados(conn, data_sel, bancos_ativos)
     total_bancos = sum(sys_bancos.values())
     saldo_total_consolidado = sys_caixa + sys_caixa2 + total_bancos
     
