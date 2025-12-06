@@ -325,9 +325,15 @@ def pagina_fechamento_caixa(caminho_banco: str):
     if "dt_fechamento" not in st.session_state:
         st.session_state["dt_fechamento"] = date.today()
 
-    data_sel = st.date_input("📅 Data do Fechamento", value=st.session_state["dt_fechamento"])
+    # Feedback Toast (recupera do session_state após rerun)
+    if "fechamento_msg" in st.session_state:
+        msg, icon = st.session_state.pop("fechamento_msg")
+        st.toast(msg, icon=icon)
+
+    # Uso de key='dt_fechamento' gerencia o state automaticamente, evitando o bug do duplo clique
+    data_sel = st.date_input("📅 Data do Fechamento", key="dt_fechamento")
     st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")
-    st.session_state["dt_fechamento"] = data_sel
+
     
     conn = sqlite3.connect(caminho_banco)
     _garantir_colunas_fechamento(conn)
@@ -350,8 +356,9 @@ def pagina_fechamento_caixa(caminho_banco: str):
     ja_fechado = _verificar_fechamento_dia(conn, data_sel)
     
     dados_salvos = None
+    # Feedback de Status do Dia (Fechado ou Aberto)
     if ja_fechado:
-        st.warning(f"⚠️ Este dia já foi fechado. Os valores abaixo foram recuperados do histórico.")
+        st.toast("⚠️ Este dia já foi fechado. Visualizando histórico.", icon="🔒")
         dados_salvos = _carregar_fechamento_existente(conn, data_sel)
         
         bancos_salvos_dict = {}
@@ -359,6 +366,8 @@ def pagina_fechamento_caixa(caminho_banco: str):
              try:
                  bancos_salvos_dict = json.loads(dados_salvos['bancos_detalhe'])
              except: pass
+    else:
+        st.toast("🔓 Dia aberto para fechamento.", icon="📝")
 
     # ========================== LAYOUT EM CARDS ==========================
     render_card_row("💰 Valores que Entraram Hoje", [
@@ -420,12 +429,13 @@ def pagina_fechamento_caixa(caminho_banco: str):
         obs = st.text_area("Observações", value=def_obs, placeholder="Justificativa para diferenças...")
         confirmar = st.checkbox("Confirmo que os valores estão corretos.", value=False)
         
-        btn_label = "Atualizar Fechamento" if ja_fechado else "Salvar Fechamento (Ajustar Saldos)"
-        salvar = st.form_submit_button(btn_label)
+        
+        btn_label = "Fechamento Já Realizado" if ja_fechado else "Salvar Fechamento (Ajustar Saldos)"
+        salvar = st.form_submit_button(btn_label, disabled=ja_fechado)
         
     if salvar:
         if not confirmar:
-            st.error("Confirme os valores antes de salvar.")
+            st.toast("Confirme os valores antes de salvar.", icon="⚠️")
         else:
             try:
                 total_real = real_caixa + real_caixa2 + sum(real_bancos.values())
@@ -497,13 +507,13 @@ def pagina_fechamento_caixa(caminho_banco: str):
                         cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = COALESCE("{b_col}",0) + ? WHERE DATE(data)=DATE(?)', (delta, str(data_sel)))
                          
                 conn.commit()
-                st.success("✅ Fechamento Atualizado e Saldos Corrigidos!")
+                st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
                 st.balloons()
                 st.rerun()
                 
             except Exception as e:
                 conn.rollback()
-                st.error(f"Erro: {e}")
+                st.toast(f"Erro ao salvar: {e}", icon="❌")
             
     conn.close()
 
