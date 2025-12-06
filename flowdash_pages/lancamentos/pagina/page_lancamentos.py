@@ -57,48 +57,6 @@ def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame
     return pd.read_sql(query, conn, params=params or ())
 
 
-def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float, date | None]:
-    """
-    Retorna o **último** (mais recente) caixa_total e caixa2_total com DATE(data) <= data_sel
-    a partir da tabela `saldos_caixas`. Uso EXCLUSIVO para EXIBIÇÃO nos cards.
-
-    Não altera nenhuma lógica de cálculo/salvamento.
-    """
-    try:
-        with sqlite3.connect(caminho_banco) as conn:
-            df = _read_sql(
-                conn,
-                """
-                SELECT DATE(data) AS d, caixa_total, caixa2_total
-                  FROM saldos_caixas
-                 WHERE DATE(data) <= DATE(?)
-                 ORDER BY DATE(data) DESC, ROWID DESC
-                 LIMIT 1
-                """,
-                (str(data_sel),),
-            )
-    except Exception:
-        return (0.0, 0.0, None)
-
-    if df.empty:
-        return (0.0, 0.0, None)
-
-    try:
-        cx = float(pd.to_numeric(df.iloc[0]["caixa_total"], errors="coerce") or 0.0)
-    except Exception:
-        cx = 0.0
-
-    try:
-        cx2 = float(pd.to_numeric(df.iloc[0]["caixa2_total"], errors="coerce") or 0.0)
-    except Exception:
-        cx2 = 0.0
-
-    try:
-        dref = datetime.strptime(str(df.iloc[0]["d"]), "%Y-%m-%d").date()
-    except Exception:
-        dref = None
-
-    return (round(cx, 2), round(cx2, 2), dref)
 
 
 # ===================== Page =====================
@@ -178,8 +136,8 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
 
     # ----- Saldos (2 linhas no mesmo card) -----
     # 1) Caixa e Caixa 2 — EXIBIÇÃO com "saldo projetado" (acumulado real)
-    from flowdash_pages.fechamento.fechamento import _calcular_saldo_projetado
-    disp_caixa, disp_caixa2, disp_ref = _calcular_saldo_projetado(caminho_banco, data_lanc)
+    from flowdash_pages.fechamento.fechamento import _ultimo_caixas_ate
+    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
 
     # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
     saldos_bancos = resumo.get("saldos_bancos") or {}
