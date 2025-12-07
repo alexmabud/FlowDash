@@ -220,7 +220,9 @@ def pagina_saldos_bancarios(caminho_banco: str) -> None:
     usuario_atual = _resolver_usuario_logado()
     if not usuario_atual:
         st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-    agora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from flowdash_pages.utils_timezone import agora_br
+
+    agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
     if st.button("💾 Lançar Saldo (somar na mesma data)", use_container_width=True, disabled=(not usuario_atual)):
         try:

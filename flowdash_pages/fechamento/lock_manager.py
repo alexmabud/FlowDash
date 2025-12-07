@@ -1,5 +1,6 @@
 import sqlite3
 from datetime import date
+from flowdash_pages.utils_timezone import hoje_br
 
 def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
     """
@@ -8,7 +9,7 @@ def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
     
     Retorna a data (str 'YYYY-MM-DD') se houver pendência, ou None se estiver livre.
     """
-    hoje = date.today()
+    hoje = hoje_br()
     
     # Query unificada: Vendas + Saídas + Correções + Movimentações Bancárias (Caixa 2/Depósitos)
     query = """
@@ -21,7 +22,7 @@ def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
             UNION ALL
             SELECT DATE(data) as dia_mov FROM movimentacoes_bancarias
         ) 
-        WHERE dia_mov < DATE(?)
+        WHERE dia_mov < ?
     """
     
     try:
@@ -29,7 +30,9 @@ def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
             cursor = conn.cursor()
             
             # 1. Busca a última data movimentada antes de hoje
-            cursor.execute(query, (hoje,))
+            # Passa a data como string 'YYYY-MM-DD' para garantir a comparação correta no SQLite
+            hoje_str = hoje.strftime("%Y-%m-%d")
+            cursor.execute(query, (hoje_str,))
             row = cursor.fetchone()
             
             # Se nunca houve movimento ou banco é novo

@@ -225,7 +225,8 @@ def pagina_emprestimos_financiamentos(caminho_banco: str):
             usuario_cadastro = _resolver_usuario_logado()
             if not usuario_cadastro:
                 st.warning("⚠️ Confirme o campo **Usuário logado** acima para salvar o empréstimo.")
-            data_lancamento = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from flowdash_pages.utils_timezone import agora_br
+            data_lancamento = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
             submit = st.form_submit_button("📋 Salvar Empréstimo", disabled=(not usuario_cadastro))
 
@@ -361,7 +362,8 @@ def pagina_emprestimos_financiamentos(caminho_banco: str):
                         usuario_dep = _resolver_usuario_logado()
                         if not usuario_dep:
                             st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-                        agora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from flowdash_pages.utils_timezone import agora_br
+                        agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
                         if st.button("💾 Salvar saldo bancário", key=f"btn_dep_{id_selecionado}", disabled=(not usuario_dep)):
                             if valor_deposito <= 0:

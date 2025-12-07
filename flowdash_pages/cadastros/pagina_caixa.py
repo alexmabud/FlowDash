@@ -257,7 +257,9 @@ def pagina_caixa(caminho_banco: str) -> None:
     if not usuario_atual:
         # Evita salvar como 'desconhecido'
         st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-    agora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+from flowdash_pages.utils_timezone import agora_br
+
+    agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
     # --------------------------------------------------------------------
 
     # Botão para salvar
