@@ -683,15 +683,16 @@ def render_chips_principais(
     kpi_mh = _fmt_kpi_html(vendas_mes, val_best_mes_especifico)
     lbl_best_mes_data = f"{MESES_LABELS[mes_atual-1]}/{best_mes_ano_especifico}" if best_mes_ano_especifico else "N/A"
 
-    # 4. Mês vs Mesmo Período do Melhor Ano (Ritmo do melhor ano geral)
+    # 4. Mês vs Mesmo Período do Melhor Mês (Ritmo do melhor mês histórico)
     v_mes_best_ano_parcial = 0.0
-    if best_ano:
+    if best_mes_ano_especifico:
         try:
-            lim = min(dia_atual, monthrange(best_ano, mes_atual)[1])
-            msk = (df["ano"] == best_ano) & (df["mes"] == mes_atual) & (df["Data"].dt.day <= lim)
+            lim = min(dia_atual, monthrange(best_mes_ano_especifico, mes_atual)[1])
+            msk = (df["ano"] == best_mes_ano_especifico) & (df["mes"] == mes_atual) & (df["Data"].dt.day <= lim)
             v_mes_best_ano_parcial = float(df.loc[msk, "Valor"].sum())
         except: pass
     kpi_mma = _fmt_kpi_html(vendas_mes, v_mes_best_ano_parcial)
+    # lbl_best_ano não é mais usado aqui para o título, vamos usar lbl_best_mes_data no render
     lbl_best_ano = str(best_ano) if best_ano else "N/A"
 
     # 5. Ano vs Ano Ant (Total)
@@ -729,7 +730,7 @@ def render_chips_principais(
             ],
             [
                 (f"Mês vs Melhor Mês Histórico ({lbl_best_mes_data})", [kpi_mh], False),
-                (f"Mês vs Mesmo Período do Melhor Ano ({lbl_best_ano})", [kpi_mma], False),
+                (f"Mês vs Mesmo Período do Melhor Mês ({lbl_best_mes_data})", [kpi_mma], False),
             ],
             [
                 (f"Ano vs Ano Anterior ({ano_prev}) - Total", [kpi_at], False),
