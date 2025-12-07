@@ -7,6 +7,7 @@ import json
 from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
+from flowdash_pages.utils_timezone import hoje_br
 
 # ==============================================================================
 # 1. IMPORTS & UTILS
@@ -323,7 +324,7 @@ def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float
 
 def pagina_fechamento_caixa(caminho_banco: str):
     if "dt_fechamento" not in st.session_state:
-        st.session_state["dt_fechamento"] = date.today()
+        st.session_state["dt_fechamento"] = hoje_br() # Timezone corrected
 
     # Feedback Toast (recupera do session_state após rerun)
     if "fechamento_msg" in st.session_state:

@@ -16,6 +16,7 @@ import streamlit as st
 
 from .actions_pagina import carregar_resumo_dia
 from .ui_cards_pagina import render_card_row, render_card_rows, render_card_mercadorias
+from flowdash_pages.utils_timezone import hoje_br
 
 
 # ===================== Helpers =====================
@@ -24,7 +25,7 @@ def _get_default_data_lanc() -> Optional[str]:
     try:
         v = st.session_state.get("data_lanc")
         if not v:
-            v = date.today().strftime("%Y-%m-%d")
+            v = hoje_br().strftime("%Y-%m-%d")
             st.session_state["data_lanc"] = v
         return v
     except Exception:
@@ -104,7 +105,7 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     # Data de referência do lançamento
     data_lanc = st.date_input(
         "🗓️ Data do Lançamento",
-        value=data_default or date.today(),
+        value=data_default or hoje_br(),
         key="data_lanc",
     )
     st.markdown(f"## 🧾 Lançamentos do Dia — **{data_lanc}**")

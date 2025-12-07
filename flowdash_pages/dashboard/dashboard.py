@@ -9,6 +9,8 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import sqlite3
+from flowdash_pages.utils_timezone import hoje_br
 
 from shared.db import ensure_db_path_or_raise, get_conn
 from flowdash_pages.lancamentos.pagina.ui_cards_pagina import render_card_row, render_card_rows
@@ -248,7 +250,7 @@ def _previsto_dx(df_entrada: pd.DataFrame) -> Dict[str, float]:
     df = pd.DataFrame({"data_prev": datas_prev, "valor": valores})
     df["data_prev"] = df["data_prev"].dt.date
     df = df.dropna()
-    hoje = date.today()
+    hoje = hoje_br()
     d1 = df[df["data_prev"] == hoje + timedelta(days=1)]["valor"].sum()
     d7 = df[(df["data_prev"] > hoje) & (df["data_prev"] <= hoje + timedelta(days=7))]["valor"].sum()
     return {"d1": float(d1), "d7": float(d7)}
@@ -369,7 +371,7 @@ def build_meta_mes_gauge_dashboard(pct_meta: float, valor_atual: float, valor_me
 
 
 def _calc_meta_mes_dashboard(db_path: str) -> Tuple[float, float, float]:
-    hoje = date.today()
+    hoje = hoje_br()
     ano, mes = hoje.year, hoje.month
     df_ent = _normalize_df(_load_table(db_path, "entrada"))
     if df_ent.empty:
@@ -486,7 +488,7 @@ def _extrair_metas_completo_dashboard(df_metas_vig: pd.DataFrame, vendedor_upper
 
 def render_metas_resumo_dashboard(db_path: str) -> None:
     simplified = bool(st.session_state.get("fd_modo_mobile", False))
-    ref_day = date.today()
+    ref_day = hoje_br()
     inicio_sem = _inicio_semana_dashboard(ref_day)
     inicio_mes = ref_day.replace(day=1)
     coluna_dia = _coluna_dia_dashboard(ref_day)
@@ -572,9 +574,9 @@ def render_chips_principais(
 ) -> None:
     """
     Bloco de KPIs principais do dashboard.
-    Lógica Ajustada: 'Melhor Mês Histórico' agora compara com o mês do Melhor Ano Geral.
+    Lógica Ajustada: 'Melhor Mês Histórico' busca o recorde daquele mês específico (ex: Melhor Dezembro da história).
     """
-    hoje = date.today()
+    hoje = hoje_br()
     ano_atual = hoje.year
     mes_atual = hoje.month
     dia_atual = hoje.day
@@ -631,19 +633,31 @@ def render_chips_principais(
     disp_caixa, disp_caixa2, _ = _ultimo_caixas_ate(db_path, hoje)
     saldo_disp = float(disp_caixa + disp_caixa2 + sum(bancos_dict.values()))
 
-    # --- Identificação do Melhor Ano (Base para Comparações) ---
+    # --- Identificação de Referências Históricas ---
     ano_prev = ano_atual - 1
     
+    # 1. Melhor Ano Geral (Para comparações anuais e de ritmo anual)
     vendas_por_ano = df.groupby("ano")["Valor"].sum()
     hist_anos = vendas_por_ano[vendas_por_ano.index < ano_atual]
     
-    # Melhor Ano Geral (Faturamento Total)
     if not hist_anos.empty:
         best_ano = int(hist_anos.idxmax())
         val_best_ano_total = float(hist_anos.max())
     else:
         best_ano = None
         val_best_ano_total = 0.0
+
+    # 2. Melhor Mês Específico (Para comparação "Melhor Outubro", "Melhor Dezembro", etc)
+    df_mes_hist = df[df["mes"] == mes_atual].groupby("ano")["Valor"].sum()
+    # Filtra para não pegar o ano atual como referência histórica
+    hist_mes_especifico = df_mes_hist[df_mes_hist.index < ano_atual]
+    
+    if not hist_mes_especifico.empty:
+        best_mes_ano_especifico = int(hist_mes_especifico.idxmax())
+        val_best_mes_especifico = float(hist_mes_especifico.max())
+    else:
+        best_mes_ano_especifico = None
+        val_best_mes_especifico = 0.0
 
     # --- 8 Indicadores ---
     
@@ -665,17 +679,11 @@ def render_chips_principais(
         except: pass
     kpi_ma = _fmt_kpi_html(vendas_mes, v_mes_ano_ant)
 
-    # 3. Mês vs Mês do Melhor Ano (Total do Mês)
-    # Lógica Ajustada: Pega o mês atual dentro do best_ano
-    val_mes_no_best_ano = 0.0
-    if best_ano:
-         mask_mba = (df["ano"] == best_ano) & (df["mes"] == mes_atual)
-         val_mes_no_best_ano = float(df.loc[mask_mba, "Valor"].sum())
-    
-    kpi_mh = _fmt_kpi_html(vendas_mes, val_mes_no_best_ano)
-    lbl_best_mes_data = f"{MESES_LABELS[mes_atual-1]}/{best_ano}" if best_ano else "N/A"
+    # 3. Mês vs Melhor Mês Histórico (O recordista daquele mês)
+    kpi_mh = _fmt_kpi_html(vendas_mes, val_best_mes_especifico)
+    lbl_best_mes_data = f"{MESES_LABELS[mes_atual-1]}/{best_mes_ano_especifico}" if best_mes_ano_especifico else "N/A"
 
-    # 4. Mês vs Mesmo Período do Melhor Ano (Parcial)
+    # 4. Mês vs Mesmo Período do Melhor Ano (Ritmo do melhor ano geral)
     v_mes_best_ano_parcial = 0.0
     if best_ano:
         try:
