@@ -65,33 +65,33 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     """Renderiza a página agregadora de Lançamentos."""
     
     # [TRAVA DE SEGURANÇA - VERSÃO CORRIGIDA]
-    try:
-        from flowdash_pages.fechamento.lock_manager import verificar_pendencia_bloqueante
+    # try:
+    #     from flowdash_pages.fechamento.lock_manager import verificar_pendencia_bloqueante
         
-        data_pendente = verificar_pendencia_bloqueante(caminho_banco)
+    #     data_pendente = verificar_pendencia_bloqueante(caminho_banco)
         
-        if data_pendente:
+    #     if data_pendente:
 
             
-            # Título grande e vermelho
-            st.error(f"🚨 CAIXA DO DIA {data_pendente} NÃO FOI FECHADO!", icon="🚫")
+    #         # Título grande e vermelho
+    #         st.error(f"🚨 CAIXA DO DIA {data_pendente} NÃO FOI FECHADO!", icon="🚫")
             
-            # Explicação clara
-            st.warning(
-                f"""
-                O sistema identificou movimentações financeiras no dia **{data_pendente}** (Vendas, Saídas ou Transferências) que ainda não foram encerradas.
+    #         # Explicação clara
+    #         st.warning(
+    #             f"""
+    #             O sistema identificou movimentações financeiras no dia **{data_pendente}** (Vendas, Saídas ou Transferências) que ainda não foram encerradas.
                 
-                ⚠️ **Ação Necessária:**
-                Por favor, acesse o menu lateral esquerdo, vá em **Fechamento** e encerre o dia pendente para liberar novos lançamentos.
-                """
-            )
+    #             ⚠️ **Ação Necessária:**
+    #             Por favor, acesse o menu lateral esquerdo, vá em **Fechamento** e encerre o dia pendente para liberar novos lançamentos.
+    #             """
+    #         )
             
-            # Bloqueia o resto da página
-            st.stop()
+    #         # Bloqueia o resto da página
+    #         st.stop()
             
-    except Exception as e:
-        # Loga o erro no terminal mas permite o sistema abrir se a trava falhar
-        print(f"Aviso: Erro ao verificar trava de segurança: {e}")
+    # except Exception as e:
+    #     # Loga o erro no terminal mas permite o sistema abrir se a trava falhar
+    #     print(f"Aviso: Erro ao verificar trava de segurança: {e}")
     
     # --- MUDANÇA: Captura msg do state e exibe Toast ---
     if "msg_ok" in st.session_state:
@@ -113,15 +113,15 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     # =================================================================
     # [NOVO] TRAVA 2: BLOQUEIA EDIÇÃO SE O DIA SELECIONADO JÁ ESTIVER FECHADO
     # =================================================================
-    from flowdash_pages.fechamento.lock_manager import verificar_se_dia_esta_fechado
+    # from flowdash_pages.fechamento.lock_manager import verificar_se_dia_esta_fechado
     
-    if verificar_se_dia_esta_fechado(caminho_banco, data_lanc):
-        st.error(f"🔒 O DIA {data_lanc} JÁ ESTÁ FECHADO!", icon="🔒")
-        st.info(
-            f"Você não pode realizar novos lançamentos ou alterações em **{data_lanc}** "
-            "porque o fechamento de caixa deste dia já foi realizado."
-        )
-        st.stop() # Bloqueia o carregamento dos formulários abaixo
+    # if verificar_se_dia_esta_fechado(caminho_banco, data_lanc):
+    #     st.error(f"🔒 O DIA {data_lanc} JÁ ESTÁ FECHADO!", icon="🔒")
+    #     st.info(
+    #         f"Você não pode realizar novos lançamentos ou alterações em **{data_lanc}** "
+    #         "porque o fechamento de caixa deste dia já foi realizado."
+    #     )
+    #     st.stop() # Bloqueia o carregamento dos formulários abaixo
     # =================================================================
 
     # Resumo agregado do dia

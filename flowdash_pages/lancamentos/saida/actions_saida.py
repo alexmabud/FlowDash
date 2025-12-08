@@ -402,6 +402,49 @@ def _obter_restante_e_status(caminho_banco: str, obrigacao_id: int) -> tuple[flo
     return restante, status
 
 
+# ---------------- Correção Saldo Inicial Automático (Rollover)
+def _garantir_saldo_inicial_automatico(caminho_banco: str, data_iso: str) -> None:
+    """
+    Verifica se existe saldo para a data. Se não, rola o saldo do dia anterior.
+    Isso evita que o primeiro lançamento do dia zere o saldo incorretamente.
+    """
+    with get_conn(caminho_banco) as conn:
+        # 1) Verifica existência
+        cur = conn.execute("SELECT 1 FROM saldos_caixas WHERE DATE(data) = DATE(?) LIMIT 1", (data_iso,))
+        if cur.fetchone():
+            return
+
+        # 2) Busca último saldo disponível
+        cur = conn.execute(
+            """
+            SELECT caixa_total, caixa2_total
+            FROM saldos_caixas
+            WHERE DATE(data) < DATE(?)
+            ORDER BY data DESC
+            LIMIT 1
+            """,
+            (data_iso,)
+        )
+        row = cur.fetchone()
+        
+        if row:
+            caixa_ini = float(row[0] or 0.0)
+            caixa2_ini = float(row[1] or 0.0)
+        else:
+            caixa_ini = 0.0
+            caixa2_ini = 0.0
+
+        # 3) Cria o registro do dia com saldo anterior (Rollover)
+        conn.execute(
+            """
+            INSERT INTO saldos_caixas (data, caixa, caixa_vendas, caixa_2, caixa2_dia, caixa_total, caixa2_total)
+            VALUES (?, ?, 0.0, ?, 0.0, ?, ?)
+            """,
+            (data_iso, caixa_ini, caixa2_ini, caixa_ini, caixa2_ini)
+        )
+        conn.commit()
+
+
 # ---------------- Dispatcher principal (mantém as mesmas regras do original)
 def registrar_saida(caminho_banco: str, data_lanc: date, usuario_nome: str, payload: dict) -> ResultadoSaida:
     """
@@ -676,6 +719,9 @@ def registrar_saida(caminho_banco: str, data_lanc: date, usuario_nome: str, payl
     sub_categoria = subcat_nome
 
     if forma_pagamento == "DINHEIRO":
+        # Garante que o dia tenha saldo inicial (rollover) ANTES de debitar
+        _garantir_saldo_inicial_automatico(caminho_banco, str(data_lanc))
+
         id_saida, id_mov = ledger.registrar_saida_dinheiro(
             data=data_str,
             valor=float(valor_saida),
