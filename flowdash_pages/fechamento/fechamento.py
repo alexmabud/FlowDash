@@ -272,22 +272,141 @@ def _calcular_saldo_projetado(conn: sqlite3.Connection, data_alvo: date) -> tupl
     return round(sys_caixa, 2), round(sys_caixa2, 2)
 
 def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, bancos_ativos: list[str]) -> dict[str, float]:
+    """
+    Calcula o saldo acumulado dos bancos considerando:
+    1. Base: Saldos/Ajustes da tabela saldos_bancos (soma de todas as linhas <= data)
+    2. Movimentações: Transferências (Entrada/Saída) em movimentacoes_bancarias
+    3. Saídas: Pagamentos onde Banco_Saida = banco
+    4. Entradas (Vendas): Lookup na tabela taxas_maquinas para rotear vendas p/ banco correto
+    """
     if not bancos_ativos:
         return {}
-
-    # Busca todos os saldos sem ignorar colunas válidas
-    df = _read_sql(conn, "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?)", (str(data_alvo),))
     
-    saldos = {}
-    for banco in bancos_ativos:
-        saldos[banco] = 0.0
-        if not df.empty and banco in df.columns:
-            try:
-                val = pd.to_numeric(df[banco], errors='coerce').fillna(0.0).sum()
-                saldos[banco] = float(val)
-            except: pass
+    data_alvo_str = str(data_alvo)
+    
+    # Inicializa dicionário com 0.0
+    saldos = {b: 0.0 for b in bancos_ativos}
+    # Mapa auxiliar para normalização (chave normalizada -> nome real)
+    bancos_map = {_norm(b): b for b in bancos_ativos}
+
+    # ================= 1. SALDOS BASE (saldos_bancos) =================
+    # Soma TODAS as linhas até a data (pois a tabela armazena deltas/ajustes)
+    try:
+        df_base = _read_sql(conn, "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?)", (data_alvo_str,))
+        if not df_base.empty:
+            for col in df_base.columns:
+                if col not in ["data", "id"]:
+                    col_norm = _norm(col)
+                    if col_norm in bancos_map:
+                        val = pd.to_numeric(df_base[col], errors='coerce').fillna(0.0).sum()
+                        saldos[bancos_map[col_norm]] += float(val)
+    except Exception as e:
+        print(f"Erro ao calcular base de saldos: {e}")
+
+    # ================= 2. MOVIMENTAÇÕES BANCÁRIAS =================
+    try:
+        df_mov = _read_sql(conn, 
+            """
+            SELECT banco, tipo, valor 
+            FROM movimentacoes_bancarias 
+            WHERE DATE(data) <= DATE(?)
+            """, 
+            (data_alvo_str,)
+        )
+        if not df_mov.empty:
+            df_mov['banco_norm'] = df_mov['banco'].apply(_norm)
+            df_mov['valor'] = pd.to_numeric(df_mov['valor'], errors='coerce').fillna(0.0)
             
-    return saldos
+            for _, row in df_mov.iterrows():
+                bn = row['banco_norm']
+                tipo = (row['tipo'] or '').lower().strip()
+                val = float(row['valor'])
+                
+                if bn in bancos_map:
+                    real_name = bancos_map[bn]
+                    if tipo == 'entrada':
+                        saldos[real_name] += val
+                    elif tipo == 'saida':
+                        saldos[real_name] -= val
+    except Exception as e:
+        print(f"Erro ao calcular movimentações: {e}")
+
+    # ================= 3. SAÍDAS (DESPESAS PAGAS PELO BANCO) =================
+    try:
+        df_saida = _read_sql(conn, 
+            """
+            SELECT Banco_Saida, Valor 
+            FROM saida 
+            WHERE DATE(data) <= DATE(?) 
+              AND Banco_Saida IS NOT NULL 
+              AND TRIM(Banco_Saida) <> ''
+            """, 
+            (data_alvo_str,)
+        )
+        if not df_saida.empty:
+            df_saida['banco_norm'] = df_saida['Banco_Saida'].apply(_norm)
+            df_saida['Valor'] = pd.to_numeric(df_saida['Valor'], errors='coerce').fillna(0.0)
+            
+            # Agrupa por banco e subtrai
+            agrupado = df_saida.groupby('banco_norm')['Valor'].sum()
+            for bn, val_total in agrupado.items():
+                if bn in bancos_map:
+                    saldos[bancos_map[bn]] -= float(val_total)
+    except Exception as e:
+        print(f"Erro ao calcular saídas bancárias: {e}")
+
+    # ================= 4. ENTRADAS (VENDAS) -> LOOKUP TAXAS =================
+    try:
+        # Carrega Vendas
+        df_vendas = _read_sql(conn, 
+            """
+            SELECT maquineta, Forma_de_Pagamento, Bandeira, Parcelas, valor_liquido 
+            FROM entrada 
+            WHERE DATE(Data) <= DATE(?)
+            """, 
+            (data_alvo_str,)
+        )
+        
+        # Carrega Regras de Roteamento (Taxas/Bancos)
+        df_taxas = _read_sql(conn, "SELECT maquineta, forma_pagamento, bandeira, parcelas, banco_destino FROM taxas_maquinas")
+        
+        if not df_vendas.empty and not df_taxas.empty:
+            # Normalização p/ Join (Vendas)
+            df_vendas['k_maq'] = df_vendas['maquineta'].astype(str).str.strip().str.upper()
+            df_vendas['k_forma'] = df_vendas['Forma_de_Pagamento'].astype(str).str.strip().str.upper()
+            df_vendas['k_band'] = df_vendas['Bandeira'].astype(str).str.strip().str.upper()
+            df_vendas['k_parc'] = pd.to_numeric(df_vendas['Parcelas'], errors='coerce').fillna(1).astype(int)
+            
+            # Normalização p/ Join (Taxas)
+            df_taxas['k_maq'] = df_taxas['maquineta'].astype(str).str.strip().str.upper()
+            df_taxas['k_forma'] = df_taxas['forma_pagamento'].astype(str).str.strip().str.upper()
+            df_taxas['k_band'] = df_taxas['bandeira'].astype(str).str.strip().str.upper()
+            df_taxas['k_parc'] = pd.to_numeric(df_taxas['parcelas'], errors='coerce').fillna(1).astype(int)
+            
+            # Left Join para descobrir o banco destino de cada venda
+            df_merged = pd.merge(
+                df_vendas, 
+                df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
+                on=['k_maq', 'k_forma', 'k_band', 'k_parc'], 
+                how='left'
+            )
+            
+            # Vendas sem match ficam com banco NaN. Vamos ignorar ou logar se necessário.
+            # Normaliza o banco de destino encontrado
+            df_merged['banco_dest_norm'] = df_merged['banco_destino'].apply(lambda x: _norm(x) if pd.notnull(x) else None)
+            
+            # Soma valor líquido por banco
+            vendas_por_banco = df_merged.groupby('banco_dest_norm')['valor_liquido'].sum()
+            
+            for bn, val_total in vendas_por_banco.items():
+                if bn in bancos_map:
+                    saldos[bancos_map[bn]] += float(val_total)
+                    
+    except Exception as e:
+        print(f"Erro ao calcular entradas (vendas reconciliadas): {e}")
+
+    # Arredonda tudo para 2 casas
+    return {k: round(v, 2) for k, v in saldos.items()}
 
 def _carregar_fechamento_existente(conn: sqlite3.Connection, data_alvo: date) -> dict | None:
     try:
