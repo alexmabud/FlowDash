@@ -574,7 +574,7 @@ def render_chips_principais(
 ) -> None:
     """
     Bloco de KPIs principais do dashboard.
-    Lógica Ajustada: 'Melhor Mês Histórico' busca o recorde daquele mês específico (ex: Melhor Dezembro da história).
+    Total de 10 Indicadores em 'Crescimento & Comparações'.
     """
     hoje = hoje_br()
     ano_atual = hoje.year
@@ -621,7 +621,7 @@ def render_chips_principais(
 
         return f"<span style='color:{color};font-size:18px;font-weight:600;'>{txt_display}</span>"
 
-    # --- Cálculos Principais ---
+    # --- Cálculos Principais (Vendas Atuais) ---
     mask_dia = df["Data_date"] == hoje
     vendas_dia = float(df.loc[mask_dia, "Valor"].sum())
     mask_mes = (df["ano"] == ano_atual) & (df["mes"] == mes_atual)
@@ -636,40 +636,83 @@ def render_chips_principais(
     # --- Identificação de Referências Históricas ---
     ano_prev = ano_atual - 1
     
-    # 1. Melhor Ano Geral (Para comparações anuais e de ritmo anual)
-    vendas_por_ano = df.groupby("ano")["Valor"].sum()
-    hist_anos = vendas_por_ano[vendas_por_ano.index < ano_atual]
-    
-    if not hist_anos.empty:
-        best_ano = int(hist_anos.idxmax())
-        val_best_ano_total = float(hist_anos.max())
+    # Base histórica (excluindo ano atual para buscar recordes fechados)
+    df_hist = df[df["ano"] < ano_atual].copy()
+
+    # 1. MELHOR ANO GERAL
+    vendas_por_ano = df_hist.groupby("ano")["Valor"].sum()
+    if not vendas_por_ano.empty:
+        best_ano = int(vendas_por_ano.idxmax())
+        val_best_ano_total = float(vendas_por_ano.max())
     else:
         best_ano = None
         val_best_ano_total = 0.0
 
-    # 2. Melhor Mês Específico (Para comparação "Melhor Outubro", "Melhor Dezembro", etc)
-    df_mes_hist = df[df["mes"] == mes_atual].groupby("ano")["Valor"].sum()
-    # Filtra para não pegar o ano atual como referência histórica
-    hist_mes_especifico = df_mes_hist[df_mes_hist.index < ano_atual]
-    
-    if not hist_mes_especifico.empty:
-        best_mes_ano_especifico = int(hist_mes_especifico.idxmax())
-        val_best_mes_especifico = float(hist_mes_especifico.max())
+    # 2. MELHOR MÊS SAZONAL (O melhor "Dezembro" da história)
+    # Filtra apenas o mês atual (ex: Dezembro) de todos os anos históricos
+    df_mes_hist_full = df_hist[df_hist["mes"] == mes_atual].copy()
+    vendas_por_ano_mes_especifico = df_mes_hist_full.groupby("ano")["Valor"].sum()
+
+    if not vendas_por_ano_mes_especifico.empty:
+        best_mes_ano_especifico = int(vendas_por_ano_mes_especifico.idxmax())
+        val_best_mes_especifico = float(vendas_por_ano_mes_especifico.max())
     else:
         best_mes_ano_especifico = None
         val_best_mes_especifico = 0.0
 
-    # --- 8 Indicadores ---
+    # Cálculo do Período Equivalente para o Melhor Mês Sazonal
+    v_mes_best_ano_parcial = 0.0
+    if best_mes_ano_especifico:
+        try:
+            ultimo_dia_mes_recorde = monthrange(best_mes_ano_especifico, mes_atual)[1]
+            dia_limite = min(dia_atual, ultimo_dia_mes_recorde)
+            mask_periodo_recorde = (
+                (df["ano"] == best_mes_ano_especifico) & 
+                (df["mes"] == mes_atual) & 
+                (df["Data"].dt.day <= dia_limite)
+            )
+            v_mes_best_ano_parcial = float(df.loc[mask_periodo_recorde, "Valor"].sum())
+        except Exception:
+            v_mes_best_ano_parcial = 0.0
+
+    # 3. MELHOR MÊS ABSOLUTO (Independente do nome - Ex: Maior faturamento da história da loja)
+    # Agrupa por Ano e Mês para achar o maior valor individual
+    vendas_por_mes_absoluto = df_hist.groupby(["ano", "mes"])["Valor"].sum()
     
-    # 1. Mês vs Mês Anterior
-    fat_meses = df[df["ano"] == ano_atual].groupby("mes")["Valor"].sum()
-    v_ant_mes = float(fat_meses.get(mes_atual - 1, 0.0)) if mes_atual > 1 else 0.0
+    if not vendas_por_mes_absoluto.empty:
+        best_ever_val = float(vendas_por_mes_absoluto.max())
+        best_ever_idx = vendas_por_mes_absoluto.idxmax() # Retorna Tupla (ano, mes)
+        best_ever_ano, best_ever_mes_num = best_ever_idx
+    else:
+        best_ever_val = 0.0
+        best_ever_ano, best_ever_mes_num = (None, None)
+
+    # Cálculo do Período Equivalente para o Melhor Mês Absoluto
+    val_best_ever_periodo = 0.0
+    if best_ever_ano:
+        try:
+            ultimo_dia_mes_ever = monthrange(best_ever_ano, best_ever_mes_num)[1]
+            dia_limite_ever = min(dia_atual, ultimo_dia_mes_ever)
+            mask_ever_period = (
+                (df["ano"] == best_ever_ano) & 
+                (df["mes"] == best_ever_mes_num) & 
+                (df["Data"].dt.day <= dia_limite_ever)
+            )
+            val_best_ever_periodo = float(df.loc[mask_ever_period, "Valor"].sum())
+        except:
+            val_best_ever_periodo = 0.0
+
+    # --- GERAÇÃO DOS 10 INDICADORES ---
+    nome_mes_atual = MESES_LABELS[mes_atual - 1]
+    
+    # [1] Mês vs Mês Anterior
+    fat_meses_atual = df[df["ano"] == ano_atual].groupby("mes")["Valor"].sum()
+    v_ant_mes = float(fat_meses_atual.get(mes_atual - 1, 0.0)) if mes_atual > 1 else 0.0
     kpi_mm = _fmt_kpi_html(vendas_mes, v_ant_mes)
-    
     idx_mes_ant = (mes_atual - 2) % 12
     lbl_mes_ant = MESES_LABELS[idx_mes_ant] if mes_atual > 1 else "Dez"
 
-    # 2. Mês vs Ano Anterior (Mesmo Período)
+    # [2] Mês vs Ano Anterior (Mesmo Período)
     v_mes_ano_ant = 0.0
     if ano_prev in df["ano"].unique():
         try:
@@ -679,34 +722,35 @@ def render_chips_principais(
         except: pass
     kpi_ma = _fmt_kpi_html(vendas_mes, v_mes_ano_ant)
 
-    # 3. Mês vs Melhor Mês Histórico (O recordista daquele mês)
-    kpi_mh = _fmt_kpi_html(vendas_mes, val_best_mes_especifico)
-    lbl_best_mes_data = f"{MESES_LABELS[mes_atual-1]}/{best_mes_ano_especifico}" if best_mes_ano_especifico else "N/A"
+    # [3] Mês vs Melhor Mês Sazonal (ESPECÍFICO) - Total
+    # Ex: Dezembro/2025 vs Melhor Dezembro
+    kpi_recorde_total = _fmt_kpi_html(vendas_mes, val_best_mes_especifico)
+    lbl_best_mes_data = f"{nome_mes_atual}/{best_mes_ano_especifico}" if best_mes_ano_especifico else "N/A"
 
-    # 4. Mês vs Mesmo Período do Melhor Mês (Ritmo do melhor mês histórico)
-    v_mes_best_ano_parcial = 0.0
-    if best_mes_ano_especifico:
-        try:
-            lim = min(dia_atual, monthrange(best_mes_ano_especifico, mes_atual)[1])
-            msk = (df["ano"] == best_mes_ano_especifico) & (df["mes"] == mes_atual) & (df["Data"].dt.day <= lim)
-            v_mes_best_ano_parcial = float(df.loc[msk, "Valor"].sum())
-        except: pass
-    kpi_mma = _fmt_kpi_html(vendas_mes, v_mes_best_ano_parcial)
-    # lbl_best_ano não é mais usado aqui para o título, vamos usar lbl_best_mes_data no render
-    lbl_best_ano = str(best_ano) if best_ano else "N/A"
+    # [4] Mês vs Melhor Mês Sazonal (ESPECÍFICO) - Período
+    kpi_recorde_periodo = _fmt_kpi_html(vendas_mes, v_mes_best_ano_parcial)
 
-    # 5. Ano vs Ano Ant (Total)
+    # [5] Mês vs Melhor Mês da História (ABSOLUTO) - Total
+    # Ex: Dezembro/2025 vs O Melhor Mês que já existiu (seja ele Nov/2023, Dez/2022...)
+    kpi_ever_total = _fmt_kpi_html(vendas_mes, best_ever_val)
+    lbl_best_ever = f"{MESES_LABELS[best_ever_mes_num-1]}/{best_ever_ano}" if best_ever_ano else "N/A"
+
+    # [6] Mês vs Melhor Mês da História (ABSOLUTO) - Período
+    kpi_ever_periodo = _fmt_kpi_html(vendas_mes, val_best_ever_periodo)
+
+    # [7] Ano vs Ano Ant (Total)
     v_ano_ant_tot = float(df.loc[df["ano"] == ano_prev, "Valor"].sum()) if ano_prev in df["ano"].unique() else 0.0
     kpi_at = _fmt_kpi_html(vendas_ano, v_ano_ant_tot)
 
-    # 6. Ano vs Ano Ant (YTD)
+    # [8] Ano vs Ano Ant (YTD)
     v_ano_ant_ytd = _sum_ytd(df, ano_prev, mes_atual, dia_atual)
     kpi_ay = _fmt_kpi_html(vendas_ano, v_ano_ant_ytd)
 
-    # 7. Ano vs Melhor Ano (Total)
+    # [9] Ano vs Melhor Ano (Total)
     kpi_amt = _fmt_kpi_html(vendas_ano, val_best_ano_total)
+    lbl_best_ano = str(best_ano) if best_ano else "N/A"
 
-    # 8. Ano vs Melhor Ano (YTD)
+    # [10] Ano vs Melhor Ano (YTD)
     v_best_ano_ytd = _sum_ytd(df, best_ano, mes_atual, dia_atual) if best_ano else 0.0
     kpi_amy = _fmt_kpi_html(vendas_ano, v_best_ano_ytd)
 
@@ -724,21 +768,30 @@ def render_chips_principais(
     render_card_rows(
         "📈 Crescimento & Comparações",
         [
+            # Linha 1: Comparativos Básicos
             [
-                (f"Mês vs Mês Anterior ({lbl_mes_ant})", [kpi_mm], False),
-                (f"Mês vs Mesmo Período do Ano Anterior ({ano_prev})", [kpi_ma], False),
+                (f"Mês vs Mês Anterior ({lbl_mes_ant}) - Total", [kpi_mm], False),
+                (f"Mês vs Ano Anterior ({ano_prev}) - Período", [kpi_ma], False),
             ],
+            # Linha 2: Comparativo com Recorde Sazonal (Dez vs Melhor Dez)
             [
-                (f"Mês vs Melhor Mês Histórico ({lbl_best_mes_data})", [kpi_mh], False),
-                (f"Mês vs Mesmo Período do Melhor Mês ({lbl_best_mes_data})", [kpi_mma], False),
+                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Total", [kpi_recorde_total], False),
+                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Período", [kpi_recorde_periodo], False),
             ],
+             # Linha 3: Comparativo com Recorde Absoluto (Dez vs O Melhor Mês que já existiu)
+            [
+                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Total", [kpi_ever_total], False),
+                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Período", [kpi_ever_periodo], False),
+            ],
+            # Linha 4: Comparativo Anual
             [
                 (f"Ano vs Ano Anterior ({ano_prev}) - Total", [kpi_at], False),
-                (f"Ano vs Mesmo Período do Ano Anterior ({ano_prev})", [kpi_ay], False),
+                (f"Ano vs Ano Anterior ({ano_prev}) - Período", [kpi_ay], False),
             ],
+            # Linha 5: Comparativo Melhor Ano
             [
                 (f"Ano vs Melhor Ano ({lbl_best_ano}) - Total", [kpi_amt], False),
-                (f"Ano vs Mesmo Período do Melhor Ano ({lbl_best_ano})", [kpi_amy], False),
+                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Período", [kpi_amy], False),
             ],
         ]
     )
