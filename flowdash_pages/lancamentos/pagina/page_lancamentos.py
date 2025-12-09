@@ -238,13 +238,16 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     with a2:
         _safe_call("flowdash_pages.lancamentos.saida.page_saida", "render_saida", state)
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        _safe_call("flowdash_pages.lancamentos.caixa2.page_caixa2", "render_caixa2", state)
-    with c2:
-        _safe_call("flowdash_pages.lancamentos.deposito.page_deposito", "render_deposito", state)
-    with c3:
-        _safe_call("flowdash_pages.lancamentos.transferencia.page_transferencia", "render_transferencia", state)
+    
+    # Ocultar botões extras para vendedor
+    if not is_vendedor:
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            _safe_call("flowdash_pages.lancamentos.caixa2.page_caixa2", "render_caixa2", state)
+        with c2:
+            _safe_call("flowdash_pages.lancamentos.deposito.page_deposito", "render_deposito", state)
+        with c3:
+            _safe_call("flowdash_pages.lancamentos.transferencia.page_transferencia", "render_transferencia", state)
 
     st.markdown("---")
     st.markdown("### 📦 Mercadorias — Lançamentos")
