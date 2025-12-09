@@ -16,7 +16,9 @@ import streamlit as st
 
 from .actions_pagina import carregar_resumo_dia
 from .ui_cards_pagina import render_card_row, render_card_rows, render_card_mercadorias
+from .ui_cards_pagina import render_card_row, render_card_rows, render_card_mercadorias
 from flowdash_pages.utils_timezone import hoje_br
+from shared.safe_session import get as _ss_get
 
 
 # ===================== Helpers =====================
@@ -103,6 +105,12 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
         st.toast(msg, icon=icon)
     # ---------------------------------------------------
 
+    # --- PERFIL DO USUÁRIO ---
+    usuario = _ss_get("usuario_logado")
+    perfil = (usuario or {}).get("perfil", "").lower() if usuario else ""
+    is_vendedor = (perfil == "vendedor")
+    # -------------------------
+
     # Data de referência do lançamento
     data_lanc = st.date_input(
         "🗓️ Data do Lançamento",
@@ -131,80 +139,92 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     # ----- Resumo do Dia -----
     total_vendas = float(resumo.get("total_vendas", 0.0))
     total_saidas = float(resumo.get("total_saidas", 0.0))
-    render_card_row(
-        "📊 Resumo do Dia",
-        [("Vendas", total_vendas, True), ("Saídas", total_saidas, True)],
-    )
+    
+    # Se for vendedor, esconde a informação de saídas no Resumo
+    if is_vendedor:
+        render_card_row(
+            "📊 Resumo do Dia",
+            [("Vendas", total_vendas, True)],
+        )
+    else:
+        render_card_row(
+            "📊 Resumo do Dia",
+            [("Vendas", total_vendas, True), ("Saídas", total_saidas, True)],
+        )
 
     # ----- Saldos (2 linhas no mesmo card) -----
-    # 1) Caixa e Caixa 2 — EXIBIÇÃO com "saldo projetado" (acumulado real)
-    from flowdash_pages.fechamento.fechamento import _ultimo_caixas_ate
-    disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
+    # Ocultar para perfil vendedor
+    if not is_vendedor:
+        # 1) Caixa e Caixa 2 — EXIBIÇÃO com "saldo projetado" (acumulado real)
+        from flowdash_pages.fechamento.fechamento import _ultimo_caixas_ate
+        disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
 
-    # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
-    saldos_bancos = resumo.get("saldos_bancos") or {}
-    nb = {(str(k) or "").strip().lower(): float(v or 0.0) for k, v in saldos_bancos.items()}
-    inter = nb.get("inter", 0.0)
-    infinite = nb.get(
-        "infinitepay",
-        nb.get("infinite pay", nb.get("infinite_pay", nb.get("infinitiepay", 0.0))),
-    )
-    bradesco = nb.get("bradesco", 0.0)
+        # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
+        saldos_bancos = resumo.get("saldos_bancos") or {}
+        nb = {(str(k) or "").strip().lower(): float(v or 0.0) for k, v in saldos_bancos.items()}
+        inter = nb.get("inter", 0.0)
+        infinite = nb.get(
+            "infinitepay",
+            nb.get("infinite pay", nb.get("infinite_pay", nb.get("infinitiepay", 0.0))),
+        )
+        bradesco = nb.get("bradesco", 0.0)
 
-    render_card_rows(
-        "💵 Saldos",
-        [
-            [("Caixa", disp_caixa, True), ("Caixa 2", disp_caixa2, True)],  # linha 1 (2 colunas)
-            [("Inter", inter, True), ("InfinitePay", infinite, True), ("Bradesco", bradesco, True)],  # linha 2 (3 colunas)
-        ],
-    )
-    if disp_ref and disp_ref != data_lanc:
-        st.caption(f"Mostrando último saldo salvo em **{disp_ref}** (sem movimento em {data_lanc}).")
+        render_card_rows(
+            "💵 Saldos",
+            [
+                [("Caixa", disp_caixa, True), ("Caixa 2", disp_caixa2, True)],  # linha 1 (2 colunas)
+                [("Inter", inter, True), ("InfinitePay", infinite, True), ("Bradesco", bradesco, True)],  # linha 2 (3 colunas)
+            ],
+        )
+        if disp_ref and disp_ref != data_lanc:
+            st.caption(f"Mostrando último saldo salvo em **{disp_ref}** (sem movimento em {data_lanc}).")
 
     # ----- Transferências (card com 3 colunas) -----
-    # 1) P/ Caixa 2 (número)
-    transf_caixa2_total = float(resumo.get("transf_caixa2_total", 0.0))
+    # Ocultar para perfil vendedor
+    if not is_vendedor:
+        # 1) P/ Caixa 2 (número)
+        transf_caixa2_total = float(resumo.get("transf_caixa2_total", 0.0))
 
-    # 2) Depósitos (lista)
-    dep_lin: list[str] = []
-    for b, v in (resumo.get("depositos_list") or []):
-        dep_lin.append(f"{_brl(v)} → {b or '—'}")
+        # 2) Depósitos (lista)
+        dep_lin: list[str] = []
+        for b, v in (resumo.get("depositos_list") or []):
+            dep_lin.append(f"{_brl(v)} → {b or '—'}")
 
-    # 3) Transferência entre bancos — TABELA real (Valor | Saída | Entrada)
-    trf_raw = resumo.get("transf_bancos_list") or []  # List[Tuple[origem, destino, valor]]
-    if trf_raw:
-        try:
-            trf_df = pd.DataFrame(trf_raw, columns=["Saída", "Entrada", "Valor"])
-        except Exception:
-            # fallback robusto se a estrutura vier diferente
-            trf_df = pd.DataFrame(trf_raw)
-            # tenta renomear se possível
-            cols = {c.lower(): c for c in trf_df.columns}
-            if "origem" in cols:
-                trf_df.rename(columns={cols["origem"]: "Saída"}, inplace=True)
-            if "destino" in cols:
-                trf_df.rename(columns={cols["destino"]: "Entrada"}, inplace=True)
-            if "valor" in cols:
-                trf_df.rename(columns={cols["valor"]: "Valor"}, inplace=True)
-            # garante colunas finais
-            for c in ["Saída", "Entrada", "Valor"]:
-                if c not in trf_df.columns:
-                    trf_df[c] = ""
-        trf_df["Saída"] = trf_df["Saída"].fillna("").astype(str).str.strip().replace("", "—")
-        trf_df["Entrada"] = trf_df["Entrada"].fillna("").astype(str).str.strip().replace("", "—")
-        trf_df["Valor"] = pd.to_numeric(trf_df["Valor"], errors="coerce").fillna(0.0)
-        trf_df = trf_df[["Valor", "Saída", "Entrada"]]  # ordem exata solicitada
-    else:
-        trf_df = pd.DataFrame(columns=["Valor", "Saída", "Entrada"])
+        # 3) Transferência entre bancos — TABELA real (Valor | Saída | Entrada)
+        trf_raw = resumo.get("transf_bancos_list") or []  # List[Tuple[origem, destino, valor]]
+        if trf_raw:
+            try:
+                trf_df = pd.DataFrame(trf_raw, columns=["Saída", "Entrada", "Valor"])
+            except Exception:
+                # fallback robusto se a estrutura vier diferente
+                trf_df = pd.DataFrame(trf_raw)
+                # tenta renomear se possível
+                cols = {c.lower(): c for c in trf_df.columns}
+                if "origem" in cols:
+                    trf_df.rename(columns={cols["origem"]: "Saída"}, inplace=True)
+                if "destino" in cols:
+                    trf_df.rename(columns={cols["destino"]: "Entrada"}, inplace=True)
+                if "valor" in cols:
+                    trf_df.rename(columns={cols["valor"]: "Valor"}, inplace=True)
+                # garante colunas finais
+                for c in ["Saída", "Entrada", "Valor"]:
+                    if c not in trf_df.columns:
+                        trf_df[c] = ""
+            trf_df["Saída"] = trf_df["Saída"].fillna("").astype(str).str.strip().replace("", "—")
+            trf_df["Entrada"] = trf_df["Entrada"].fillna("").astype(str).str.strip().replace("", "—")
+            trf_df["Valor"] = pd.to_numeric(trf_df["Valor"], errors="coerce").fillna(0.0)
+            trf_df = trf_df[["Valor", "Saída", "Entrada"]]  # ordem exata solicitada
+        else:
+            trf_df = pd.DataFrame(columns=["Valor", "Saída", "Entrada"])
 
-    render_card_row(
-        "🔁 Transferências",
-        [
-            ("P/ Caixa 2", transf_caixa2_total, False),
-            ("Depósito Bancário", dep_lin, False),
-            ("Transferência entre bancos", trf_df, False),
-        ],
-    )
+        render_card_row(
+            "🔁 Transferências",
+            [
+                ("P/ Caixa 2", transf_caixa2_total, False),
+                ("Depósito Bancário", dep_lin, False),
+                ("Transferência entre bancos", trf_df, False),
+            ],
+        )
 
     # ----- Mercadorias -----
     render_card_mercadorias(resumo.get("compras_list") or [], resumo.get("receb_list") or [])
