@@ -154,6 +154,8 @@ def pagina_fechamento_caixa(caminho_banco: str):
     
     if sys_bancos:
         render_card_row("🏦 Saldos em Bancos (Sistema)", [(k, v, True) for k, v in sys_bancos.items()])
+
+
         
     render_card_row("💰 Saldo Total (Sistema)", [("Total consolidado", saldo_total_consolidado, True)])
     

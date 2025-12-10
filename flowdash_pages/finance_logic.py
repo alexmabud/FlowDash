@@ -92,7 +92,7 @@ def _sincronizar_colunas_saldos_bancos(conn: sqlite3.Connection, bancos_ativos: 
         print(f"Erro ao sincronizar colunas de bancos: {e}")
 
 def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, bancos_ativos: list[str]) -> dict[str, float]:
-    print(f"--- DEBUG CALCULO BANCOS {data_alvo} ---")
+
 
     """
     Novo Cálculo Baseado em Checkpoint (Fechamento)
@@ -168,8 +168,6 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
         data_base_checkpoint = r_date_obj
         for b in bancos_ativos:
             saldo_inicial[b] = float(saldos_salvos.get(b, 0.0))
-        
-        print(f"CHECKPOINT FOUND: {data_base_checkpoint} | SALDO INICIAL INTER: {saldo_inicial.get('Inter', 0)}")
 
 
     # ================= CALCULAR MOVIMENTOS [> data_base_checkpoint ... <= data_alvo] =================
@@ -186,7 +184,10 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             SELECT banco, tipo, valor 
             FROM movimentacoes_bancarias 
             WHERE DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+            AND (observacao IS NULL OR NOT observacao LIKE 'Lançamento VENDA%')
+            AND (observacao IS NULL OR NOT observacao LIKE 'Venda%')
         """, (dt_base_str, data_alvo_str))
+
         
         if not df_mov.empty:
             df_mov['banco_norm'] = df_mov['banco'].apply(_norm)
@@ -199,6 +200,7 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
                     real = bancos_map[bn]
                     if tipo == 'entrada': saldos[real] += val
                     elif tipo == 'saida': saldos[real] -= val
+
     except Exception as e:
         print(f"Erro movs: {e}")
 
@@ -217,6 +219,8 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             for bn, val in df_saida.groupby('banco_norm')['Valor'].sum().items():
                 if bn in bancos_map:
                     saldos[bancos_map[bn]] -= float(val)
+
+
     except Exception as e:
         print(f"Erro saidas: {e}")
 
@@ -259,6 +263,8 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
     return {k: round(v, 2) for k, v in saldos.items()}
 
 def _calcular_saldo_projetado(conn: sqlite3.Connection, data_alvo: date) -> tuple[float, float]:
+
+
     data_alvo_str = str(data_alvo)
     
     row = conn.execute("""
