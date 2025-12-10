@@ -56,6 +56,23 @@ def validar_login(email: str, senha: str, caminho_banco: str) -> Dict[str, Any] 
     return None
 
 
+def obter_usuario(email: str, caminho_banco: str) -> Dict[str, Any] | None:
+    """
+    Recupera os dados do usuário pelo e-mail (usado para login via cookie).
+    """
+    if not email or not caminho_banco:
+        return None
+
+    query = "SELECT nome, email, perfil FROM usuarios WHERE email = ? AND ativo = 1"
+    with sqlite3.connect(caminho_banco) as conn:
+        cur = conn.execute(query, (email,))
+        row = cur.fetchone()
+
+    if row:
+        return {"nome": row[0], "email": row[1], "perfil": row[2]}
+    return None
+
+
 # -----------------------------------------------------------------------------
 # Controle de acesso (seguro ao runtime)
 # -----------------------------------------------------------------------------
@@ -119,6 +136,7 @@ def limpar_todas_as_paginas() -> None:
 
 __all__ = [
     "validar_login",
+    "obter_usuario",
     "verificar_acesso",
     "exibir_usuario_logado",
     "limpar_todas_as_paginas",

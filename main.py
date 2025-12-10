@@ -42,13 +42,16 @@ import os
 import pathlib
 import sqlite3
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
 import streamlit as st
+import extra_streamlit_components as stx
+from streamlit_autorefresh import st_autorefresh
 
 from auth.auth import (
     validar_login,
+    obter_usuario,
     verificar_acesso,
     exibir_usuario_logado,
     limpar_todas_as_paginas,
@@ -82,6 +85,15 @@ st.set_page_config(page_title="FlowDash", layout="wide", initial_sidebar_state=i
 # === Logos ===
 _LOGO_LOGIN_SIDEBAR_PATH = "assets/flowdash1.png"
 _LOGO_HEADER_PATH        = "assets/flowdash2.PNG"
+
+# ==============================================================================
+# COOKIE MANAGER (Persistência)
+# ==============================================================================
+# ==============================================================================
+# COOKIE MANAGER (Persistência)
+# ==============================================================================
+# Instancia diretamente (não usar @st.cache_resource em widgets)
+cookie_manager = stx.CookieManager(key="flowdash_main_cookies")
 
 def aplicar_branding(is_login: bool = False) -> None:
     """
@@ -562,6 +574,26 @@ def _call_page(module_path: str) -> None:
 # Login (visual igual ao PDV: título centralizado + formulário estreito)
 # -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
+    # Tenta recuperar sessão via Cookie
+    try:
+        if st.session_state.get("logout_clicked"):
+            st.session_state["logout_clicked"] = False
+        else:
+            cookies = cookie_manager.get_all()
+            token_email = cookies.get("auth_email")
+            if token_email:
+                usr_cookie = obter_usuario(token_email, _caminho_banco)
+                if usr_cookie:
+                    st.session_state.usuario_logado = usr_cookie
+                    st.session_state.pagina_atual = (
+                        "📊 Dashboard" if usr_cookie["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
+                    )
+                    limpar_todas_as_paginas()
+                    st.rerun()
+    except Exception:
+        pass
+
+if not st.session_state.usuario_logado:
     aplicar_branding(is_login=True)
 
     # Coluna central para título + formulário
@@ -599,6 +631,8 @@ if not st.session_state.usuario_logado:
         if entrar:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
+                # Salva cookie (7 dias)
+                cookie_manager.set("auth_email", usuario["email"], expires_at=datetime.now() + timedelta(days=7), key="set_auth_main")
                 st.session_state.usuario_logado = usuario
                 st.session_state.pagina_atual = (
                     "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
@@ -624,12 +658,19 @@ if usuario is None:
     st.warning("Faça login para continuar.")
     st.stop()
 
+# ATUALIZAÇÃO AUTOMÁTICA DE DADOS (30s)
+# Isso garantirá que o _auto_pull rode periodicamente para buscar novidades
+st_autorefresh(interval=30000, limit=None, key="main_autorefresh")
+
 perfil = usuario["perfil"]
 st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
+    cookie_manager.delete("auth_email", key="del_auth_main")
     limpar_todas_as_paginas()
     st.session_state.usuario_logado = None
+    st.session_state["logout_clicked"] = True
+    time.sleep(0.5)
     st.rerun()
 
 st.sidebar.markdown("---")
