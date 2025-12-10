@@ -48,7 +48,7 @@ from typing import Callable, Optional
 import streamlit as st
 import streamlit as st
 # CookieManager removido em favor de Query Params (mais robusto no Cloud)
-from streamlit_autorefresh import st_autorefresh
+# from streamlit_autorefresh import st_autorefresh
 
 from auth.auth import (
     validar_login,
@@ -667,7 +667,7 @@ if usuario is None:
 
 # ATUALIZAÇÃO AUTOMÁTICA DE DADOS (30s)
 # Isso garantirá que o _auto_pull rode periodicamente para buscar novidades
-st_autorefresh(interval=30000, limit=None, key="main_autorefresh")
+# st_autorefresh(interval=30000, limit=None, key="main_autorefresh")
 
 perfil = usuario["perfil"]
 st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
