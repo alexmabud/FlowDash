@@ -579,17 +579,25 @@ if not st.session_state.usuario_logado:
         if st.session_state.get("logout_clicked"):
             st.session_state["logout_clicked"] = False
         else:
-            # Tentativa 1
+            # Lógica de Retry Robusta para Streamlit Cloud
+            # O componente pode demorar para sincronizar os cookies do browser para o Python
             cookies = cookie_manager.get_all()
             
-            # Tentativa 2 (Retry para Cloud Latency): 
-            # Se vier vazio, espera um pouco e tenta de novo. 
-            # O componente pode demorar a montar no Streamlit Cloud.
+            # Se não achou de primeira, tenta mais algumas vezes com pequenos delays
             if not cookies:
-                time.sleep(0.5)
-                cookies = cookie_manager.get_all()
-
+                for _ in range(3): # Tenta 3 vezes (0.5s, 0.5s, 0.5s = 1.5s total)
+                    time.sleep(0.5)
+                    cookies = cookie_manager.get_all()
+                    if cookies:
+                        break
+            
             token_email = cookies.get("auth_email")
+            
+            # Fallback: Tenta pegar individualmente se get_all falhar (bug conhecido em algumas vers)
+            if not token_email:
+                time.sleep(0.2)
+                token_email = cookie_manager.get("auth_email")
+
             if token_email:
                 usr_cookie = obter_usuario(token_email, _caminho_banco)
                 if usr_cookie:
