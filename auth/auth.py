@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, Any, Optional, List
 import sqlite3
+import secrets
+import string
 
 import streamlit as st  # import permitido; evitamos apenas acessar session_state cedo
 from shared.safe_session import (
@@ -71,6 +73,54 @@ def obter_usuario(email: str, caminho_banco: str) -> Dict[str, Any] | None:
     if row:
         return {"nome": row[0], "email": row[1], "perfil": row[2]}
     return None
+
+
+def criar_sessao(email: str, caminho_banco: str) -> str | None:
+    """Gera um token de sessão, salva no banco e retorna o token."""
+    if not email or not caminho_banco:
+        return None
+    
+    # Gera token seguro de 32 chars
+    alphabet = string.ascii_letters + string.digits
+    token = ''.join(secrets.choice(alphabet) for i in range(32))
+    
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            conn.execute("UPDATE usuarios SET token_sessao = ? WHERE email = ?", (token, email))
+            conn.commit()
+        return token
+    except Exception:
+        return None
+
+
+def validar_sessao(token: str, caminho_banco: str) -> Dict[str, Any] | None:
+    """Valida se o token existe no banco e retorna o usuário."""
+    if not token or not caminho_banco:
+        return None
+        
+    query = "SELECT nome, email, perfil FROM usuarios WHERE token_sessao = ? AND ativo = 1"
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            cur = conn.execute(query, (token,))
+            row = cur.fetchone()
+            
+        if row:
+            return {"nome": row[0], "email": row[1], "perfil": row[2]}
+    except Exception:
+        pass
+    return None
+
+
+def encerrar_sessao(email: str, caminho_banco: str) -> None:
+    """Remove o token de sessão do usuário."""
+    if not email or not caminho_banco:
+        return
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            conn.execute("UPDATE usuarios SET token_sessao = NULL WHERE email = ?", (email,))
+            conn.commit()
+    except Exception:
+        pass
 
 
 # -----------------------------------------------------------------------------
@@ -140,4 +190,7 @@ __all__ = [
     "verificar_acesso",
     "exibir_usuario_logado",
     "limpar_todas_as_paginas",
+    "criar_sessao",
+    "validar_sessao",
+    "encerrar_sessao",
 ]

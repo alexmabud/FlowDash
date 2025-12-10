@@ -46,7 +46,8 @@ from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
 import streamlit as st
-import extra_streamlit_components as stx
+import streamlit as st
+# CookieManager removido em favor de Query Params (mais robusto no Cloud)
 from streamlit_autorefresh import st_autorefresh
 
 from auth.auth import (
@@ -55,6 +56,9 @@ from auth.auth import (
     verificar_acesso,
     exibir_usuario_logado,
     limpar_todas_as_paginas,
+    criar_sessao,
+    validar_sessao,
+    encerrar_sessao,
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas, fechar_sidebar_automaticamente
 
@@ -90,10 +94,9 @@ _LOGO_HEADER_PATH        = "assets/flowdash2.PNG"
 # COOKIE MANAGER (Persistência)
 # ==============================================================================
 # ==============================================================================
-# COOKIE MANAGER (Persistência)
+# COOKIE MANAGER (Removido: Usando st.query_params)
 # ==============================================================================
-# Instancia diretamente (não usar @st.cache_resource em widgets)
-cookie_manager = stx.CookieManager(key="flowdash_main_cookies")
+# cookie_manager = stx.CookieManager(key="flowdash_main_cookies")
 
 def aplicar_branding(is_login: bool = False) -> None:
     """
@@ -574,39 +577,23 @@ def _call_page(module_path: str) -> None:
 # Login (visual igual ao PDV: título centralizado + formulário estreito)
 # -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
-    # Tenta recuperar sessão via Cookie
+    # 1. TENTA RECUPERAR SESSÃO VIA URL (Query Param)
+    # Isso funciona 100% no Streamlit Online
     try:
-        if st.session_state.get("logout_clicked"):
-            st.session_state["logout_clicked"] = False
-        else:
-            # Lógica de Retry Robusta para Streamlit Cloud
-            # O componente pode demorar para sincronizar os cookies do browser para o Python
-            cookies = cookie_manager.get_all()
-            
-            # Se não achou de primeira, tenta mais algumas vezes com pequenos delays
-            if not cookies:
-                for _ in range(3): # Tenta 3 vezes (0.5s, 0.5s, 0.5s = 1.5s total)
-                    time.sleep(0.5)
-                    cookies = cookie_manager.get_all()
-                    if cookies:
-                        break
-            
-            token_email = cookies.get("auth_email")
-            
-            # Fallback: Tenta pegar individualmente se get_all falhar (bug conhecido em algumas vers)
-            if not token_email:
-                time.sleep(0.2)
-                token_email = cookie_manager.get("auth_email")
-
-            if token_email:
-                usr_cookie = obter_usuario(token_email, _caminho_banco)
-                if usr_cookie:
-                    st.session_state.usuario_logado = usr_cookie
-                    st.session_state.pagina_atual = (
-                        "📊 Dashboard" if usr_cookie["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
-                    )
-                    limpar_todas_as_paginas()
-                    st.rerun()
+        params = st.query_params
+        token = params.get("session")
+        if token:
+            usr_sessao = validar_sessao(token, _caminho_banco)
+            if usr_sessao:
+                st.session_state.usuario_logado = usr_sessao
+                st.session_state.pagina_atual = (
+                    "📊 Dashboard" if usr_sessao["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
+                )
+                limpar_todas_as_paginas()
+                st.rerun()
+            else:
+                # Token inválido ou expirado: limpa a URL
+                st.query_params.clear()
     except Exception:
         pass
 
@@ -648,15 +635,11 @@ if not st.session_state.usuario_logado:
         if entrar:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
-                # Salva cookie (7 dias) - Força persistência compatível com HTTPS
-                # Adicionando SameSite='Lax' e Secure (se estiver em HTTPS) ajuda na retenção
-                # Note: O componente extra-streamlit-components repassa kwargs para js-cookie
-                cookie_manager.set(
-                    "auth_email", 
-                    usuario["email"], 
-                    expires_at=datetime.now() + timedelta(days=7), 
-                    key="set_auth_main"
-                )
+                # Cria sessão e adiciona na URL
+                token = criar_sessao(usuario["email"], _caminho_banco)
+                if token:
+                    st.query_params["session"] = token
+                
                 st.session_state.usuario_logado = usuario
                 st.session_state.pagina_atual = (
                     "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
@@ -690,11 +673,13 @@ perfil = usuario["perfil"]
 st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
-    cookie_manager.delete("auth_email", key="del_auth_main")
+    # Encerra sessão no banco e limpa URL
+    if usuario and usuario.get("email"):
+        encerrar_sessao(usuario["email"], _caminho_banco)
+    
+    st.query_params.clear()
     limpar_todas_as_paginas()
     st.session_state.usuario_logado = None
-    st.session_state["logout_clicked"] = True
-    time.sleep(0.5)
     st.rerun()
 
 st.sidebar.markdown("---")
