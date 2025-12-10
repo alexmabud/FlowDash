@@ -92,6 +92,8 @@ def _sincronizar_colunas_saldos_bancos(conn: sqlite3.Connection, bancos_ativos: 
         print(f"Erro ao sincronizar colunas de bancos: {e}")
 
 def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, bancos_ativos: list[str]) -> dict[str, float]:
+    print(f"--- DEBUG CALCULO BANCOS {data_alvo} ---")
+
     """
     Novo Cálculo Baseado em Checkpoint (Fechamento)
     1. Busca último fechamento válido (<= data_alvo).
@@ -166,6 +168,9 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
         data_base_checkpoint = r_date_obj
         for b in bancos_ativos:
             saldo_inicial[b] = float(saldos_salvos.get(b, 0.0))
+        
+        print(f"CHECKPOINT FOUND: {data_base_checkpoint} | SALDO INICIAL INTER: {saldo_inicial.get('Inter', 0)}")
+
 
     # ================= CALCULAR MOVIMENTOS [> data_base_checkpoint ... <= data_alvo] =================
     
@@ -245,7 +250,9 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             df_merged['banco_dest_norm'] = df_merged['banco_destino'].apply(lambda x: _norm(x) if pd.notnull(x) else None)
             for bn, val in df_merged.groupby('banco_dest_norm')['valor_liquido'].sum().items():
                 if bn in bancos_map:
+                    print(f"ADDING SALES TO {bancos_map[bn]}: {val}")
                     saldos[bancos_map[bn]] += float(val)
+
     except Exception as e:
         print(f"Erro entradas: {e}")
 
