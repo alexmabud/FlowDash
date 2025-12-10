@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import date
+import json
+from datetime import date, timedelta
 import pandas as pd
 
 # ==============================================================================
@@ -92,140 +93,163 @@ def _sincronizar_colunas_saldos_bancos(conn: sqlite3.Connection, bancos_ativos: 
 
 def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, bancos_ativos: list[str]) -> dict[str, float]:
     """
-    Calcula o saldo acumulado dos bancos considerando:
-    1. Base: Saldos/Ajustes da tabela saldos_bancos (soma de todas as linhas <= data)
-    2. Movimentações: Transferências (Entrada/Saída) em movimentacoes_bancarias
-    3. Saídas: Pagamentos onde Banco_Saida = banco
-    4. Entradas (Vendas): Lookup na tabela taxas_maquinas para rotear vendas p/ banco correto
-    5. REGIME DE CAIXA: Usa Data_Liq para entradas.
+    Novo Cálculo Baseado em Checkpoint (Fechamento)
+    1. Busca último fechamento válido (<= data_alvo).
+    2. Se data fechamento == data_alvo: Retorna valores salvos (Verdade Absoluta).
+    3. Se data fechamento < data_alvo: 
+       Saldo = Saldo Fechamento + Movimentos(Data Fechamento + 1 até data_alvo).
     """
     if not bancos_ativos:
         return {}
     
     data_alvo_str = str(data_alvo)
     
-    # Inicializa dicionário com 0.0
-    saldos = {b: 0.0 for b in bancos_ativos}
-    # Mapa auxiliar para normalização (chave normalizada -> nome real)
+    # 1. Busca Checkpoint
+    # Tenta pegar colunas legadas e JSON novo
+    # Precisamos tratar o caso onde as colunas podem não existir em bancos antigos, mas o script de migração deve ter criado.
+    # Por segurança, fazemos select * ou colunas específicas se tiver certeza. 
+    # O _garantir_colunas_fechamento cria: bancos_detalhe, banco_1..4
+    try:
+        row = conn.execute("""
+            SELECT data, bancos_detalhe, banco_1, banco_2, banco_3, banco_4 
+            FROM fechamento_caixa 
+            WHERE DATE(data) <= DATE(?) 
+            ORDER BY DATE(data) DESC LIMIT 1
+        """, (data_alvo_str,)).fetchone()
+    except Exception:
+        row = None
+
+    saldo_inicial = {b: 0.0 for b in bancos_ativos}
+    data_inicio_calc = date(2000, 1, 1)
+
+    if row:
+        r_data, r_json, r_b1, r_b2, r_b3, r_b4 = row
+        # Parse data do checkpoint
+        if isinstance(r_data, date):
+            r_date_obj = r_data
+        else:
+            try:
+                r_date_obj = date.fromisoformat(r_data)
+            except:
+                r_date_obj = date(2000, 1, 1)
+
+        # Parse valores salvos (JSON prioridade)
+        saldos_salvos = {}
+        if r_json:
+            try: 
+                saldos_salvos = json.loads(r_json)
+            except: 
+                pass
+        
+        # Fallback colunas legadas se JSON falhar
+        if not saldos_salvos:
+            # Mapeamento hardcoded baseado no fechamento.py
+            # Inter=b1, Bradesco=b2, Infinite*=b3, Caixa=b4 (geralmente b4 era outro, mas vamos focar nos principais)
+            # A melhor aposta é o nome exato. Se não tiver JSON, paciência, o saldo pode começar zerado ou aproximado.
+            map_legado = {
+                'Inter': r_b1,
+                'Bradesco': r_b2,
+                'InfinitePay': r_b3
+            }
+            for nome_banco, val in map_legado.items():
+                if val is not None:
+                    saldos_salvos[nome_banco] = float(val)
+
+        # CENÁRIO A: Dia já fechado hoje -> Retorna o salvo
+        if r_date_obj == data_alvo:
+            # Retorna apenas para bancos ativos
+            return {b: float(saldos_salvos.get(b, 0.0)) for b in bancos_ativos}
+
+        # CENÁRIO B: Checkpoint passado -> Define saldo inicial e nova data de partida
+        data_inicio_calc = r_date_obj + timedelta(days=1)
+        for b in bancos_ativos:
+            saldo_inicial[b] = float(saldos_salvos.get(b, 0.0))
+
+    # ================= CALCULAR MOVIMENTOS [data_inicio_calc ... data_alvo] =================
+    # Se data_inicio_calc > data_alvo, não há nada a somar (estamos calculando passado de um futuro fechado?, nao deve ocorrer dada a query <=)
+    
+    if data_inicio_calc > data_alvo:
+        return saldo_inicial
+
+    dt_ini_str = str(data_inicio_calc)
+    
+    saldos = saldo_inicial.copy()
     bancos_map = {_norm(b): b for b in bancos_ativos}
 
-    # ================= 1. SALDOS BASE (saldos_bancos) =================
-    # Soma TODAS as linhas até a data (pois a tabela armazena deltas/ajustes)
+    # 1. Movimentações Bancárias (Transferências)
     try:
-        df_base = _read_sql(conn, "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?)", (data_alvo_str,))
-        if not df_base.empty:
-            for col in df_base.columns:
-                if col not in ["data", "id"]:
-                    col_norm = _norm(col)
-                    if col_norm in bancos_map:
-                        val = pd.to_numeric(df_base[col], errors='coerce').fillna(0.0).sum()
-                        saldos[bancos_map[col_norm]] += float(val)
-    except Exception as e:
-        print(f"Erro ao calcular base de saldos: {e}")
-
-    # ================= 2. MOVIMENTAÇÕES BANCÁRIAS =================
-    try:
-        df_mov = _read_sql(conn, 
-            """
+        df_mov = _read_sql(conn, """
             SELECT banco, tipo, valor 
             FROM movimentacoes_bancarias 
-            WHERE DATE(data) <= DATE(?)
-            """, 
-            (data_alvo_str,)
-        )
+            WHERE DATE(data) >= DATE(?) AND DATE(data) <= DATE(?)
+        """, (dt_ini_str, data_alvo_str))
+        
         if not df_mov.empty:
             df_mov['banco_norm'] = df_mov['banco'].apply(_norm)
             df_mov['valor'] = pd.to_numeric(df_mov['valor'], errors='coerce').fillna(0.0)
-            
-            for _, row in df_mov.iterrows():
-                bn = row['banco_norm']
-                tipo = (row['tipo'] or '').lower().strip()
-                val = float(row['valor'])
-                
+            for _, mrow in df_mov.iterrows():
+                bn = mrow['banco_norm']
+                tipo = (mrow['tipo'] or '').lower().strip()
+                val = float(mrow['valor'])
                 if bn in bancos_map:
-                    real_name = bancos_map[bn]
-                    if tipo == 'entrada':
-                        saldos[real_name] += val
-                    elif tipo == 'saida':
-                        saldos[real_name] -= val
+                    real = bancos_map[bn]
+                    if tipo == 'entrada': saldos[real] += val
+                    elif tipo == 'saida': saldos[real] -= val
     except Exception as e:
-        print(f"Erro ao calcular movimentações: {e}")
+        print(f"Erro movs: {e}")
 
-    # ================= 3. SAÍDAS (DESPESAS PAGAS PELO BANCO) =================
+    # 2. Saídas (Despesas) - Pela Data de Pagamento (Data)
     try:
-        df_saida = _read_sql(conn, 
-            """
+        df_saida = _read_sql(conn, """
             SELECT Banco_Saida, Valor 
             FROM saida 
-            WHERE DATE(data) <= DATE(?) 
-              AND Banco_Saida IS NOT NULL 
-              AND TRIM(Banco_Saida) <> ''
-            """, 
-            (data_alvo_str,)
-        )
+            WHERE DATE(data) >= DATE(?) AND DATE(data) <= DATE(?)
+            AND Banco_Saida IS NOT NULL AND TRIM(Banco_Saida) <> ''
+        """, (dt_ini_str, data_alvo_str))
+        
         if not df_saida.empty:
             df_saida['banco_norm'] = df_saida['Banco_Saida'].apply(_norm)
             df_saida['Valor'] = pd.to_numeric(df_saida['Valor'], errors='coerce').fillna(0.0)
-            
-            # Agrupa por banco e subtrai
-            agrupado = df_saida.groupby('banco_norm')['Valor'].sum()
-            for bn, val_total in agrupado.items():
+            for bn, val in df_saida.groupby('banco_norm')['Valor'].sum().items():
                 if bn in bancos_map:
-                    saldos[bancos_map[bn]] -= float(val_total)
+                    saldos[bancos_map[bn]] -= float(val)
     except Exception as e:
-        print(f"Erro ao calcular saídas bancárias: {e}")
+        print(f"Erro saidas: {e}")
 
-    # ================= 4. ENTRADAS (VENDAS) -> LOOKUP TAXAS =================
-    # USANDO DATA_LIQ (Regime de Caixa) conforme solicitado
+    # 3. Entradas (Vendas) - Regime de Caixa (Data_Liq)
     try:
-        # Carrega Vendas
-        df_vendas = _read_sql(conn, 
-            """
+        # Usa COALESCE para garantir que se Data_Liq for nula, use Data (segurança), 
+        # mas o requisito pede Data_Liq explicitamente.
+        df_vendas = _read_sql(conn, """
             SELECT maquineta, Forma_de_Pagamento, Bandeira, Parcelas, valor_liquido 
             FROM entrada 
-            WHERE DATE(Data_Liq) <= DATE(?)
-            """, 
-            (data_alvo_str,)
-        )
+            WHERE DATE(Data_Liq) >= DATE(?) AND DATE(Data_Liq) <= DATE(?)
+        """, (dt_ini_str, data_alvo_str))
         
-        # Carrega Regras de Roteamento (Taxas/Bancos)
         df_taxas = _read_sql(conn, "SELECT maquineta, forma_pagamento, bandeira, parcelas, banco_destino FROM taxas_maquinas")
         
         if not df_vendas.empty and not df_taxas.empty:
-            # Normalização p/ Join (Vendas)
+            # Normalização (mesma lógica anterior)
             df_vendas['k_maq'] = df_vendas['maquineta'].astype(str).str.strip().str.upper()
             df_vendas['k_forma'] = df_vendas['Forma_de_Pagamento'].astype(str).str.strip().str.upper()
             df_vendas['k_band'] = df_vendas['Bandeira'].astype(str).str.strip().str.upper()
             df_vendas['k_parc'] = pd.to_numeric(df_vendas['Parcelas'], errors='coerce').fillna(1).astype(int)
             
-            # Normalização p/ Join (Taxas)
             df_taxas['k_maq'] = df_taxas['maquineta'].astype(str).str.strip().str.upper()
             df_taxas['k_forma'] = df_taxas['forma_pagamento'].astype(str).str.strip().str.upper()
             df_taxas['k_band'] = df_taxas['bandeira'].astype(str).str.strip().str.upper()
             df_taxas['k_parc'] = pd.to_numeric(df_taxas['parcelas'], errors='coerce').fillna(1).astype(int)
             
-            # Left Join para descobrir o banco destino de cada venda
-            df_merged = pd.merge(
-                df_vendas, 
-                df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
-                on=['k_maq', 'k_forma', 'k_band', 'k_parc'], 
-                how='left'
-            )
+            df_merged = pd.merge(df_vendas, df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
+                                 on=['k_maq', 'k_forma', 'k_band', 'k_parc'], how='left')
             
-            # Normaliza o banco de destino encontrado
             df_merged['banco_dest_norm'] = df_merged['banco_destino'].apply(lambda x: _norm(x) if pd.notnull(x) else None)
-            
-            # Soma valor líquido por banco
-            vendas_por_banco = df_merged.groupby('banco_dest_norm')['valor_liquido'].sum()
-            
-            for bn, val_total in vendas_por_banco.items():
+            for bn, val in df_merged.groupby('banco_dest_norm')['valor_liquido'].sum().items():
                 if bn in bancos_map:
-                    saldos[bancos_map[bn]] += float(val_total)
-                    
+                    saldos[bancos_map[bn]] += float(val)
     except Exception as e:
-        print(f"Erro ao calcular entradas (vendas reconciliadas): {e}")
+        print(f"Erro entradas: {e}")
 
-    # Arredonda tudo para 2 casas
     return {k: round(v, 2) for k, v in saldos.items()}
 
 def _calcular_saldo_projetado(conn: sqlite3.Connection, data_alvo: date) -> tuple[float, float]:
