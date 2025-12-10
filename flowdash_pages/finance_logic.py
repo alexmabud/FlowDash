@@ -161,28 +161,27 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             return {b: float(saldos_salvos.get(b, 0.0)) for b in bancos_ativos}
 
         # CENÁRIO B: Checkpoint passado -> Define saldo inicial e nova data de partida
-        data_inicio_calc = r_date_obj + timedelta(days=1)
+        # A lógica do usuário pede explicitamente para filtrar onde Data > Data_Checkpoint
+        # Portanto, não usaremos mais "checkpoint + 1 day" e sim a data do checkpoint diretamente na query com operador >
+        data_base_checkpoint = r_date_obj
         for b in bancos_ativos:
             saldo_inicial[b] = float(saldos_salvos.get(b, 0.0))
 
-    # ================= CALCULAR MOVIMENTOS [data_inicio_calc ... data_alvo] =================
-    # Se data_inicio_calc > data_alvo, não há nada a somar (estamos calculando passado de um futuro fechado?, nao deve ocorrer dada a query <=)
+    # ================= CALCULAR MOVIMENTOS [> data_base_checkpoint ... <= data_alvo] =================
     
-    if data_inicio_calc > data_alvo:
-        return saldo_inicial
-
-    dt_ini_str = str(data_inicio_calc)
+    dt_base_str = str(data_base_checkpoint)
     
     saldos = saldo_inicial.copy()
     bancos_map = {_norm(b): b for b in bancos_ativos}
 
     # 1. Movimentações Bancárias (Transferências)
     try:
+        # User REQ: DATE(data) > DATE(checkpoint)
         df_mov = _read_sql(conn, """
             SELECT banco, tipo, valor 
             FROM movimentacoes_bancarias 
-            WHERE DATE(data) >= DATE(?) AND DATE(data) <= DATE(?)
-        """, (dt_ini_str, data_alvo_str))
+            WHERE DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+        """, (dt_base_str, data_alvo_str))
         
         if not df_mov.empty:
             df_mov['banco_norm'] = df_mov['banco'].apply(_norm)
@@ -203,9 +202,9 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
         df_saida = _read_sql(conn, """
             SELECT Banco_Saida, Valor 
             FROM saida 
-            WHERE DATE(data) >= DATE(?) AND DATE(data) <= DATE(?)
+            WHERE DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
             AND Banco_Saida IS NOT NULL AND TRIM(Banco_Saida) <> ''
-        """, (dt_ini_str, data_alvo_str))
+        """, (dt_base_str, data_alvo_str))
         
         if not df_saida.empty:
             df_saida['banco_norm'] = df_saida['Banco_Saida'].apply(_norm)
@@ -223,8 +222,8 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
         df_vendas = _read_sql(conn, """
             SELECT maquineta, Forma_de_Pagamento, Bandeira, Parcelas, valor_liquido 
             FROM entrada 
-            WHERE DATE(Data_Liq) >= DATE(?) AND DATE(Data_Liq) <= DATE(?)
-        """, (dt_ini_str, data_alvo_str))
+            WHERE DATE(Data_Liq) > DATE(?) AND DATE(Data_Liq) <= DATE(?)
+        """, (dt_base_str, data_alvo_str))
         
         df_taxas = _read_sql(conn, "SELECT maquineta, forma_pagamento, bandeira, parcelas, banco_destino FROM taxas_maquinas")
         
