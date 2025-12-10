@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 from shared.db import get_conn
+from flowdash_pages.finance_logic import _get_saldos_bancos_acumulados, _get_bancos_ativos
 
 # --------------------- Formas de pagamento tratadas como "venda" ---------------------
 _FORMAS_VENDA = {
@@ -231,27 +232,14 @@ def carregar_resumo_dia(caminho_banco: str, data_lanc) -> Dict[str, Any]:
                 )
 
         # ===== Saldos bancos (ACUMULADO <= data) =====
-        try:
-            df_bk = pd.read_sql("SELECT * FROM saldos_bancos", conn)
-        except Exception:
-            df_bk = pd.DataFrame()
-
-        if not df_bk.empty:
-            date_col_name = next((c for c in df_bk.columns if c.lower() == "data"), None)
-            if date_col_name:
-                df_bk[date_col_name] = pd.to_datetime(df_bk[date_col_name], errors="coerce")
-                if data_ref_date is not None:
-                    df_bk = df_bk[df_bk[date_col_name].dt.date <= data_ref_date]
-
-            for c in df_bk.columns:
-                if c.lower() == "data":
-                    continue
-                soma = (
-                    pd.to_numeric(df_bk[c], errors="coerce")
-                    .fillna(0.0)
-                    .sum()
-                )
-                saldos_bancos[str(c)] = float(soma)
+        if data_ref_date:
+            try:
+                bancos_ativos = _get_bancos_ativos(conn)
+                saldos_bancos = _get_saldos_bancos_acumulados(conn, data_ref_date, bancos_ativos)
+            except Exception:
+                saldos_bancos = {}
+        else:
+            saldos_bancos = {}
 
     return {
         "total_vendas": total_vendas,

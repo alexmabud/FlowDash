@@ -23,7 +23,7 @@ from flowdash_pages.dre.dre import (
     _persist_overrides_to_db,
     _vars_dynamic_overrides,
 )
-from flowdash_pages.fechamento.fechamento import _somar_bancos_totais, _ultimo_caixas_ate
+from flowdash_pages.finance_logic import _somar_bancos_totais, _ultimo_caixas_ate
 from flowdash_pages.dashboard.prophet_engine import criar_grafico_previsao
 
 
