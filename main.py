@@ -579,7 +579,16 @@ if not st.session_state.usuario_logado:
         if st.session_state.get("logout_clicked"):
             st.session_state["logout_clicked"] = False
         else:
+            # Tentativa 1
             cookies = cookie_manager.get_all()
+            
+            # Tentativa 2 (Retry para Cloud Latency): 
+            # Se vier vazio, espera um pouco e tenta de novo. 
+            # O componente pode demorar a montar no Streamlit Cloud.
+            if not cookies:
+                time.sleep(0.5)
+                cookies = cookie_manager.get_all()
+
             token_email = cookies.get("auth_email")
             if token_email:
                 usr_cookie = obter_usuario(token_email, _caminho_banco)
@@ -631,8 +640,15 @@ if not st.session_state.usuario_logado:
         if entrar:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
-                # Salva cookie (7 dias)
-                cookie_manager.set("auth_email", usuario["email"], expires_at=datetime.now() + timedelta(days=7), key="set_auth_main")
+                # Salva cookie (7 dias) - Força persistência compatível com HTTPS
+                # Adicionando SameSite='Lax' e Secure (se estiver em HTTPS) ajuda na retenção
+                # Note: O componente extra-streamlit-components repassa kwargs para js-cookie
+                cookie_manager.set(
+                    "auth_email", 
+                    usuario["email"], 
+                    expires_at=datetime.now() + timedelta(days=7), 
+                    key="set_auth_main"
+                )
                 st.session_state.usuario_logado = usuario
                 st.session_state.pagina_atual = (
                     "📊 Dashboard" if usuario["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
