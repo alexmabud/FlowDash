@@ -19,3 +19,7 @@ sidrapy==0.1.4
 workalendar>=17.0
 requests>=2.32
 dropbox
+
+# Single File App Dependencies
+extra-streamlit-components
+streamlit-autorefresh
