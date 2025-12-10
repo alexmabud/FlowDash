@@ -621,6 +621,10 @@ def render_chips_principais(
 
         return f"<span style='color:{color};font-size:18px;font-weight:600;'>{txt_display}</span>"
 
+    def _fmt_ref_chip(val: float) -> str:
+        """Gera chip com valor de referência."""
+        return f"<span style='background:#262A35; color:#cfd3df; border-radius:4px; padding:2px 6px; font-size:0.75rem; font-weight:600; margin-top:4px;'>Ref: {_fmt_currency(val)}</span>"
+
     # --- Cálculos Principais (Vendas Atuais) ---
     mask_dia = df["Data_date"] == hoje
     vendas_dia = float(df.loc[mask_dia, "Valor"].sum())
@@ -770,28 +774,28 @@ def render_chips_principais(
         [
             # Linha 1: Comparativos Básicos
             [
-                (f"Mês vs Mês Anterior ({lbl_mes_ant}) - Total", [kpi_mm], False),
-                (f"Mês vs Ano Anterior ({ano_prev}) - Período", [kpi_ma], False),
+                (f"Mês vs Mês Anterior ({lbl_mes_ant}) - Total", [kpi_mm, _fmt_ref_chip(v_ant_mes)], False),
+                (f"Mês vs Ano Anterior ({ano_prev}) - Período", [kpi_ma, _fmt_ref_chip(v_mes_ano_ant)], False),
             ],
             # Linha 2: Comparativo com Recorde Sazonal (Dez vs Melhor Dez)
             [
-                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Total", [kpi_recorde_total], False),
-                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Período", [kpi_recorde_periodo], False),
+                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Total", [kpi_recorde_total, _fmt_ref_chip(val_best_mes_especifico)], False),
+                (f"Mês vs Melhor {nome_mes_atual} Histórico ({best_mes_ano_especifico if best_mes_ano_especifico else 'N/A'}) - Período", [kpi_recorde_periodo, _fmt_ref_chip(v_mes_best_ano_parcial)], False),
             ],
              # Linha 3: Comparativo com Recorde Absoluto (Dez vs O Melhor Mês que já existiu)
             [
-                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Total", [kpi_ever_total], False),
-                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Período", [kpi_ever_periodo], False),
+                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Total", [kpi_ever_total, _fmt_ref_chip(best_ever_val)], False),
+                (f"Mês vs Recorde Histórico Absoluto ({lbl_best_ever}) - Período", [kpi_ever_periodo, _fmt_ref_chip(val_best_ever_periodo)], False),
             ],
             # Linha 4: Comparativo Anual
             [
-                (f"Ano vs Ano Anterior ({ano_prev}) - Total", [kpi_at], False),
-                (f"Ano vs Ano Anterior ({ano_prev}) - Período", [kpi_ay], False),
+                (f"Ano vs Ano Anterior ({ano_prev}) - Total", [kpi_at, _fmt_ref_chip(v_ano_ant_tot)], False),
+                (f"Ano vs Ano Anterior ({ano_prev}) - Período", [kpi_ay, _fmt_ref_chip(v_ano_ant_ytd)], False),
             ],
             # Linha 5: Comparativo Melhor Ano
             [
-                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Total", [kpi_amt], False),
-                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Período", [kpi_amy], False),
+                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Total", [kpi_amt, _fmt_ref_chip(val_best_ano_total)], False),
+                (f"Ano vs Melhor Ano ({lbl_best_ano}) - Período", [kpi_amy, _fmt_ref_chip(v_best_ano_ytd)], False),
             ],
         ]
     )

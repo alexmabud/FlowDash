@@ -254,7 +254,7 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             df_merged['banco_dest_norm'] = df_merged['banco_destino'].apply(lambda x: _norm(x) if pd.notnull(x) else None)
             for bn, val in df_merged.groupby('banco_dest_norm')['valor_liquido'].sum().items():
                 if bn in bancos_map:
-                    print(f"ADDING SALES TO {bancos_map[bn]}: {val}")
+
                     saldos[bancos_map[bn]] += float(val)
 
     except Exception as e:
