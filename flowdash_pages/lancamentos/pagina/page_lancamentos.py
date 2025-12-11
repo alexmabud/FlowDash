@@ -160,20 +160,20 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
         disp_caixa, disp_caixa2, disp_ref = _ultimo_caixas_ate(caminho_banco, data_lanc)
 
         # 2) Bancos (Inter, InfinitePay, Bradesco) com tolerância a chaves variantes
+        # 2) Bancos (Dinâmico: itera sobre todos os bancos encontrados)
         saldos_bancos = resumo.get("saldos_bancos") or {}
-        nb = {(str(k) or "").strip().lower(): float(v or 0.0) for k, v in saldos_bancos.items()}
-        inter = nb.get("inter", 0.0)
-        infinite = nb.get(
-            "infinitepay",
-            nb.get("infinite pay", nb.get("infinite_pay", nb.get("infinitiepay", 0.0))),
-        )
-        bradesco = nb.get("bradesco", 0.0)
+        lista_bancos = []
+        
+        # Itera sobre chaves ordenadas alfabeticamente
+        for banco, valor in sorted(saldos_bancos.items()):
+            # Adiciona tupla (Nome, Valor, True) para o render_card_rows
+            lista_bancos.append((str(banco), float(valor or 0.0), True))
 
         render_card_rows(
             "💵 Saldos",
             [
-                [("Caixa", disp_caixa, True), ("Caixa 2", disp_caixa2, True)],  # linha 1 (2 colunas)
-                [("Inter", inter, True), ("InfinitePay", infinite, True), ("Bradesco", bradesco, True)],  # linha 2 (3 colunas)
+                [("Caixa", disp_caixa, True), ("Caixa 2", disp_caixa2, True)],  # linha 1: Caixas
+                lista_bancos,  # linha 2: Bancos (dinâmico)
             ],
         )
         if disp_ref and disp_ref != data_lanc:

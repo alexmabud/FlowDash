@@ -81,6 +81,118 @@ def _garantir_colunas_fechamento(conn: sqlite3.Connection) -> None:
         st.error(f"Erro ao migrar schema de fechamento_caixa: {e}")
 
 
+def _listar_recebimentos_detalhados(conn: sqlite3.Connection, data_ref: date) -> list[str]:
+    """
+    Retorna lista de strings com totais líquidos por Banco Destino
+    para a data de liquidação informada, ignorando Dinheiro e PIX.
+    Realiza JOIN com taxas_maquinas para encontrar o banco destino.
+    """
+    try:
+        # 1. Carrega dados de entrada para o dia (Data_Liq)
+        query_vendas = """
+            SELECT maquineta, Format_de_Pagamento, Bandeira, Parcelas, valor_liquido, Forma_de_Pagamento
+            FROM entrada
+            WHERE DATE(Data_Liq) = DATE(?)
+        """
+        # Nota: 'Format_de_Pagamento' pode estar errado na query acima se não existir, 
+        # mas vou usar 'Forma_de_Pagamento' que sei que existe pelo schema.
+        # Ajustando para usar colunas corretas vistas no schema:
+        # Data, Valor, Forma_de_Pagamento, Parcelas, Bandeira, Usuario, maquineta, valor_liquido, ...
+        
+        df_vendas = pd.read_sql("""
+            SELECT maquineta, Forma_de_Pagamento, Bandeira, Parcelas, valor_liquido
+            FROM entrada
+            WHERE DATE(Data_Liq) = DATE(?)
+        """, conn, params=(str(data_ref),))
+
+        if df_vendas.empty:
+            return []
+
+        # Filtra apenas o que NÃO é Dinheiro/Pix
+        # Normaliza 'Forma_de_Pagamento' antes de filtrar
+        df_vendas['f_upper'] = df_vendas['Forma_de_Pagamento'].astype(str).str.strip().str.upper()
+        df_vendas = df_vendas[~df_vendas['f_upper'].isin(['DINHEIRO', 'PIX'])]
+        
+        if df_vendas.empty:
+            return []
+
+        # 2. Carrega taxas para mapeamento
+        df_taxas = pd.read_sql("SELECT maquineta, forma_pagamento, bandeira, parcelas, banco_destino FROM taxas_maquinas", conn)
+        
+        if df_taxas.empty:
+            return ["(Sem taxas cadastradas)"]
+
+        # 3. Normalização para Merge (cópia logic finance_logic.py)
+        df_vendas['k_maq'] = df_vendas['maquineta'].astype(str).str.strip().str.upper()
+        df_vendas['k_forma'] = df_vendas['Forma_de_Pagamento'].astype(str).str.strip().str.upper()
+        df_vendas['k_band'] = df_vendas['Bandeira'].astype(str).str.strip().str.upper()
+        df_vendas['k_parc'] = pd.to_numeric(df_vendas['Parcelas'], errors='coerce').fillna(1).astype(int)
+        
+        df_taxas['k_maq'] = df_taxas['maquineta'].astype(str).str.strip().str.upper()
+        df_taxas['k_forma'] = df_taxas['forma_pagamento'].astype(str).str.strip().str.upper()
+        df_taxas['k_band'] = df_taxas['bandeira'].astype(str).str.strip().str.upper()
+        df_taxas['k_parc'] = pd.to_numeric(df_taxas['parcelas'], errors='coerce').fillna(1).astype(int)
+        
+        # 4. Merge
+        df_merged = pd.merge(
+            df_vendas, 
+            df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
+            on=['k_maq', 'k_forma', 'k_band', 'k_parc'], 
+            how='left'
+        )
+        
+        # 5. Agrupa e Formata
+        def _inferir_banco(row):
+            # 1. Se o banco já existe, usa ele
+            b = row['banco_destino']
+            if pd.notnull(b) and str(b).strip() != "":
+                return b
+            
+            # 2. Se vazio, tenta descobrir pelo nome da Maquineta
+            maq = str(row['maquineta']).upper()
+            
+            if 'INFINITE' in maq or 'INFINITY' in maq:
+                return 'InfinitePay'
+            elif 'INTER' in maq:
+                return 'Inter'
+            elif 'BRADESCO' in maq:
+                return 'Bradesco'
+            elif 'PAGSEGURO' in maq or 'PAGBANK' in maq:
+                return 'PagBank'
+            elif 'MERCADO' in maq:
+                return 'Mercado Pago'
+            elif 'STONE' in maq or 'TON' in maq:
+                return 'Stone'
+            
+            # 3. Fallback final
+            return 'A Classificar'
+
+        df_merged['banco_final'] = df_merged.apply(_inferir_banco, axis=1)
+        
+        # Correção para capitalização bonita (Ex: INFINITE PAY -> Infinite Pay)
+        df_merged['banco_final'] = df_merged['banco_final'].astype(str).str.title()
+        
+        resumo = df_merged.groupby('banco_final')['valor_liquido'].sum().reset_index()
+        
+        detalhes = []
+        for _, row in resumo.iterrows():
+            banco = row['banco_final']
+            # Pequeno ajuste para nomes comuns ficarem bonitos
+            if banco.upper() == "INTER": banco = "Inter"
+            elif banco.upper().replace(" ","") == "INFINITEPAY": banco = "InfinitePay"
+            elif banco.upper() == "PAGBANK": banco = "PagBank"
+            elif banco.upper() == "MERCADO PAGO": banco = "Mercado Pago"
+            
+            valor = row['valor_liquido']
+            if abs(valor) > 0.009: # ignora zerados
+                detalhes.append(f"{banco}: {_fmt(valor)}")
+                
+        return sorted(detalhes)
+
+    except Exception as e:
+        print(f"Erro ao detalhar recebimentos (Pandas): {e}")
+        return []
+
 # ==============================================================================
 # 3. PAGE RENDERER
 # ==============================================================================
@@ -114,6 +226,10 @@ def pagina_fechamento_caixa(caminho_banco: str):
     sys_caixa, sys_caixa2 = _calcular_saldo_projetado(conn, data_sel)
     # Alterado: Usa data_sel (hoje) para mostrar saldo acumulado até o momento, igual à pág. Lançamentos.
     sys_bancos = _get_saldos_bancos_acumulados(conn, data_sel, bancos_ativos)
+    
+    # [NOVO] Busca detalhamento por banco para o card de entradas
+    detalhes_cartao = _listar_recebimentos_detalhados(conn, data_sel)
+    
     total_bancos = sum(sys_bancos.values())
     saldo_total_consolidado = sys_caixa + sys_caixa2 + total_bancos
     
@@ -134,10 +250,16 @@ def pagina_fechamento_caixa(caminho_banco: str):
         st.toast("🔓 Dia aberto para fechamento.", icon="📝")
 
     # ========================== LAYOUT EM CARDS ==========================
+    # ========================== LAYOUT EM CARDS ==========================
+    # Lógica: Se tiver detalhes (lista de strings), mostra a lista e usa number_always=False
+    #         Caso contrário, mostra o total numérico e number_always=True
+    val_cartao_exibir = detalhes_cartao if detalhes_cartao else total_cartao_liquido
+    is_numeric_cartao = not bool(detalhes_cartao)
+
     render_card_row("💰 Valores que Entraram Hoje", [
         ("Dinheiro", valor_dinheiro, True),
         ("Pix", valor_pix, True),
-        ("Cartão D-1 (Líquido)", total_cartao_liquido, True)
+        ("Cartão D-1 (Líquido)", val_cartao_exibir, is_numeric_cartao)
     ])
     
     df_corr = pd.DataFrame([{"Descrição": "Correção do Dia", "Valor": corr_dia}, {"Descrição": "Correção Acumulada", "Valor": corr_acum}])

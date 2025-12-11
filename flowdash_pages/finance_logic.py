@@ -251,11 +251,40 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, ban
             df_merged = pd.merge(df_vendas, df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
                                  on=['k_maq', 'k_forma', 'k_band', 'k_parc'], how='left')
             
-            df_merged['banco_dest_norm'] = df_merged['banco_destino'].apply(lambda x: _norm(x) if pd.notnull(x) else None)
-            for bn, val in df_merged.groupby('banco_dest_norm')['valor_liquido'].sum().items():
-                if bn in bancos_map:
+            # Lógica de Inferência (Fallback) igual ao Fechamento
+            def _inferir_banco_row(r):
+                # 1. Prioridade: Banco vindo do cadastro de taxas
+                b = r['banco_destino']
+                if pd.notnull(b) and str(b).strip() != "":
+                    return b
+                
+                # 2. Fallback: Nome da Maquineta
+                m = str(r['maquineta']).upper()
+                if 'INFINITE' in m or 'INFINITY' in m: return 'InfinitePay'
+                if 'INTER' in m: return 'Inter'
+                if 'BRADESCO' in m: return 'Bradesco'
+                if 'PAGSEGURO' in m or 'PAGBANK' in m: return 'PagBank'
+                if 'MERCADO' in m: return 'Mercado Pago'
+                if 'STONE' in m or 'TON' in m: return 'Stone'
+                
+                return None
 
-                    saldos[bancos_map[bn]] += float(val)
+            df_merged['banco_final'] = df_merged.apply(_inferir_banco_row, axis=1)
+            # Normaliza para comparação, mas agrupa pelo nome real para exibição
+            
+            for nome_banco, val in df_merged.groupby('banco_final')['valor_liquido'].sum().items():
+                if not nome_banco: continue
+                n = _norm(nome_banco)
+                
+                # Se bater com um banco cadastrado, usa a chave dele
+                if n in bancos_map:
+                    chave = bancos_map[n]
+                    saldos[chave] += float(val)
+                else:
+                    # Se for novo (inferred), adiciona dinamicamente
+                    # Garante Title Case para ficar bonito
+                    chave = str(nome_banco).strip()
+                    saldos[chave] = saldos.get(chave, 0.0) + float(val)
 
     except Exception as e:
         print(f"Erro entradas: {e}")
