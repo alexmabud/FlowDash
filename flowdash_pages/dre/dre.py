@@ -1485,8 +1485,9 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
     saida_imp_maq   = simples_rs + taxa_maq_rs
     receita_liq     = fat - saida_imp_maq
 
-    # total_var NÃO soma frete novamente (já incluso no CMV)
-    total_var       = cmv_rs + sacolas_rs + fundo_rs
+    # CORREÇÃO: Usa a função que busca tudo no banco
+    competencia_fmt = f"{ano:04d}-{mes:02d}"
+    total_var       = calc_variaveis_total(competencia_fmt, cmv_rs, receita_liq)
     margem_contrib  = receita_liq - total_var
     lucro_bruto     = receita_liq - cmv_rs
 
