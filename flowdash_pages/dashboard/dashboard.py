@@ -775,7 +775,7 @@ def render_chips_principais(
             # Linha 1: Comparativos Básicos
             [
                 (f"Mês vs Mês Anterior ({lbl_mes_ant}) - Total", [kpi_mm, _fmt_ref_chip(v_ant_mes)], False),
-                (f"Mês vs Ano Anterior ({ano_prev}) - Período", [kpi_ma, _fmt_ref_chip(v_mes_ano_ant)], False),
+                (f"Mês vs {nome_mes_atual}/{ano_prev} - Período", [kpi_ma, _fmt_ref_chip(v_mes_ano_ant)], False),
             ],
             # Linha 2: Comparativo com Recorde Sazonal (Dez vs Melhor Dez)
             [
