@@ -286,8 +286,8 @@ def _calcular_percentual_dashboard(valor: float, meta: float) -> float:
 
 
 def build_meta_gauge_dashboard(titulo: str, percentual: float, bronze_pct: float, prata_pct: float, valor_label: str) -> go.Figure:
-    max_axis = 120.0
-    value = float(max(0.0, min(max_axis, percentual)))
+    max_axis = max(120.0, float(percentual) * 1.1)
+    value = float(max(0.0, percentual))
     steps = [
         {"range": [0, bronze_pct], "color": "#E53935"},
         {"range": [bronze_pct, prata_pct], "color": "#CD7F32"},
@@ -329,8 +329,8 @@ def build_meta_gauge_dashboard(titulo: str, percentual: float, bronze_pct: float
 def build_meta_mes_gauge_dashboard(pct_meta: float, valor_atual: float, valor_meta: float) -> go.Figure:
     bronze_pct = 75.0
     prata_pct = 87.5
-    max_axis = 120.0
-    value = float(max(0.0, min(max_axis, pct_meta)))
+    max_axis = max(120.0, float(pct_meta) * 1.1)
+    value = float(max(0.0, pct_meta))
     steps = [
         {"range": [0, bronze_pct], "color": "#E53935"},
         {"range": [bronze_pct, prata_pct], "color": "#CD7F32"},

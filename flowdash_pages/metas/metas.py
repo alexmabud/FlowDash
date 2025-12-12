@@ -77,8 +77,8 @@ def _gauge_percentual_zonas(
 ) -> go.Figure:
     bronze = max(0.0, min(100.0, float(bronze_pct)))
     prata  = max(bronze, min(100.0, float(prata_pct)))
-    max_axis = max(100.0, float(axis_max))
-    value = float(max(0.0, min(max_axis, percentual)))
+    max_axis = max(float(axis_max), float(percentual) * 1.1)
+    value = float(max(0.0, percentual))
 
     steps = [
         {"range": [0, bronze],      "color": "#E53935"},  # vermelho

@@ -1368,6 +1368,98 @@ def _listar_anos(db_path: str) -> List[int]:
     return sorted(set(anos))
 
 # ============================== Cálculo por mês ==============================
+
+def calcular_juros_price(valor_emprestimo, taxa_mensal_pct, total_parcelas, parcela_atual):
+    """
+    Calcula o componente de JUROS de uma parcela específica usando a lógica da Tabela Price.
+    """
+    try:
+        vp = float(valor_emprestimo or 0)
+        i = float(taxa_mensal_pct or 0) / 100.0
+        n = int(total_parcelas or 0)
+        p_cur = int(parcela_atual or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+    if vp <= 0 or i <= 0 or n <= 0 or p_cur <= 0:
+        return 0.0
+
+    # Cálculo da prestação fixa (PMT)
+    fator = (1 + i) ** n
+    if (fator - 1) == 0: return 0.0
+    pmt = vp * (i * fator) / (fator - 1)
+
+    saldo_devedor = vp
+    juros_da_parcela = 0.0
+
+    # Simula a evolução do saldo até a parcela atual
+    for _ in range(p_cur):
+        juros_da_parcela = saldo_devedor * i
+        amortizacao = pmt - juros_da_parcela
+        saldo_devedor -= amortizacao
+
+    return max(0.0, juros_da_parcela)
+
+
+def _query_juros_reais_mes(db_path: str, competencia: str) -> float:
+    """
+    Calcula o total de juros reais (Competência) de todos os empréstimos pagos no mês.
+    Aplica uma correção automática se detectar que o 'valor_total' no banco inclui juros futuros.
+    """
+    sql = """
+    SELECT 
+        e.valor_parcela as pmt,
+        e.taxa_juros_am as taxa,
+        e.parcelas_total,
+        m.parcela_num,
+        e.valor_total as valor_cadastrado
+    FROM contas_a_pagar_mov m
+    JOIN emprestimos_financiamentos e ON m.emprestimo_id = e.id
+    WHERE m.tipo_obrigacao = 'EMPRESTIMO'
+      AND m.competencia = ?
+    """
+    total_juros = 0.0
+    
+    try:
+        with _conn(db_path) as c:
+            rows = c.execute(sql, (competencia,)).fetchall()
+            
+            for row in rows:
+                pmt = float(row[0] or 0)
+                taxa_pct = float(row[1] or 0)
+                n_total = int(row[2] or 0)
+                p_atual = int(row[3] or 0)
+                v_cadastrado = float(row[4] or 0)
+
+                # 1. Definição do Principal (Valor Financiado)
+                valor_base_calculo = v_cadastrado 
+                
+                # Se temos dados suficientes, verificamos a consistência matemática
+                if taxa_pct > 0 and n_total > 0 and pmt > 0:
+                    i = taxa_pct / 100.0
+                    
+                    # Fórmula do Valor Presente (PV) de uma Anuidade
+                    # Quanto vale hoje um fluxo de parcelas de R$ X?
+                    vp_calculado = pmt * ((1 - (1 + i) ** -n_total) / i)
+                    
+                    # Lógica de Correção:
+                    # Se o VP calculado for menor que 95% do valor cadastrado, 
+                    # assumimos que o cadastro está inflado (Principal + Juros) e usamos o calculado.
+                    if vp_calculado < (v_cadastrado * 0.95):
+                        valor_base_calculo = vp_calculado
+
+                # 2. Calcula o Juros Price da parcela atual usando a base corrigida
+                # A função calcular_juros_price já deve existir no seu código (criada no passo anterior)
+                juros_item = calcular_juros_price(valor_base_calculo, taxa_pct, n_total, p_atual)
+                
+                total_juros += juros_item
+                
+    except Exception as e:
+        # Em caso de erro, logo mas não travo o DRE (retorno 0 de juros)
+        logging.error(f"Erro ao calcular juros smart: {e}")
+        return 0.0
+            
+    return total_juros
 @st.cache_data(show_spinner=False)
 def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float = 0.0) -> Dict[str, float]:
     ini, fim, comp = _periodo_ym(ano, mes)
@@ -1417,7 +1509,11 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
 
     # Lucro líquido (simplificado)
     gasto_emprestimos = emp_rs
-    lucro_liq = ebit - (gasto_emprestimos or 0)
+    
+    # --- NOVO: Juros Reais para Regime de Competência ---
+    juros_financeiros = _query_juros_reais_mes(db_path, competencia_mes)
+    lucro_liq = ebit - juros_financeiros
+    resultado_de_caixa = ebit - emp_rs
 
     # KPIs
     rl = receita_liq
@@ -1492,7 +1588,9 @@ def _calc_mes(db_path: str, ano: int, mes: int, vars_dre: "VarsDRE", _ts: float 
         "ebitda": ebitda_base,
         "ebit": ebit,
         "lucro_liq": lucro_liq,
+        "resultado_caixa": resultado_de_caixa,
         "lucro_bruto": lucro_bruto,
+        "juros_pagos": juros_financeiros,
 
         # variáveis auxiliares
         "total_var": total_var,
@@ -1637,9 +1735,10 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
 
     tooltip_lucro_liquido = (
         "Lucro Líquido\n"
-        "Resultado final após todos os custos, despesas operacionais, depreciação e gastos com empréstimos. "
-        "| Serve para: mostrar se a operação da loja + estrutura de dívidas está gerando ganho real ou prejuízo no mês.\n\n"
-        "🟢 Maior ou igual a 5% da Receita Líquida · 🟡 Entre 0% e 5% da Receita Líquida · 🔴 Menor que 0% (prejuízo)"
+        "É o resultado econômico final do mês. Representa o que sobra das vendas após descontar absolutamente tudo: "
+        "mercadorias, impostos, custos fixos, despesas operacionais, depreciação e as despesas financeiras (juros dos empréstimos).\n\n"
+        "Serve para: indicar se a operação é saudável e gera riqueza real, independente do pagamento do principal das dívidas (amortização).\n\n"
+        "🟢 Maior ou igual a 5% da Receita Líquida · 🟡 Entre 0% e 5% da Receita Líquida · 🔴 Menor que 0% (prejuízo contábil)"
     )
 
     HELP: Dict[str, str] = {
@@ -1647,7 +1746,13 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
         "Receita Líquida": "Receita após impostos e taxas sobre as vendas. | Serve para: mostrar quanto realmente entra após deduções diretas das vendas (base das margens e do Lucro Bruto).",
         "CMV": "Custo das mercadorias vendidas: faturamento ÷ markup + frete de compra (mercadorias). | Serve para: indicar o custo do que foi efetivamente vendido (driver do Lucro Bruto e da precificação).",
         "Total de Variáveis (R$)": "Soma dos custos variáveis: CMV (com frete de compra), sacolas (%), fundo de promoção (%), comissões variáveis (%). Não inclui Simples nem taxa de maquininha porque a Receita Líquida já é líquida dessas deduções.\n\nServe para: mostrar o custo que varia diretamente com as vendas e compõe a base da Margem de Contribuição.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 50% · 🟡 Entre 50% e 60% · 🔴 Maior que 60%.",
-        "Total de Saída Operacional (R$)": "Despesas de operação do mês: custos fixos + despesas administrativas/comerciais (manutenção, marketing, etc.), sem juros, CAPEX ou depreciação.\n\nServe para: medir o custo para manter a loja funcionando; base do EBITDA e da eficiência operacional.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 25% · 🟡 Entre 25% e 30% · 🔴 Maior que 30%.",
+        "Total de Saída Operacional (R$)": (
+            "Soma de todo o dinheiro necessário para manter a loja de portas abertas e vendendo. "
+            "Engloba os Custos Fixos (aluguel, salários) e as Despesas Operacionais (marketing, manutenção, limpeza).\n\n"
+            "Importante: Não inclui investimentos em obras/equipamentos (CAPEX), nem o pagamento de empréstimos ou juros.\n\n"
+            "Serve para: medir o peso da sua estrutura e é a base para calcular a geração de caixa operacional (EBITDA).\n\n"
+            "Faixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 25% · 🟡 Entre 25% e 30% · 🔴 Maior que 30%."
+        ),
         "Lucro Bruto": "Receita líquida menos o CMV. | Serve para: mostrar o ganho sobre as vendas antes das despesas operacionais (sinal da eficiência de compra e preço).",
         "Custos Fixos": "Somatório das despesas fixas do mês: aluguel/infra, folha/encargos, utilidades e assinaturas recorrentes.\n\nServe para: avaliar quanto da Receita Líquida é comprometido pela estrutura fixa e calcular o ponto de equilíbrio.\n\nFaixas de referência (sobre a Receita Líquida): 🟢 Menor ou igual a 40% · 🟡 Entre 40% e 50% · 🔴 Maior que 50%.",
         "Margem Bruta": "Quanto da receita líquida sobra após o CMV. | Serve para: medir a eficiência de precificação e compra — quanto sobra das vendas depois do CMV; base para avaliar se preço e custo estão saudáveis antes das despesas operacionais.",
@@ -2092,9 +2197,18 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               status_emoji=relacao_saidas_status),
     ], "k-efic"))
 
+    res_caixa_rs = _safe(m.get("resultado_caixa"))
+
     cards_html.append(_card("Fluxo e Endividamento", [
         _chip("Gasto c/ Empréstimos (R$ | %)", gasto_emp_display,
               status_emoji=_status_or_none(gasto_emp_status)),
+        _chip("Resultado de Caixa (Pós-Dívida)", _fmt_brl(res_caixa_rs),
+              status_emoji="🟢" if res_caixa_rs > 0 else "🔴",
+              extra_tip=(
+                  "Quanto sobra do lucro operacional após pagar a parcela CHEIA dos empréstimos. "
+                  "É a disponibilidade real de caixa gerada pela operação.\n\n"
+                  "🟢 Maior que R$ 0,00 (Sobra de Caixa) · 🔴 Menor ou igual a R$ 0,00 (Queima de Caixa)"
+              )),
         _chip("Dívida (Estoque Atual)", divida_display,
               status_emoji=_status_or_none(divida_status)),
     ], "k-fluxo"))
