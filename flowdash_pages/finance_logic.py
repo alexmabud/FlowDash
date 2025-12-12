@@ -1,432 +1,513 @@
 # flowdash_pages/finance_logic.py
 from __future__ import annotations
 
-import re
 import sqlite3
 import json
-from datetime import date, timedelta
 import pandas as pd
+from datetime import date, datetime, timedelta
 
 # ==============================================================================
-# HELPERS
+# 1. HELPERS GENÉRICOS DE SQL E DADOS
 # ==============================================================================
 
 def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame:
-    """Helper para ler SQL retornando DataFrame."""
+    """Helper curto para pandas read_sql."""
     return pd.read_sql(query, conn, params=params or ())
 
-def _carregar_tabela(caminho_banco: str, nome: str) -> pd.DataFrame:
-    """Carrega uma tabela do SQLite como DataFrame. Retorna vazio se não existir."""
-    with sqlite3.connect(caminho_banco) as conn:
-        try:
-            return _read_sql(conn, f"SELECT * FROM {nome}")
-        except Exception:
-            return pd.DataFrame()
-
-# ========= Normalização tolerante de nomes de coluna =========
-_TRANSLATE = str.maketrans(
-    "áàãâäéêèëíìîïóòõôöúùûüçÁÀÃÂÄÉÊÈËÍÌÎÏÓÒÕÔÖÚÙÛÜÇ",
-    "aaaaaeeeeiiiiooooouuuucAAAAAEEEEIIIIOOOOOUUUUC",
-)
+def _carregar_tabela(conn: sqlite3.Connection, tabela: str) -> pd.DataFrame:
+    """Carrega tabela inteira (uso com cuidado em tabelas grandes)."""
+    return pd.read_sql(f"SELECT * FROM {tabela}", conn)
 
 def _norm(s: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(s).translate(_TRANSLATE).lower())
+    """Normaliza strings para comparação (upper, strip)."""
+    return (s or "").strip().upper()
 
-def _find_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
-    if df is None or df.empty:
-        return None
-    norm_map = {_norm(c): c for c in df.columns}
-    for c in candidates:
-        hit = norm_map.get(_norm(c))
-        if hit:
-            return hit
+def _find_col(cols: list[str], candidates: list[str]) -> str | None:
+    """Encontra primeira coluna candidata existente na lista cols."""
+    c_lower = [c.lower() for c in cols]
+    for cand in candidates:
+        if cand.lower() in c_lower:
+            # retorna o nome real (case sensitive) que está no banco
+            idx = c_lower.index(cand.lower())
+            return cols[idx]
     return None
 
 def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
-    s = df[col].astype(str)
-    out = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
-    
-    # ISO com T
-    mask_iso = s.str.contains("T", na=False)
-    if mask_iso.any():
-        parsed = pd.to_datetime(s[mask_iso], utc=True, errors="coerce")
-        out.loc[mask_iso] = parsed.dt.tz_localize(None)
+    """Converte coluna para datetime, tratando erros."""
+    if col not in df.columns:
+        return pd.Series([None]*len(df), index=df.index)
+    return pd.to_datetime(df[col], errors="coerce")
 
-    mask_ymd = (~mask_iso) & s.str.match(r"^\d{4}-\d{2}-\d{2}$", na=False)
-    if mask_ymd.any():
-        out.loc[mask_ymd] = pd.to_datetime(s[mask_ymd], format="%Y-%m-%d", errors="coerce")
-
-    rest = out.isna()
-    if rest.any():
-        out.loc[rest] = pd.to_datetime(s[rest], dayfirst=True, errors="coerce")
-
-    return out
 
 # ==============================================================================
-# LOGIC
+# 2. GESTÃO DE COLUNAS DE BANCOS (DINÂMICO)
 # ==============================================================================
 
 def _get_bancos_ativos(conn: sqlite3.Connection) -> list[str]:
-    """Busca os nomes dos bancos na tabela de cadastro."""
-    try:
-        check = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bancos_cadastrados'").fetchone()
-        if not check:
-            return []
-        
-        rows = conn.execute("SELECT nome FROM bancos_cadastrados ORDER BY id").fetchall()
-        return [r[0] for r in rows if r[0]]
-    except Exception:
-        return []
-
-def _sincronizar_colunas_saldos_bancos(conn: sqlite3.Connection, bancos_ativos: list[str]):
-    """Garante que a tabela saldos_bancos tenha uma coluna para cada banco cadastrado."""
-    try:
-        conn.execute('CREATE TABLE IF NOT EXISTS saldos_bancos (data TEXT)')
-        cursor = conn.execute("SELECT * FROM saldos_bancos LIMIT 0")
-        colunas_existentes = {d[0] for d in cursor.description}
-        
-        for banco in bancos_ativos:
-            if banco not in colunas_existentes:
-                conn.execute(f'ALTER TABLE saldos_bancos ADD COLUMN "{banco}" REAL DEFAULT 0.0')
-    except Exception as e:
-        print(f"Erro ao sincronizar colunas de bancos: {e}")
-
-def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_alvo: date, bancos_ativos: list[str]) -> dict[str, float]:
-
-
     """
-    Novo Cálculo Baseado em Checkpoint (Fechamento)
-    1. Busca último fechamento válido (<= data_alvo).
-    2. Se data fechamento == data_alvo: Retorna valores salvos (Verdade Absoluta).
-    3. Se data fechamento < data_alvo: 
-       Saldo = Saldo Fechamento + Movimentos(Data Fechamento + 1 até data_alvo).
+    Retorna lista de nomes de bancos cadastrados na tabela 'bancos'.
+    Se não existir, retorna lista padrão fixa.
     """
-    if not bancos_ativos:
-        return {}
-    
-    data_alvo_str = str(data_alvo)
-    
-    # 1. Busca Checkpoint
-    # Tenta pegar colunas legadas e JSON novo
-    # Precisamos tratar o caso onde as colunas podem não existir em bancos antigos, mas o script de migração deve ter criado.
-    # Por segurança, fazemos select * ou colunas específicas se tiver certeza. 
-    # O _garantir_colunas_fechamento cria: bancos_detalhe, banco_1..4
     try:
-        row = conn.execute("""
-            SELECT data, bancos_detalhe, banco_1, banco_2, banco_3, banco_4 
-            FROM fechamento_caixa 
-            WHERE DATE(data) <= DATE(?) 
-            ORDER BY DATE(data) DESC LIMIT 1
-        """, (data_alvo_str,)).fetchone()
+        df_b = pd.read_sql("SELECT nome FROM bancos ORDER BY nome", conn)
+        if not df_b.empty:
+            return df_b["nome"].tolist()
     except Exception:
-        row = None
+        pass
+    # Fallback caso não haja tabela bancos
+    return ["Inter", "Bradesco", "InfinitePay", "Caixa"]
 
-    saldo_inicial = {b: 0.0 for b in bancos_ativos}
-    data_inicio_calc = date(2000, 1, 1)
-
-    if row:
-        r_data, r_json, r_b1, r_b2, r_b3, r_b4 = row
-        # Parse data do checkpoint
-        if isinstance(r_data, date):
-            r_date_obj = r_data
-        else:
-            try:
-                r_date_obj = date.fromisoformat(r_data)
-            except:
-                r_date_obj = date(2000, 1, 1)
-
-        # Parse valores salvos (JSON prioridade)
-        saldos_salvos = {}
-        if r_json:
-            try: 
-                saldos_salvos = json.loads(r_json)
-            except: 
-                pass
-        
-        # Fallback colunas legadas se JSON falhar
-        if not saldos_salvos:
-            # Mapeamento hardcoded baseado no fechamento.py
-            # Inter=b1, Bradesco=b2, Infinite*=b3, Caixa=b4 (geralmente b4 era outro, mas vamos focar nos principais)
-            # A melhor aposta é o nome exato. Se não tiver JSON, paciência, o saldo pode começar zerado ou aproximado.
-            map_legado = {
-                'Inter': r_b1,
-                'Bradesco': r_b2,
-                'InfinitePay': r_b3
-            }
-            for nome_banco, val in map_legado.items():
-                if val is not None:
-                    saldos_salvos[nome_banco] = float(val)
-
-        # CENÁRIO A: Dia já fechado hoje -> Retorna o salvo
-        if r_date_obj == data_alvo:
-            # Retorna apenas para bancos ativos
-            return {b: float(saldos_salvos.get(b, 0.0)) for b in bancos_ativos}
-
-        # CENÁRIO B: Checkpoint passado -> Define saldo inicial e nova data de partida
-        # A lógica do usuário pede explicitamente para filtrar onde Data > Data_Checkpoint
-        # Portanto, não usaremos mais "checkpoint + 1 day" e sim a data do checkpoint diretamente na query com operador >
-        data_base_checkpoint = r_date_obj
-        for b in bancos_ativos:
-            saldo_inicial[b] = float(saldos_salvos.get(b, 0.0))
-
-
-    # ================= CALCULAR MOVIMENTOS [> data_base_checkpoint ... <= data_alvo] =================
-    
-    dt_base_str = str(data_base_checkpoint)
-    
-    saldos = saldo_inicial.copy()
-    bancos_map = {_norm(b): b for b in bancos_ativos}
-
-    # 1. Movimentações Bancárias (Transferências)
+def _sincronizar_colunas_saldos_bancos(conn: sqlite3.Connection, bancos: list[str]) -> None:
+    """
+    Garante que a tabela 'saldos_bancos' tenha uma coluna para cada banco ativo.
+    Faz ALTER TABLE se necessário.
+    """
     try:
-        # User REQ: DATE(data) > DATE(checkpoint)
-        df_mov = _read_sql(conn, """
-            SELECT banco, tipo, valor 
-            FROM movimentacoes_bancarias 
-            WHERE DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
-            AND (observacao IS NULL OR NOT observacao LIKE 'Lançamento VENDA%')
-            AND (observacao IS NULL OR NOT observacao LIKE 'Venda%')
-        """, (dt_base_str, data_alvo_str))
-
+        # Pega colunas existentes
+        cursor = conn.execute("PRAGMA table_info(saldos_bancos)")
+        cols_existentes = {row[1] for row in cursor.fetchall()}
         
-        if not df_mov.empty:
-            df_mov['banco_norm'] = df_mov['banco'].apply(_norm)
-            df_mov['valor'] = pd.to_numeric(df_mov['valor'], errors='coerce').fillna(0.0)
-            for _, mrow in df_mov.iterrows():
-                bn = mrow['banco_norm']
-                tipo = (mrow['tipo'] or '').lower().strip()
-                val = float(mrow['valor'])
-                if bn in bancos_map:
-                    real = bancos_map[bn]
-                    if tipo == 'entrada': saldos[real] += val
-                    elif tipo == 'saida': saldos[real] -= val
-
+        for banco in bancos:
+            if banco not in cols_existentes:
+                # Adiciona coluna REAL DEFAULT 0.0
+                try:
+                    conn.execute(f'ALTER TABLE saldos_bancos ADD COLUMN "{banco}" REAL DEFAULT 0.0')
+                except Exception as e:
+                    print(f"Erro ao adicionar coluna {banco}: {e}")
     except Exception as e:
-        print(f"Erro movs: {e}")
+        print(f"Erro ao sincronizar colunas saldos_bancos: {e}")
 
-    # 2. Saídas (Despesas) - Pela Data de Pagamento (Data)
+
+# ==============================================================================
+# 3. CÁLCULO DE SALDOS ACUMULADOS (CORE LOGIC)
+# ==============================================================================
+
+def _somar_entradas_liquidas_banco(conn: sqlite3.Connection, banco_alvo: str, data_corte: date) -> float:
+    """
+    Soma 'valor_liquido' da tabela entrada onde:
+      1. banco_destino == banco_alvo
+      2. Data_Liq <= data_corte (ou Data <= data_corte para Pix/Dinheiro que cai na hora)
+    
+    CORREÇÃO APLICADA:
+    - Agora considera explicitamente o 'banco_destino' gravado na entrada.
+    - Se for PIX e tiver banco_destino, entra na conta.
+    """
     try:
-        df_saida = _read_sql(conn, """
-            SELECT Banco_Saida, Valor 
-            FROM saida 
-            WHERE DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
-            AND Banco_Saida IS NOT NULL AND TRIM(Banco_Saida) <> ''
-        """, (dt_base_str, data_alvo_str))
+        data_iso = data_corte.strftime("%Y-%m-%d")
         
-        if not df_saida.empty:
-            df_saida['banco_norm'] = df_saida['Banco_Saida'].apply(_norm)
-            df_saida['Valor'] = pd.to_numeric(df_saida['Valor'], errors='coerce').fillna(0.0)
-            for bn, val in df_saida.groupby('banco_norm')['Valor'].sum().items():
-                if bn in bancos_map:
-                    saldos[bancos_map[bn]] -= float(val)
-
-
-    except Exception as e:
-        print(f"Erro saidas: {e}")
-
-    # 3. Entradas (Vendas) - Regime de Caixa (Data_Liq)
-    try:
-        # Usa COALESCE para garantir que se Data_Liq for nula, use Data (segurança), 
-        # mas o requisito pede Data_Liq explicitamente.
-        df_vendas = _read_sql(conn, """
-            SELECT maquineta, Forma_de_Pagamento, Bandeira, Parcelas, valor_liquido 
+        # Query unificada: 
+        # Busca tudo que tem esse banco como destino e já liquidou (Data_Liq <= Hoje)
+        # COALESCE(Data_Liq, Data) garante que se Data_Liq for nulo (vendas antigas ou manuais), usa Data.
+        query = """
+            SELECT SUM(COALESCE(valor_liquido, valor, 0)) 
             FROM entrada 
-            WHERE DATE(Data_Liq) > DATE(?) AND DATE(Data_Liq) <= DATE(?)
-        """, (dt_base_str, data_alvo_str))
+            WHERE 
+                banco_destino = ? 
+                AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)
+        """
         
-        df_taxas = _read_sql(conn, "SELECT maquineta, forma_pagamento, bandeira, parcelas, banco_destino FROM taxas_maquinas")
-        
-        if not df_vendas.empty and not df_taxas.empty:
-            # Normalização (mesma lógica anterior)
-            df_vendas['k_maq'] = df_vendas['maquineta'].astype(str).str.strip().str.upper()
-            df_vendas['k_forma'] = df_vendas['Forma_de_Pagamento'].astype(str).str.strip().str.upper()
-            df_vendas['k_band'] = df_vendas['Bandeira'].astype(str).str.strip().str.upper()
-            df_vendas['k_parc'] = pd.to_numeric(df_vendas['Parcelas'], errors='coerce').fillna(1).astype(int)
-            
-            df_taxas['k_maq'] = df_taxas['maquineta'].astype(str).str.strip().str.upper()
-            df_taxas['k_forma'] = df_taxas['forma_pagamento'].astype(str).str.strip().str.upper()
-            df_taxas['k_band'] = df_taxas['bandeira'].astype(str).str.strip().str.upper()
-            df_taxas['k_parc'] = pd.to_numeric(df_taxas['parcelas'], errors='coerce').fillna(1).astype(int)
-            
-            df_merged = pd.merge(df_vendas, df_taxas[['k_maq', 'k_forma', 'k_band', 'k_parc', 'banco_destino']], 
-                                 on=['k_maq', 'k_forma', 'k_band', 'k_parc'], how='left')
-            
-            # Lógica de Inferência (Fallback) igual ao Fechamento
-            def _inferir_banco_row(r):
-                # 1. Prioridade: Banco vindo do cadastro de taxas
-                b = r['banco_destino']
-                if pd.notnull(b) and str(b).strip() != "":
-                    return b
-                
-                # 2. Fallback: Nome da Maquineta
-                m = str(r['maquineta']).upper()
-                if 'INFINITE' in m or 'INFINITY' in m: return 'InfinitePay'
-                if 'INTER' in m: return 'Inter'
-                if 'BRADESCO' in m: return 'Bradesco'
-                if 'PAGSEGURO' in m or 'PAGBANK' in m: return 'PagBank'
-                if 'MERCADO' in m: return 'Mercado Pago'
-                if 'STONE' in m or 'TON' in m: return 'Stone'
-                
-                return None
+        cur = conn.execute(query, (banco_alvo, data_iso))
+        val = cur.fetchone()[0]
+        return float(val or 0.0)
+    except Exception as e:
+        print(f"Erro ao somar entradas banco {banco_alvo}: {e}")
+        return 0.0
 
-            df_merged['banco_final'] = df_merged.apply(_inferir_banco_row, axis=1)
-            # Normaliza para comparação, mas agrupa pelo nome real para exibição
+def _somar_saidas_banco(conn: sqlite3.Connection, banco_alvo: str, data_corte: date) -> float:
+    """
+    Soma saídas da tabela 'saida' onde banco == banco_alvo e data <= data_corte.
+    """
+    try:
+        data_iso = data_corte.strftime("%Y-%m-%d")
+        # Tenta identificar coluna de banco na tabela saida
+        # Padrão: 'banco' ou 'conta' ou 'origem'
+        # Assumindo 'banco' conforme schema padrão
+        query = f"""
+            SELECT SUM(valor) 
+            FROM saida 
+            WHERE 
+                (banco = ? OR origem_dinheiro = ?)
+                AND DATE(data) <= DATE(?)
+        """
+        # Nota: origem_dinheiro geralmente é 'Caixa', mas vai que alguém botou o banco lá.
+        # Ajuste seguro: filtrar explicitamente pela coluna de banco se existir.
+        
+        # Verificação rápida de colunas
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(saida)")]
+        col_banco = "banco" if "banco" in cols else ("conta" if "conta" in cols else None)
+        
+        if not col_banco:
+            return 0.0
             
-            for nome_banco, val in df_merged.groupby('banco_final')['valor_liquido'].sum().items():
-                if not nome_banco: continue
-                n = _norm(nome_banco)
-                
-                # Se bater com um banco cadastrado, usa a chave dele
-                if n in bancos_map:
-                    chave = bancos_map[n]
-                    saldos[chave] += float(val)
+        query = f"SELECT SUM(valor) FROM saida WHERE {col_banco} = ? AND DATE(data) <= DATE(?)"
+        cur = conn.execute(query, (banco_alvo, data_iso))
+        val = cur.fetchone()[0]
+        return float(val or 0.0)
+        
+    except Exception:
+        return 0.0
+
+def _somar_movimentacoes_bancarias(conn: sqlite3.Connection, banco_alvo: str, data_corte: date) -> float:
+    """
+    Soma movimentações da tabela 'movimentacoes_bancarias'.
+    Entrada (+), Saída (-).
+    
+    CORREÇÃO APLICADA:
+    - Exclui registros onde origem='saida' para evitar DUPLICIDADE com a tabela 'saida'.
+    - Exclui registros onde origem='entrada' para evitar DUPLICIDADE com a tabela 'entrada'.
+    - Considera apenas transferências, ajustes, depósitos, etc.
+    """
+    try:
+        data_iso = data_corte.strftime("%Y-%m-%d")
+        
+        # Soma ENTRADAS (tipo='entrada') que NÃO sejam de vendas/saídas já contadas
+        q_in = """
+            SELECT SUM(valor) FROM movimentacoes_bancarias 
+            WHERE 
+                banco = ? 
+                AND tipo = 'entrada'
+                AND DATE(data) <= DATE(?)
+                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada', 'venda', 'saida') 
+        """
+        # Nota: 'origem'='saida' numa entrada seria estorno? Raro, mas por segurança filtramos.
+        # O mais importante é filtrar origem='saida' nas SAÍDAS.
+
+        val_in = conn.execute(q_in, (banco_alvo, data_iso)).fetchone()[0] or 0.0
+
+        # Soma SAÍDAS (tipo='saida')
+        # IMPORTANTE: Ignorar origem='saida' pois elas já estão na tabela `saida` e são somadas em _somar_saidas_banco
+        q_out = """
+            SELECT SUM(valor) FROM movimentacoes_bancarias 
+            WHERE 
+                banco = ? 
+                AND tipo = 'saida'
+                AND DATE(data) <= DATE(?)
+                AND LOWER(COALESCE(origem,'')) != 'saida'
+        """
+        val_out = conn.execute(q_out, (banco_alvo, data_iso)).fetchone()[0] or 0.0
+        
+        return float(val_in - val_out)
+        
+    except Exception as e:
+        print(f"Erro mov bancarias: {e}")
+        return 0.0
+
+
+def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, bancos_ativos: list[str]) -> dict[str, float]:
+    """
+    Calcula o saldo acumulado de cada banco até data_ref.
+    Lógica de Otimização (Checkpoint):
+      1. Busca o último fechamento (snapshot) em 'saldos_bancos' <= data_ref.
+      2. Se achar, usa esse valor como base e soma apenas as movimentações (entrada, saida, movs)
+         que ocorreram DEPOIS do snapshot ATÉ data_ref.
+      3. Se não achar snapshot anterior, soma tudo desde o início dos tempos.
+    """
+    saldos = {b: 0.0 for b in bancos_ativos}
+    data_iso = data_ref.strftime("%Y-%m-%d")
+
+    try:
+        # 1. Busca último snapshot válido (fechamento de banco)
+        #    Ordena por data DESC para pegar o mais recente anterior ou igual a hoje
+        query_snap = f"""
+            SELECT * FROM saldos_bancos 
+            WHERE DATE(data) <= DATE(?) 
+            ORDER BY data DESC LIMIT 1
+        """
+        df_snap = pd.read_sql(query_snap, conn, params=(data_iso,))
+        
+        data_inicio_calc = None
+        base_saldos = {}
+
+        if not df_snap.empty:
+            # Temos um ponto de partida
+            row = df_snap.iloc[0]
+            snap_date_str = str(row['data'])
+            snap_date = pd.to_datetime(snap_date_str).date()
+            
+            # Carrega saldos do snapshot
+            for b in bancos_ativos:
+                if b in df_snap.columns:
+                    base_saldos[b] = float(row[b] or 0.0)
                 else:
-                    # Se for novo (inferred), adiciona dinamicamente
-                    # Garante Title Case para ficar bonito
-                    chave = str(nome_banco).strip()
-                    saldos[chave] = saldos.get(chave, 0.0) + float(val)
+                    base_saldos[b] = 0.0
+            
+            # Se o snapshot for EXATAMENTE a data_ref, e já foi fechado, retornamos ele?
+            # Depende. Se o usuário quer ver o "projetado" do dia aberto, precisamos somar o movimento do dia.
+            # Se 'saldos_bancos' tem registro hoje, assume-se que é o saldo FINAL ou INICIAL? 
+            # No FlowDash, saldos_bancos geralmente é gravado no FECHAMENTO.
+            # Então, se DATE(data) == data_ref, já temos o valor fechado.
+            
+            if snap_date == data_ref:
+                return base_saldos # Retorna direto o valor fechado do dia
+            
+            # Caso contrário, partimos do snapshot e somamos o delta
+            saldos = base_saldos
+            data_inicio_calc = snap_date # Exclusivo (movimentos > data_inicio_calc)
+        
+        else:
+            # Sem snapshot, calcula do zero (data mínima)
+            data_inicio_calc = date(2000, 1, 1)
+
+        # 2. Calcula Movimentações no Intervalo (Data Snapshot < Data <= Data Ref)
+        #    Precisamos somar Entradas, Saídas e Movimentações que ocorreram APÓS o snapshot
+        
+        # Filtro de data para as queries delta
+        # OBS: Se data_inicio_calc for muito antiga, pega tudo.
+        # Se veio de snapshot, queremos: mov.data > snap_date AND mov.data <= data_ref
+        
+        str_inicio = data_inicio_calc.strftime("%Y-%m-%d")
+        
+        for b in bancos_ativos:
+            # A) Entradas (Vendas Liquidadas + Pix Direto)
+            q_ent = """
+                SELECT SUM(COALESCE(valor_liquido, valor, 0)) FROM entrada
+                WHERE banco_destino = ? 
+                AND DATE(COALESCE(Data_Liq, Data)) > DATE(?)
+                AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)
+            """
+            val_ent = conn.execute(q_ent, (b, str_inicio, data_iso)).fetchone()[0] or 0.0
+            
+            # B) Saídas (Despesas)
+            # Tenta achar coluna de banco
+            cols_saida = [r[1] for r in conn.execute("PRAGMA table_info(saida)")]
+            col_b_saida = "banco" if "banco" in cols_saida else "conta"
+            
+            if col_b_saida:
+                q_sai = f"""
+                    SELECT SUM(valor) FROM saida
+                    WHERE {col_b_saida} = ?
+                    AND DATE(data) > DATE(?)
+                    AND DATE(data) <= DATE(?)
+                """
+                val_sai = conn.execute(q_sai, (b, str_inicio, data_iso)).fetchone()[0] or 0.0
+            else:
+                val_sai = 0.0
+            
+            # C) Movimentações Bancárias (Transferências/Ajustes) - Excluindo duplicação de Saída/Entrada
+            q_mov_in = """
+                SELECT SUM(valor) FROM movimentacoes_bancarias
+                WHERE banco = ? AND tipo = 'entrada'
+                AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada', 'venda', 'saida')
+            """
+            v_mov_in = conn.execute(q_mov_in, (b, str_inicio, data_iso)).fetchone()[0] or 0.0
+            
+            q_mov_out = """
+                SELECT SUM(valor) FROM movimentacoes_bancarias
+                WHERE banco = ? AND tipo = 'saida'
+                AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+                AND LOWER(COALESCE(origem,'')) != 'saida'
+            """
+            v_mov_out = conn.execute(q_mov_out, (b, str_inicio, data_iso)).fetchone()[0] or 0.0
+            
+            # Saldo Final = Saldo Inicial (Snapshot) + Entradas - Saídas + Mov_Ent - Mov_Sai
+            saldos[b] = saldos[b] + val_ent - val_sai + v_mov_in - v_mov_out
 
     except Exception as e:
-        print(f"Erro entradas: {e}")
-
-    return {k: round(v, 2) for k, v in saldos.items()}
-
-def _calcular_saldo_projetado(conn: sqlite3.Connection, data_alvo: date) -> tuple[float, float]:
-
-
-    data_alvo_str = str(data_alvo)
+        print(f"Erro calculo saldos bancos acumulados: {e}")
     
+    return saldos
+
+
+# ==============================================================================
+# 4. CÁLCULO DE CAIXA / CAIXA 2 (SNAPSHOT E PROJEÇÃO)
+# ==============================================================================
+
+def _ultimo_caixas_ate(caminho_banco: str, data_limite: date) -> tuple[float, float, date | None]:
+    """
+    Retorna (caixa_total, caixa2_total, data_ref_do_snapshot).
+    Busca o snapshot mais recente em saldos_caixas <= data_limite.
+    """
+    with sqlite3.connect(caminho_banco) as conn:
+        data_iso = data_limite.strftime("%Y-%m-%d")
+        row = conn.execute("""
+            SELECT caixa_total, caixa2_total, data
+            FROM saldos_caixas
+            WHERE DATE(data) <= DATE(?)
+            ORDER BY data DESC
+            LIMIT 1
+        """, (data_iso,)).fetchone()
+        
+        if row:
+            d_ref = pd.to_datetime(row[2]).date() if row[2] else None
+            return (float(row[0] or 0.0), float(row[1] or 0.0), d_ref)
+        
+    return (0.0, 0.0, None)
+
+def _calcular_saldo_projetado(conn: sqlite3.Connection, data_ref: date) -> tuple[float, float]:
+    """
+    Retorna (saldo_caixa_projetado, saldo_caixa2_projetado) para o dia data_ref.
+    Lógica:
+      1. Pega último snapshot <= data_ref.
+      2. Se snapshot == data_ref, retorna ele (já fechado/atualizado).
+      3. Se snapshot < data_ref, soma movimentações (entradas/saidas em dinheiro) no intervalo.
+    """
+    # 1. Snapshot
+    data_iso = data_ref.strftime("%Y-%m-%d")
     row = conn.execute("""
-        SELECT DATE(data), caixa_total, caixa2_total FROM saldos_caixas
-        WHERE DATE(data) <= DATE(?) ORDER BY DATE(data) DESC, ROWID DESC LIMIT 1
-    """, (data_alvo_str,)).fetchone()
+        SELECT caixa_total, caixa2_total, data
+        FROM saldos_caixas
+        WHERE DATE(data) <= DATE(?)
+        ORDER BY data DESC LIMIT 1
+    """, (data_iso,)).fetchone()
+    
+    saldo_cx = 0.0
+    saldo_cx2 = 0.0
+    data_inicio = date(2000, 1, 1)
     
     if row:
-        data_base, base_caixa, base_caixa2 = row[0], float(row[1] or 0), float(row[2] or 0)
-    else:
-        data_base, base_caixa, base_caixa2 = '2000-01-01', 0.0, 0.0
-
-    vendas_dinheiro = conn.execute("""
-        SELECT SUM(Valor) FROM entrada WHERE TRIM(UPPER(Forma_de_Pagamento)) = 'DINHEIRO'
-        AND DATE(Data) > DATE(?) AND DATE(Data) <= DATE(?)
-    """, (data_base, data_alvo_str)).fetchone()[0] or 0.0
+        saldo_cx = float(row[0] or 0.0)
+        saldo_cx2 = float(row[1] or 0.0)
+        snap_date = pd.to_datetime(row[2]).date()
+        
+        if snap_date == data_ref:
+            # Se já existe registro no dia, assume que ele contém o acumulado até o momento
+            # (pois a página de caixa atualiza o snapshot em tempo real quando salva)
+            return saldo_cx, saldo_cx2
+            
+        data_inicio = snap_date
     
-    saidas_caixa = conn.execute("""
-        SELECT SUM(Valor) FROM saida WHERE Origem_Dinheiro = 'Caixa'
-        AND DATE(Data) > DATE(?) AND DATE(Data) <= DATE(?)
-    """, (data_base, data_alvo_str)).fetchone()[0] or 0.0
+    str_inicio = data_inicio.strftime("%Y-%m-%d")
     
-    saidas_caixa2 = conn.execute("""
-        SELECT SUM(Valor) FROM saida WHERE Origem_Dinheiro IN ('Caixa 2', 'Caixa 2 (Casa)')
+    # 2. Delta (Movimentações após snapshot até hoje)
+    
+    # A) Entradas (Dinheiro) -> Vendas em Dinheiro
+    #    Geralmente Venda em Dinheiro vai para "Caixa" (loja).
+    #    Caixa 2 geralmente é manual.
+    
+    venda_din = conn.execute("""
+        SELECT SUM(valor) FROM entrada
+        WHERE UPPER(Forma_de_Pagamento) = 'DINHEIRO'
         AND DATE(Data) > DATE(?) AND DATE(Data) <= DATE(?)
-    """, (data_base, data_alvo_str)).fetchone()[0] or 0.0
-
-    def _calc_movs(nome):
-        e = conn.execute("""
-            SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco = ? AND tipo = 'entrada'
+    """, (str_inicio, data_iso)).fetchone()[0] or 0.0
+    
+    # B) Saídas (Dinheiro)
+    #    Precisamos ver a origem_dinheiro ('Caixa' ou 'Caixa 2')
+    
+    saida_cx = conn.execute("""
+        SELECT SUM(valor) FROM saida
+        WHERE origem_dinheiro = 'Caixa'
+        AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+    """, (str_inicio, data_iso)).fetchone()[0] or 0.0
+    
+    saida_cx2 = conn.execute("""
+        SELECT SUM(valor) FROM saida
+        WHERE origem_dinheiro = 'Caixa 2'
+        AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
+    """, (str_inicio, data_iso)).fetchone()[0] or 0.0
+    
+    # C) Movimentações Bancárias (que afetam caixa)
+    #    Ex: Sangria (Saída de Caixa), Suprimento (Entrada), Transferencias
+    
+    def somar_mov(banco_nome):
+        # Entradas
+        mi = conn.execute("""
+            SELECT SUM(valor) FROM movimentacoes_bancarias
+            WHERE banco = ? AND tipo='entrada'
             AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
-        """, (nome, data_base, data_alvo_str)).fetchone()[0] or 0.0
-        s = conn.execute("""
-            SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco = ? AND tipo = 'saida'
+            AND LOWER(COALESCE(origem,'')) NOT IN ('entrada','venda','saida')
+        """, (banco_nome, str_inicio, data_iso)).fetchone()[0] or 0.0
+        
+        # Saidas
+        mo = conn.execute("""
+            SELECT SUM(valor) FROM movimentacoes_bancarias
+            WHERE banco = ? AND tipo='saida'
             AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)
-        """, (nome, data_base, data_alvo_str)).fetchone()[0] or 0.0
-        return e - s
+            AND LOWER(COALESCE(origem,'')) != 'saida'
+        """, (banco_nome, str_inicio, data_iso)).fetchone()[0] or 0.0
+        return mi - mo
 
-    movs_caixa = _calc_movs('Caixa')
-    movs_caixa2 = _calc_movs('Caixa 2')
-
-    sys_caixa = base_caixa + float(vendas_dinheiro) - float(saidas_caixa) + float(movs_caixa)
-    sys_caixa2 = base_caixa2 - float(saidas_caixa2) + float(movs_caixa2)
+    delta_cx = somar_mov('Caixa')
+    delta_cx2 = somar_mov('Caixa 2')
     
-    return round(sys_caixa, 2), round(sys_caixa2, 2)
-
-# ========================= HELPERS DE FECHAMENTO =========================
-def _dinheiro_e_pix_por_data(caminho_banco: str, data_sel: date) -> tuple[float, float]:
-    df = _carregar_tabela(caminho_banco, "entrada")
-    if df.empty: return 0.0, 0.0
-    c_data = _find_col(df, ["Data", "data", "data_venda"])
-    c_forma = _find_col(df, ["Forma_de_Pagamento", "forma"])
-    c_val = _find_col(df, ["valor_liquido", "Valor", "valor"])
-    if not (c_data and c_forma and c_val): return 0.0, 0.0
+    final_cx = saldo_cx + venda_din - saida_cx + delta_cx
+    final_cx2 = saldo_cx2 - saida_cx2 + delta_cx2 # Venda dinheiro costuma ir só pro Caixa 1, salvo configuração
     
-    df[c_data] = _parse_date_col(df, c_data)
-    df_day = df[df[c_data].dt.date == data_sel].copy()
-    if df_day.empty: return 0.0, 0.0
-    
-    formas = df_day[c_forma].astype(str).str.upper().str.strip()
-    vals = pd.to_numeric(df_day[c_val], errors="coerce").fillna(0.0)
-    
-    return float(vals[formas == "DINHEIRO"].sum()), float(vals[formas == "PIX"].sum())
+    return final_cx, final_cx2
 
-def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_sel: date) -> float:
-    df = _carregar_tabela(caminho_banco, "entrada")
-    if df.empty: return 0.0
-    c_data_liq = _find_col(df, ["Data_Liq", "data_liq", "dt_liq"])
-    c_forma = _find_col(df, ["Forma_de_Pagamento", "forma"])
-    c_val = _find_col(df, ["valor_liquido", "Valor", "valor"])
-    if not (c_data_liq and c_forma and c_val): return 0.0
-    
-    df[c_data_liq] = _parse_date_col(df, c_data_liq)
-    df_day = df[df[c_data_liq].dt.date == data_sel].copy()
-    if df_day.empty: return 0.0
-    
-    formas = df_day[c_forma].astype(str).str.upper().str.strip()
-    vals = pd.to_numeric(df_day[c_val], errors="coerce").fillna(0.0)
-    is_cartao = formas.isin(["DEBITO", "CREDITO", "DÉBITO", "CRÉDITO", "LINK_PAGAMENTO"])
-    return float(vals[is_cartao].sum())
 
-def _saidas_total_do_dia(caminho_banco: str, data_sel: date) -> float:
-    df = _carregar_tabela(caminho_banco, "saida")
-    if df.empty: return 0.0
-    c_data = _find_col(df, ["data", "dt"])
-    c_val = _find_col(df, ["valor", "Valor"])
-    if not (c_data and c_val): return 0.0
-    df[c_data] = _parse_date_col(df, c_data)
-    dia = df[df[c_data].dt.date == data_sel]
-    return float(pd.to_numeric(dia[c_val], errors="coerce").fillna(0.0).sum())
+# ==============================================================================
+# 5. HELPERS ESPECÍFICOS PARA PÁGINA DE FECHAMENTO (UI)
+# ==============================================================================
 
-def _correcoes_caixa_do_dia(caminho_banco: str, data_sel: date) -> tuple[float, float]:
-    df = _carregar_tabela(caminho_banco, "correcao_caixa")
-    if df.empty: return 0.0, 0.0
-    c_data = _find_col(df, ["data", "dt"])
-    c_val = _find_col(df, ["valor", "Valor"])
-    if not (c_data and c_val): return 0.0, 0.0
-    df[c_data] = _parse_date_col(df, c_data)
-    
-    dia = df[df[c_data].dt.date == data_sel]
-    ate = df[df[c_data].dt.date <= data_sel]
-    
-    return (
-        float(pd.to_numeric(dia[c_val], errors="coerce").sum()),
-        float(pd.to_numeric(ate[c_val], errors="coerce").sum())
-    )
-
-def _carregar_fechamento_existente(conn: sqlite3.Connection, data_alvo: date) -> dict | None:
-    try:
-        row = conn.execute("SELECT * FROM fechamento_caixa WHERE DATE(data)=DATE(?) ORDER BY id DESC LIMIT 1", (str(data_alvo),)).fetchone()
-        if not row: return None
-        cols = [d[0] for d in conn.execute("SELECT * FROM fechamento_caixa LIMIT 0").description]
-        return dict(zip(cols, row))
-    except:
-        return None
-
-def _verificar_fechamento_dia(conn: sqlite3.Connection, data_alvo: date) -> bool:
-    row = conn.execute("SELECT 1 FROM fechamento_caixa WHERE DATE(data) = DATE(?) LIMIT 1", (str(data_alvo),)).fetchone()
-    return bool(row)
-
-# ========================= COMPATIBILIDADE DASHBOARD =========================
-
-def _somar_bancos_totais(caminho_banco: str, data_sel: date) -> dict[str, float]:
-    """Compatibilidade: Retorna totais acumulados dos bancos."""
+def _dinheiro_e_pix_por_data(caminho_banco: str, data_ref: date) -> tuple[float, float]:
+    """Retorna total de vendas DINHEIRO e PIX na data especifica (sem acumular)."""
     with sqlite3.connect(caminho_banco) as conn:
-        bancos = _get_bancos_ativos(conn)
-        return _get_saldos_bancos_acumulados(conn, data_sel, bancos)
+        data_str = str(data_ref)
+        # Dinheiro
+        vd = conn.execute("""
+            SELECT SUM(valor) FROM entrada 
+            WHERE UPPER(Forma_de_Pagamento) = 'DINHEIRO' 
+            AND DATE(Data) = DATE(?)
+        """, (data_str,)).fetchone()[0] or 0.0
+        
+        # Pix (Total do dia, independente se foi pra banco ou caixa, para exibição no card)
+        vp = conn.execute("""
+            SELECT SUM(valor) FROM entrada 
+            WHERE UPPER(Forma_de_Pagamento) = 'PIX' 
+            AND DATE(Data) = DATE(?)
+        """, (data_str,)).fetchone()[0] or 0.0
+        
+        return float(vd), float(vp)
 
-def _ultimo_caixas_ate(caminho_banco: str, data_sel: date) -> tuple[float, float, date | None]:
-    """Compatibilidade: Retorna saldo de caixa (sistema) e data ref."""
+def _cartao_d1_liquido_por_data_liq(caminho_banco: str, data_liq_ref: date) -> float:
+    """
+    Soma valor liquido de cartões (exclui dinheiro/pix) cuja Data_Liq seja data_liq_ref.
+    """
+    with sqlite3.connect(caminho_banco) as conn:
+        d_str = str(data_liq_ref)
+        val = conn.execute("""
+            SELECT SUM(valor_liquido) FROM entrada
+            WHERE DATE(Data_Liq) = DATE(?)
+            AND UPPER(Forma_de_Pagamento) NOT IN ('DINHEIRO', 'PIX')
+        """, (d_str,)).fetchone()[0] or 0.0
+        return float(val)
+
+def _saidas_total_do_dia(caminho_banco: str, data_ref: date) -> float:
+    with sqlite3.connect(caminho_banco) as conn:
+        val = conn.execute("SELECT SUM(valor) FROM saida WHERE DATE(data)=DATE(?)", (str(data_ref),)).fetchone()[0]
+        return float(val or 0.0)
+
+def _correcoes_caixa_do_dia(caminho_banco: str, data_ref: date) -> tuple[float, float]:
+    """
+    Retorna (correcao_dia, correcao_acumulada_ate_hoje).
+    Lê tabela 'fechamento_caixa'.
+    """
     try:
         with sqlite3.connect(caminho_banco) as conn:
-            c1, c2 = _calcular_saldo_projetado(conn, data_sel)
-            return (c1, c2, data_sel)
-    except Exception:
-        return (0.0, 0.0, None)
+            # Correção do dia
+            c_dia = conn.execute(
+                "SELECT correcao FROM fechamento_caixa WHERE DATE(data)=DATE(?)", 
+                (str(data_ref),)
+            ).fetchone()
+            val_dia = float(c_dia[0]) if c_dia else 0.0
+            
+            # Acumulado
+            c_acum = conn.execute(
+                "SELECT SUM(correcao) FROM fechamento_caixa WHERE DATE(data) <= DATE(?)",
+                (str(data_ref),)
+            ).fetchone()
+            val_acum = float(c_acum[0]) if c_acum else 0.0
+            
+            return val_dia, val_acum
+    except:
+        return 0.0, 0.0
+
+def _carregar_fechamento_existente(conn: sqlite3.Connection, data_ref: date) -> dict | None:
+    try:
+        df = pd.read_sql(f"SELECT * FROM fechamento_caixa WHERE DATE(data)=DATE(?)", conn, params=(str(data_ref),))
+        if not df.empty:
+            return df.iloc[0].to_dict()
+    except:
+        pass
+    return None
+
+def _verificar_fechamento_dia(conn: sqlite3.Connection, data_ref: date) -> bool:
+    try:
+        row = conn.execute("SELECT 1 FROM fechamento_caixa WHERE DATE(data)=DATE(?)", (str(data_ref),)).fetchone()
+        return bool(row)
+    except:
+        return False
+
+def _somar_bancos_totais(saldos: dict) -> float:
+    return sum(saldos.values())
