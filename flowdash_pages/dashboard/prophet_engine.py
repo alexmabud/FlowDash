@@ -295,3 +295,78 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
             font=dict(size=14, color="red")
         )
         return fig, pd.DataFrame(), {'error': str(e)}
+
+
+def calcular_sazonalidade_semanal(df_vendas_bruto: pd.DataFrame) -> list[float]:
+    """
+    Calcula a % de representatividade média de cada dia da semana (0=Seg, 6=Dom).
+    Retorna uma lista de 7 floats que somam 100.0.
+    """
+    if df_vendas_bruto.empty:
+        return [14.3] * 7  # Retorna distribuição igual se não houver dados
+
+    df = df_vendas_bruto.copy()
+    # Garante coluna de data
+    cols_lower = {c.lower(): c for c in df.columns}
+    col_data = next((cols_lower[c] for c in ['data', 'data_venda', 'dt_venda', 'date'] if c in cols_lower), None)
+    col_valor = next((cols_lower[c] for c in ['valor', 'valor_total', 'vlr', 'total'] if c in cols_lower), None)
+
+    if not col_data or not col_valor:
+        return [14.3] * 7
+
+    df['ds'] = pd.to_datetime(df[col_data], errors='coerce')
+    df['y'] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
+    df = df.dropna(subset=['ds'])
+    
+    # Filtra últimos 12 meses para pegar sazonalidade recente
+    data_corte = df['ds'].max() - pd.DateOffset(months=12)
+    df = df[df['ds'] >= data_corte]
+
+    df['weekday'] = df['ds'].dt.weekday  # 0=Segunda, 6=Domingo
+    
+    # Soma total por dia da semana
+    agrupado = df.groupby('weekday')['y'].sum()
+    total = agrupado.sum()
+    
+    percentuais = []
+    for dia in range(7):
+        val = agrupado.get(dia, 0.0)
+        pct = (val / total * 100.0) if total > 0 else 0.0
+        percentuais.append(pct)
+        
+    # Ajuste fino para somar exatamente 100% (arredondamento)
+    soma_atual = sum(percentuais)
+    if soma_atual > 0:
+        fator = 100.0 / soma_atual
+        percentuais = [p * fator for p in percentuais]
+    else:
+        percentuais = [100/7] * 7
+        
+    return percentuais
+
+def calcular_share_usuario(df_vendas_bruto: pd.DataFrame, nome_usuario: str) -> float:
+    """
+    Calcula a % que este usuário representa do total de vendas da loja.
+    """
+    if df_vendas_bruto.empty or not nome_usuario:
+        return 100.0
+        
+    if nome_usuario.upper() == "LOJA":
+        return 100.0
+
+    df = df_vendas_bruto.copy()
+    # Tenta achar coluna de usuário/vendedor
+    cols_lower = {c.lower(): c for c in df.columns}
+    col_user = next((cols_lower[c] for c in ['usuario', 'vendedor', 'user'] if c in cols_lower), None)
+    col_valor = next((cols_lower[c] for c in ['valor', 'valor_total'] if c in cols_lower), None)
+
+    if not col_user or not col_valor:
+        return 100.0 # Fallback
+
+    total_loja = df[col_valor].sum()
+    total_user = df[df[col_user].astype(str) == nome_usuario][col_valor].sum()
+
+    if total_loja == 0:
+        return 0.0
+        
+    return (total_user / total_loja) * 100.0
