@@ -390,9 +390,10 @@ def pagina_fechamento_caixa(caminho_banco: str):
                 cursor.execute("DELETE FROM saldos_bancos WHERE DATE(data)=DATE(?)", (str(data_sel),))
                 cursor.execute("INSERT INTO saldos_bancos (data) VALUES (?)", (str(data_sel),))
                 
-                for b_col, delta in bancos_deltas.items():
-                    if abs(delta) > 0.0001:
-                        cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = COALESCE("{b_col}",0) + ? WHERE DATE(data)=DATE(?)', (delta, str(data_sel)))
+                # Ajuste: Salva o valor REAL (absoluto) informado pelo usuário, ignorando o delta.
+                for b_col, val_real in real_bancos.items():
+                    # Garante que o valor gravado seja exatamente o que o usuário conferiu
+                    cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = ? WHERE DATE(data)=DATE(?)', (float(val_real), str(data_sel)))
                          
                 conn.commit()
                 st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
