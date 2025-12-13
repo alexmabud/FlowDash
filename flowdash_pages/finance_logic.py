@@ -152,7 +152,7 @@ def _somar_movimentacoes_bancarias(conn: sqlite3.Connection, banco_alvo: str, da
                 banco = ? 
                 AND tipo = 'entrada'
                 AND DATE(data) <= DATE(?)
-                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada', 'venda', 'saida', 'pix') 
+                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada', 'venda', 'saida', 'pix', 'lancamentos') 
         """
         val_in = conn.execute(q_in, (banco_alvo, data_iso)).fetchone()[0] or 0.0
 
@@ -247,7 +247,7 @@ def _somar_movimentacoes_delta(conn, banco, inicio, fim):
     try:
         qi = """SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco=? AND tipo='entrada'
                 AND DATE(data)>DATE(?) AND DATE(data)<=DATE(?)
-                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada','venda','saida', 'pix')"""
+                AND LOWER(COALESCE(origem,'')) NOT IN ('entrada','venda','saida', 'pix', 'lancamentos')"""
         vi = conn.execute(qi, (banco, inicio, fim)).fetchone()[0] or 0.0
         
         qo = """SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco=? AND tipo='saida'
