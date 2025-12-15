@@ -758,15 +758,33 @@ def render_chips_principais(
     v_best_ano_ytd = _sum_ytd(df, best_ano, mes_atual, dia_atual) if best_ano else 0.0
     kpi_amy = _fmt_kpi_html(vendas_ano, v_best_ano_ytd)
 
+    # --- Média Histórica do Dia (Sazonalidade Diária) ---
+    # Filtra vendas em dias iguais ao de hoje (mesmo dia e mês) em anos anteriores
+    # Ex: Média de vendas de todos os dias "15/12" da história
+    mask_hist_dia = (df["Data"].dt.day == dia_atual) & (df["Data"].dt.month == mes_atual)
+    df_hist_dia = df.loc[mask_hist_dia]
+    
+    if not df_hist_dia.empty:
+        soma_hist_dia = float(df_hist_dia["Valor"].sum())
+        qtde_anos_dia = df_hist_dia["ano"].nunique()
+        media_historica_dia = soma_hist_dia / qtde_anos_dia if qtde_anos_dia > 0 else 0.0
+    else:
+        media_historica_dia = 0.0
+
     # --- Renderização ---
     st.markdown("## Indicadores de Vendas")
 
     render_card_rows(
         "📊 Vendas & Saldo",
         [
-            [("Vendas do dia", vendas_dia, True), ("Vendas do mês", vendas_mes, True), ("Vendas do ano", vendas_ano, True)],
+            [
+                ("Vendas do dia", vendas_dia, True),
+                (f"Média Histórica ({dia_atual:02d}/{mes_atual:02d})", media_historica_dia, True),
+                ("Vendas do mês", vendas_mes, True),
+                ("Vendas do ano", vendas_ano, True)
+            ],
             [("Saldo disponível", saldo_disp, True)],
-        ],
+        ]
     )
 
     render_card_rows(
