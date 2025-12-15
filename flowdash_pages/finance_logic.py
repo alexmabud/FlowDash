@@ -197,35 +197,34 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, banc
 
     try:
         # Busca snapshot
-        query_snap = "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?) ORDER BY data DESC LIMIT 1"
-        df_snap = pd.read_sql(query_snap, conn, params=(data_iso,))
+        # Busca snapshot (pegamos os 5 últimos para tentar achar um válido caso o mais recente seja de um dia aberto)
+        query_snap = "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?) ORDER BY data DESC LIMIT 5"
+        df_snaps = pd.read_sql(query_snap, conn, params=(data_iso,))
         
         data_inicio_calc = date(2000, 1, 1)
 
-        if not df_snap.empty:
-            row = df_snap.iloc[0]
+        # Itera sobre os candidatos para achar o "checkpoint" confiável
+        for idx, row in df_snaps.iterrows():
             snap_date = pd.to_datetime(str(row['data'])).date()
             
-            for b in bancos_reais:
-                saldos[b] = float(row[b] or 0.0) if b in df_snap.columns else 0.0
-            
-            
-            # CORREÇÃO CRÍTICA: Só aceita o snapshot da PRÓPRIA data se o dia estiver FECHADO.
-            # Se estiver ABERTO, significa que o snapshot é velho/stale (ex: fechamento cancelado ou em andamento).
-            is_closed = _verificar_fechamento_dia(conn, data_ref)
-            
+            # Se for o próprio dia, só aceita se estiver fechado
             if snap_date == data_ref:
-                if is_closed:
+                if _verificar_fechamento_dia(conn, data_ref):
+                    # É válido (dia fechado)
+                    for b in bancos_reais:
+                        saldos[b] = float(row[b] or 0.0) if b in df_snaps.columns else 0.0
                     return saldos
-                # Se não está fechado, IGNORA esse snapshot e busca um anterior (ou calcula do zero se não houver anterior)
-                # Como o loop abaixo começa de 'data_inicio_calc', precisamos recuar a busca?
-                # A query original pegou o "LIMIT 1". Se esse é o stale, ele atrapalha.
-                # Solução: Buscar snapshot ANTERIOR a data_ref se o dia estiver aberto.
-                pass
+                else:
+                    # Inválido/Stale, continua procurando um anterior
+                    continue
             
-            # Se o snapshot for menor que data_ref, usamos ele como base normalmente.
+            # Se for data passada, aceitamos como checkpoint
             if snap_date < data_ref:
-                data_inicio_calc = snap_date 
+                for b in bancos_reais:
+                    saldos[b] = float(row[b] or 0.0) if b in df_snaps.columns else 0.0
+                data_inicio_calc = snap_date
+                break # Encontrou um checkpoint válido, para de recuar
+ 
 
         str_inicio = data_inicio_calc.strftime("%Y-%m-%d")
         
