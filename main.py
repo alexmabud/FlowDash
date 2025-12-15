@@ -575,9 +575,6 @@ def _call_page(module_path: str) -> None:
 # Login (visual igual ao PDV: título centralizado + formulário estreito)
 # -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
-
-
-if not st.session_state.usuario_logado:
     aplicar_branding(is_login=True)
 
     # Coluna central para título + formulário
