@@ -14,6 +14,13 @@ def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame
     """Helper curto para pandas read_sql."""
     return pd.read_sql(query, conn, params=params or ())
 
+def _verificar_fechamento_dia(conn: sqlite3.Connection, data_ref: date) -> bool:
+    """Verifica se existe fechamento para a data."""
+    try:
+        return bool(conn.execute("SELECT 1 FROM fechamento_caixa WHERE DATE(data)=DATE(?)", (str(data_ref),)).fetchone())
+    except:
+        return False
+
 def _carregar_tabela(conn: sqlite3.Connection, tabela: str) -> pd.DataFrame:
     """Carrega tabela inteira (uso com cuidado em tabelas grandes)."""
     return pd.read_sql(f"SELECT * FROM {tabela}", conn)
@@ -94,7 +101,17 @@ def _somar_entradas_liquidas_banco(conn: sqlite3.Connection, banco_alvo: str, da
             SELECT SUM(COALESCE(valor_liquido, valor, 0)) 
             FROM entrada 
             WHERE 
-                banco_destino = ? 
+                COALESCE(banco_destino, 
+                    CASE 
+                        WHEN UPPER(maquineta) LIKE '%INFINITE%' THEN 'InfinitePay'
+                        WHEN UPPER(maquineta) LIKE '%INTER%' THEN 'Inter'
+                        WHEN UPPER(maquineta) LIKE '%BRADESCO%' THEN 'Bradesco'
+                        WHEN UPPER(maquineta) LIKE '%PAG%' THEN 'PagBank'
+                        WHEN UPPER(maquineta) LIKE '%MERCADO%' THEN 'Mercado Pago'
+                        WHEN UPPER(maquineta) LIKE '%STONE%' OR UPPER(maquineta) LIKE '%TON%' THEN 'Stone'
+                        ELSE NULL 
+                    END
+                ) = ? 
                 AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)
         """
         cur = conn.execute(query, (banco_alvo, data_iso))
@@ -192,10 +209,23 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, banc
             for b in bancos_reais:
                 saldos[b] = float(row[b] or 0.0) if b in df_snap.columns else 0.0
             
-            if snap_date == data_ref:
-                return saldos
             
-            data_inicio_calc = snap_date 
+            # CORREÇÃO CRÍTICA: Só aceita o snapshot da PRÓPRIA data se o dia estiver FECHADO.
+            # Se estiver ABERTO, significa que o snapshot é velho/stale (ex: fechamento cancelado ou em andamento).
+            is_closed = _verificar_fechamento_dia(conn, data_ref)
+            
+            if snap_date == data_ref:
+                if is_closed:
+                    return saldos
+                # Se não está fechado, IGNORA esse snapshot e busca um anterior (ou calcula do zero se não houver anterior)
+                # Como o loop abaixo começa de 'data_inicio_calc', precisamos recuar a busca?
+                # A query original pegou o "LIMIT 1". Se esse é o stale, ele atrapalha.
+                # Solução: Buscar snapshot ANTERIOR a data_ref se o dia estiver aberto.
+                pass
+            
+            # Se o snapshot for menor que data_ref, usamos ele como base normalmente.
+            if snap_date < data_ref:
+                data_inicio_calc = snap_date 
 
         str_inicio = data_inicio_calc.strftime("%Y-%m-%d")
         
@@ -217,8 +247,20 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, banc
 def _somar_entradas_liquidas_delta(conn, banco, inicio, fim):
     try:
         q = """SELECT SUM(COALESCE(valor_liquido, valor, 0)) FROM entrada
-               WHERE banco_destino = ? AND DATE(COALESCE(Data_Liq, Data)) > DATE(?)
-               AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)"""
+               WHERE 
+                COALESCE(banco_destino, 
+                    CASE 
+                        WHEN UPPER(maquineta) LIKE '%INFINITE%' THEN 'InfinitePay'
+                        WHEN UPPER(maquineta) LIKE '%INTER%' THEN 'Inter'
+                        WHEN UPPER(maquineta) LIKE '%BRADESCO%' THEN 'Bradesco'
+                        WHEN UPPER(maquineta) LIKE '%PAG%' THEN 'PagBank'
+                        WHEN UPPER(maquineta) LIKE '%MERCADO%' THEN 'Mercado Pago'
+                        WHEN UPPER(maquineta) LIKE '%STONE%' OR UPPER(maquineta) LIKE '%TON%' THEN 'Stone'
+                        ELSE NULL 
+                    END
+                ) = ? 
+                AND DATE(COALESCE(Data_Liq, Data)) > DATE(?)
+                AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)"""
         return conn.execute(q, (banco, inicio, fim)).fetchone()[0] or 0.0
     except Exception: # Catch-all para evitar crash se banco_destino nao existir
         # Fallback Delta

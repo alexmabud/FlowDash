@@ -117,6 +117,17 @@ def _descobrir_taxa_e_banco(
     else:  # DINHEIRO
         banco_destino, taxa, parcelas = None, 0.0, 1
 
+    # [ROBUST MODE] Fallback Final - Inferência por Nome da Maquineta
+    # Se ainda não temos banco, tentamos deduzir para evitar NULL no banco de dados.
+    if not banco_destino and maquineta:
+        m = maquineta.upper().strip()
+        if 'INFINITE' in m or 'INFINITY' in m: banco_destino = 'InfinitePay'
+        elif 'INTER' in m: banco_destino = 'Inter'
+        elif 'BRADESCO' in m: banco_destino = 'Bradesco'
+        elif 'PAGSEGURO' in m or 'PAGBANK' in m: banco_destino = 'PagBank'
+        elif 'MERCADO' in m: banco_destino = 'Mercado Pago'
+        elif 'STONE' in m or 'TON' in m: banco_destino = 'Stone'
+
     return _r2(taxa), (banco_destino or None)
 
 
