@@ -317,7 +317,13 @@ class VendasService:
         if valor_liquido is not None:
             liquido = float(valor_liquido)
 
-        to_insert = {
+        # [FIX] Normaliza chaves para garantir match com colnames (case sensitive no Python dict)
+        col_map_lower = {c.lower(): c for c in colnames}
+        
+        def _get_real_col(name):
+            return col_map_lower.get(name.lower(), name)
+
+        to_insert_raw = {
             "Data": data_venda,
             "Data_Liq": data_liq,
             "Valor": float(valor_bruto),
@@ -330,6 +336,13 @@ class VendasService:
             "Usuario": usuario,
             "created_at": created_at_value,
         }
+        
+        # Mapeia chaves para as colunas reais do banco
+        to_insert = {}
+        for k, v in to_insert_raw.items():
+            real_key = _get_real_col(k)
+            if real_key in colnames:
+                to_insert[real_key] = v
 
         if "Data_Venda" in colnames:
             to_insert["Data_Venda"] = data_venda
@@ -338,10 +351,12 @@ class VendasService:
         elif "Taxa_Percentual" in colnames:
             to_insert["Taxa_Percentual"] = float(taxa_eff)
 
-        names, values = zip(*[(f'"{k}"', v) for k, v in to_insert.items() if k in colnames and v is not None])
+        names = list(to_insert.keys())
+        values = list(to_insert.values())
         placeholders = ", ".join("?" for _ in names)
-        cols_sql = ", ".join(names)
-        conn.execute(f"INSERT INTO entrada ({cols_sql}) VALUES ({placeholders})", list(values))
+        cols_sql = ", ".join(f'"{n}"' for n in names)
+        
+        conn.execute(f"INSERT INTO entrada ({cols_sql}) VALUES ({placeholders})", values)
         return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
 
     # ============================= Regra principal (compat wrapper) =============================
@@ -492,8 +507,12 @@ class VendasService:
             else:
                 if not banco_destino:
                     raise ValueError("banco_destino é obrigatório para formas não-DINHEIRO (inclui PIX via banco).")
-                self._garantir_linha_saldos_bancos(conn, data_liq)
-                self._ajustar_banco_dynamic(conn, banco_col=banco_destino, delta=float(valor_liquido), data=data_liq)
+                
+                # [ALTERAÇÃO] DESATIVADO UPDATE em saldos_bancos para evitar snapshots parciais.
+                # O sistema deve calcular dinamicamente a partir do último fechamento oficial (entrada + movs).
+                # self._garantir_linha_saldos_bancos(conn, data_liq)
+                # self._ajustar_banco_dynamic(conn, banco_col=banco_destino, delta=float(valor_liquido), data=data_liq)
+                
                 banco_label = banco_destino
 
             # 3) Log em movimentacoes_bancarias
