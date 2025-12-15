@@ -155,7 +155,7 @@ def _build_cells_html(items: list[tuple[str, object, bool]]) -> str:
     is_df = (lambda v: (pd is not None and isinstance(v, pd.DataFrame)))
     cells_html = []
 
-    for label, value, number_always in items:
+    for label, value, delta_or_flag in items:
         if is_df(value):
             vhtml = _df_to_html_table(value)
         elif isinstance(value, (list, tuple)):
@@ -166,8 +166,32 @@ def _build_cells_html(items: list[tuple[str, object, bool]]) -> str:
                 vhtml = f'<div class="cell-list">{linhas}</div>'
         else:
             num = _coerce_number(value)
+            
+            # Lógica do Delta/Chip
+            delta_html = ""
+            number_always = False
+            
+            if isinstance(delta_or_flag, str) and delta_or_flag:
+                # É uma string de delta (ex: "+15.2%", "-5%")
+                cleaned = delta_or_flag.replace("%", "").replace(",", ".")
+                try:
+                    val_delta = float(cleaned)
+                except ValueError:
+                    val_delta = 0.0
+
+                color = "#2ecc71" if val_delta > 0 else ("#e74c3c" if val_delta < 0 else "#muted")
+                delta_html = (
+                    f'<span style="font-size:0.75rem; font-weight:700; color:{color}; '
+                    f'background:rgba(255,255,255,0.05); padding:2px 6px; border-radius:6px; margin-left:8px; vertical-align:middle;">'
+                    f'{delta_or_flag}</span>'
+                )
+                number_always = True  # Se tem delta, exibe o número
+
+            elif isinstance(delta_or_flag, bool):
+                number_always = delta_or_flag
+
             vhtml = (
-                f'<div class="cell-value">{_fmt_val(num)}</div>'
+                f'<div class="cell-value">{_fmt_val(num)}{delta_html}</div>'
                 if (number_always or num != 0.0)
                 else '<div class="cell-empty">Sem movimentações</div>'
             )

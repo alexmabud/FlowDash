@@ -771,6 +771,13 @@ def render_chips_principais(
     else:
         media_historica_dia = 0.0
 
+    # Delta Percentual
+    if media_historica_dia > 0:
+        pct_media_dia = ((vendas_dia - media_historica_dia) / media_historica_dia) * 100.0
+        delta_media_dia = f"{pct_media_dia:+.1f}%"
+    else:
+        delta_media_dia = "0.0%"
+
     # --- Renderização ---
     st.markdown("## Indicadores de Vendas")
 
@@ -779,7 +786,7 @@ def render_chips_principais(
         [
             [
                 ("Vendas do dia", vendas_dia, True),
-                (f"Média Histórica ({dia_atual:02d}/{mes_atual:02d})", media_historica_dia, True),
+                (f"Média Histórica ({dia_atual:02d}/{mes_atual:02d})", media_historica_dia, delta_media_dia),
                 ("Vendas do mês", vendas_mes, True),
                 ("Vendas do ano", vendas_ano, True)
             ],
