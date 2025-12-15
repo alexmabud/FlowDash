@@ -56,9 +56,7 @@ from auth.auth import (
     verificar_acesso,
     exibir_usuario_logado,
     limpar_todas_as_paginas,
-    criar_sessao,
-    validar_sessao,
-    encerrar_sessao,
+
 )
 from utils.utils import garantir_trigger_totais_saldos_caixas, fechar_sidebar_automaticamente
 
@@ -577,25 +575,7 @@ def _call_page(module_path: str) -> None:
 # Login (visual igual ao PDV: título centralizado + formulário estreito)
 # -----------------------------------------------------------------------------
 if not st.session_state.usuario_logado:
-    # 1. TENTA RECUPERAR SESSÃO VIA URL (Query Param)
-    # Isso funciona 100% no Streamlit Online
-    try:
-        params = st.query_params
-        token = params.get("session")
-        if token:
-            usr_sessao = validar_sessao(token, _caminho_banco)
-            if usr_sessao:
-                st.session_state.usuario_logado = usr_sessao
-                st.session_state.pagina_atual = (
-                    "📊 Dashboard" if usr_sessao["perfil"] in ("Administrador", "Gerente") else "🧾 Lançamentos"
-                )
-                limpar_todas_as_paginas()
-                st.rerun()
-            else:
-                # Token inválido ou expirado: limpa a URL
-                st.query_params.clear()
-    except Exception:
-        pass
+
 
 if not st.session_state.usuario_logado:
     aplicar_branding(is_login=True)
@@ -635,10 +615,7 @@ if not st.session_state.usuario_logado:
         if entrar:
             usuario = validar_login(email, senha, _caminho_banco)
             if usuario:
-                # Cria sessão e adiciona na URL
-                token = criar_sessao(usuario["email"], _caminho_banco)
-                if token:
-                    st.query_params["session"] = token
+
                 
                 st.session_state.usuario_logado = usuario
                 st.session_state.pagina_atual = (
@@ -674,10 +651,7 @@ st.sidebar.markdown(f"👤 **{usuario['nome']}**\n🔐 Perfil: `{perfil}`")
 
 if st.sidebar.button("🚪 Sair", use_container_width=True):
     # Encerra sessão no banco e limpa URL
-    if usuario and usuario.get("email"):
-        encerrar_sessao(usuario["email"], _caminho_banco)
-    
-    st.query_params.clear()
+
     limpar_todas_as_paginas()
     st.session_state.usuario_logado = None
     st.rerun()
