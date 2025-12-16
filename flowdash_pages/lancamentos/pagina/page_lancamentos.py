@@ -122,13 +122,15 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     # =================================================================
     from flowdash_pages.fechamento.lock_manager import verificar_se_dia_esta_fechado
     
-    if verificar_se_dia_esta_fechado(caminho_banco, data_lanc):
+    dia_esta_fechado = verificar_se_dia_esta_fechado(caminho_banco, data_lanc)
+    
+    if dia_esta_fechado:
         st.error(f"🔒 O DIA {data_lanc} JÁ ESTÁ FECHADO!", icon="🔒")
         st.info(
             f"Você não pode realizar novos lançamentos ou alterações em **{data_lanc}** "
             "porque o fechamento de caixa deste dia já foi realizado."
         )
-        st.stop() # Bloqueia o carregamento dos formulários abaixo
+        # st.stop() # Bloqueia o carregamento dos formulários abaixo
     # =================================================================
 
     # Resumo agregado do dia
@@ -228,7 +230,7 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     render_card_mercadorias(resumo.get("compras_list") or [], resumo.get("receb_list") or [])
 
     # ----- Ações (subpáginas) -----
-    if not bloqueio_pendencia:
+    if not bloqueio_pendencia and not dia_esta_fechado:
         state = SimpleNamespace(db_path=caminho_banco, caminho_banco=caminho_banco, data_lanc=data_lanc)
         st.markdown("### ➕ Ações")
         a1, a2 = st.columns(2)
