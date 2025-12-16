@@ -285,129 +285,130 @@ def pagina_fechamento_caixa(caminho_banco: str):
     st.markdown("---")
     
     # ========================== CONFERÊNCIA E AJUSTE ==========================
-    st.subheader("📝 Conferência e Ajuste (Valores Reais)")
+    if not ja_fechado:
+        st.subheader("📝 Conferência e Ajuste (Valores Reais)")
     
-    with st.form("form_fechamento_real"):
-        c1, c2 = st.columns(2)
+        with st.form("form_fechamento_real"):
+            c1, c2 = st.columns(2)
         
-        def_caixa = float(dados_salvos['caixa_informado']) if dados_salvos and dados_salvos.get('caixa_informado') is not None else float(sys_caixa)
-        def_caixa2 = float(dados_salvos['caixa2_informado']) if dados_salvos and dados_salvos.get('caixa2_informado') is not None else float(sys_caixa2)
+            def_caixa = float(dados_salvos['caixa_informado']) if dados_salvos and dados_salvos.get('caixa_informado') is not None else float(sys_caixa)
+            def_caixa2 = float(dados_salvos['caixa2_informado']) if dados_salvos and dados_salvos.get('caixa2_informado') is not None else float(sys_caixa2)
         
-        real_caixa = c1.number_input("Caixa (Loja) Real (R$)", value=def_caixa, step=10.0, format="%.2f")
-        real_caixa2 = c2.number_input("Caixa 2 (Casa) Real (R$)", value=def_caixa2, step=10.0, format="%.2f")
+            real_caixa = c1.number_input("Caixa (Loja) Real (R$)", value=def_caixa, step=10.0, format="%.2f")
+            real_caixa2 = c2.number_input("Caixa 2 (Casa) Real (R$)", value=def_caixa2, step=10.0, format="%.2f")
         
-        st.markdown("**Bancos Real**")
-        real_bancos = {}
-        if bancos_ativos:
-            cols_b = st.columns(3)
-            for i, b_nome in enumerate(bancos_ativos):
-                val_ini = float(sys_bancos.get(b_nome, 0.0))
-                if dados_salvos:
-                    if b_nome in bancos_salvos_dict:
-                        val_ini = float(bancos_salvos_dict[b_nome])
-                    elif b_nome == 'Inter' and dados_salvos.get('banco_1') is not None: val_ini = float(dados_salvos['banco_1'])
-                    elif b_nome == 'Bradesco' and dados_salvos.get('banco_2') is not None: val_ini = float(dados_salvos['banco_2'])
-                    elif 'Infinite' in b_nome and dados_salvos.get('banco_3') is not None: val_ini = float(dados_salvos['banco_3'])
+            st.markdown("**Bancos Real**")
+            real_bancos = {}
+            if bancos_ativos:
+                cols_b = st.columns(3)
+                for i, b_nome in enumerate(bancos_ativos):
+                    val_ini = float(sys_bancos.get(b_nome, 0.0))
+                    if dados_salvos:
+                        if b_nome in bancos_salvos_dict:
+                            val_ini = float(bancos_salvos_dict[b_nome])
+                        elif b_nome == 'Inter' and dados_salvos.get('banco_1') is not None: val_ini = float(dados_salvos['banco_1'])
+                        elif b_nome == 'Bradesco' and dados_salvos.get('banco_2') is not None: val_ini = float(dados_salvos['banco_2'])
+                        elif 'Infinite' in b_nome and dados_salvos.get('banco_3') is not None: val_ini = float(dados_salvos['banco_3'])
 
-                with cols_b[i % 3]:
-                    real_bancos[b_nome] = st.number_input(f"{b_nome} (R$)", value=val_ini, step=10.0, format="%.2f", key=f"input_real_{b_nome}")
-        else:
-            st.info("Nenhum banco para conferir.")
+                    with cols_b[i % 3]:
+                        real_bancos[b_nome] = st.number_input(f"{b_nome} (R$)", value=val_ini, step=10.0, format="%.2f", key=f"input_real_{b_nome}")
+            else:
+                st.info("Nenhum banco para conferir.")
         
-        def_obs = dados_salvos.get('observacao', "") if dados_salvos else ""
-        obs = st.text_area("Observações", value=def_obs, placeholder="Justificativa para diferenças...")
-        confirmar = st.checkbox("Confirmo que os valores estão corretos.", value=False)
+            def_obs = dados_salvos.get('observacao', "") if dados_salvos else ""
+            obs = st.text_area("Observações", value=def_obs, placeholder="Justificativa para diferenças...")
+            confirmar = st.checkbox("Confirmo que os valores estão corretos.", value=False)
         
         
-        btn_label = "Fechamento Já Realizado" if ja_fechado else "Salvar Fechamento (Ajustar Saldos)"
-        salvar = st.form_submit_button(btn_label, disabled=ja_fechado)
+            btn_label = "Fechamento Já Realizado" if ja_fechado else "Salvar Fechamento (Ajustar Saldos)"
+            salvar = st.form_submit_button(btn_label, disabled=ja_fechado)
         
-    if salvar:
-        if not confirmar:
-            st.toast("Confirme os valores antes de salvar.", icon="⚠️")
-        else:
-            try:
-                total_real = real_caixa + real_caixa2 + sum(real_bancos.values())
-                diferenca = total_real - saldo_total_consolidado
+        if salvar:
+            if not confirmar:
+                st.toast("Confirme os valores antes de salvar.", icon="⚠️")
+            else:
+                try:
+                    total_real = real_caixa + real_caixa2 + sum(real_bancos.values())
+                    diferenca = total_real - saldo_total_consolidado
                 
-                ajustes = []
-                # Caixas
-                diff_caixa = real_caixa - sys_caixa
-                if abs(diff_caixa) > 0.01: 
-                    cor = "🟢" if diff_caixa > 0 else "🔴"
-                    ajustes.append(f"Caixa: {cor} diferença {_fmt(diff_caixa)}")
+                    ajustes = []
+                    # Caixas
+                    diff_caixa = real_caixa - sys_caixa
+                    if abs(diff_caixa) > 0.01: 
+                        cor = "🟢" if diff_caixa > 0 else "🔴"
+                        ajustes.append(f"Caixa: {cor} diferença {_fmt(diff_caixa)}")
                 
-                diff_caixa2 = real_caixa2 - sys_caixa2
-                if abs(diff_caixa2) > 0.01: 
-                    cor = "🟢" if diff_caixa2 > 0 else "🔴"
-                    ajustes.append(f"Caixa 2: {cor} diferença {_fmt(diff_caixa2)}")
+                    diff_caixa2 = real_caixa2 - sys_caixa2
+                    if abs(diff_caixa2) > 0.01: 
+                        cor = "🟢" if diff_caixa2 > 0 else "🔴"
+                        ajustes.append(f"Caixa 2: {cor} diferença {_fmt(diff_caixa2)}")
                 
-                bancos_deltas = {}
-                for b_col, val_real in real_bancos.items():
-                    val_sys = sys_bancos.get(b_col, 0)
-                    delta = val_real - val_sys
-                    bancos_deltas[b_col] = delta
+                    bancos_deltas = {}
+                    for b_col, val_real in real_bancos.items():
+                        val_sys = sys_bancos.get(b_col, 0)
+                        delta = val_real - val_sys
+                        bancos_deltas[b_col] = delta
 
-                    if abs(delta) > 0.01: 
-                        cor = "🟢" if delta > 0 else "🔴"
-                        ajustes.append(f"{b_col}: {cor} diferença {_fmt(delta)}")
+                        if abs(delta) > 0.01: 
+                            cor = "🟢" if delta > 0 else "🔴"
+                            ajustes.append(f"{b_col}: {cor} diferença {_fmt(delta)}")
                 
-                detalhe_bancos = json.dumps(real_bancos, ensure_ascii=False)
+                    detalhe_bancos = json.dumps(real_bancos, ensure_ascii=False)
                 
-                cursor = conn.cursor()
-                cursor.execute("BEGIN TRANSACTION")
+                    cursor = conn.cursor()
+                    cursor.execute("BEGIN TRANSACTION")
                 
-                cursor.execute("DELETE FROM fechamento_caixa WHERE DATE(data)=DATE(?)", (str(data_sel),))
+                    cursor.execute("DELETE FROM fechamento_caixa WHERE DATE(data)=DATE(?)", (str(data_sel),))
                 
-                v_b_legado = [0.0] * 4
-                for k, v in real_bancos.items():
-                    if 'Inter' in k: v_b_legado[0] = v
-                    elif 'Bradesco' in k: v_b_legado[1] = v
-                    elif 'Infinite' in k: v_b_legado[2] = v
-                    else: v_b_legado[3] += v
+                    v_b_legado = [0.0] * 4
+                    for k, v in real_bancos.items():
+                        if 'Inter' in k: v_b_legado[0] = v
+                        elif 'Bradesco' in k: v_b_legado[1] = v
+                        elif 'Infinite' in k: v_b_legado[2] = v
+                        else: v_b_legado[3] += v
 
-                cursor.execute("""
-                    INSERT INTO fechamento_caixa (
-                        data, saldo_esperado, valor_informado, diferenca,
-                        observacao, historico_ajuste, bancos_detalhe,
-                        caixa, caixa_2, banco_1, banco_2, banco_3, banco_4,
-                        entradas_confirmadas, saidas, correcao,
-                        caixa_informado, caixa2_informado
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """, (
-                    str(data_sel), saldo_total_consolidado, total_real, diferenca,
-                    obs, json.dumps(ajustes, ensure_ascii=False), detalhe_bancos,
-                    sys_caixa, sys_caixa2, v_b_legado[0], v_b_legado[1], v_b_legado[2], v_b_legado[3],
-                    entradas_total_dia, saidas_total_dia, corr_dia,
-                    real_caixa, real_caixa2
-                ))
+                    cursor.execute("""
+                        INSERT INTO fechamento_caixa (
+                            data, saldo_esperado, valor_informado, diferenca,
+                            observacao, historico_ajuste, bancos_detalhe,
+                            caixa, caixa_2, banco_1, banco_2, banco_3, banco_4,
+                            entradas_confirmadas, saidas, correcao,
+                            caixa_informado, caixa2_informado
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        str(data_sel), saldo_total_consolidado, total_real, diferenca,
+                        obs, json.dumps(ajustes, ensure_ascii=False), detalhe_bancos,
+                        sys_caixa, sys_caixa2, v_b_legado[0], v_b_legado[1], v_b_legado[2], v_b_legado[3],
+                        entradas_total_dia, saidas_total_dia, corr_dia,
+                        real_caixa, real_caixa2
+                    ))
                 
-                cursor.execute("DELETE FROM saldos_caixas WHERE DATE(data)=DATE(?)", (str(data_sel),))
-                cursor.execute("""
-                    INSERT INTO saldos_caixas (data, caixa, caixa_2, caixa_total, caixa2_total) 
-                    VALUES (?, ?, ?, ?, ?)
-                """, (str(data_sel), real_caixa, real_caixa2, real_caixa, real_caixa2))
+                    cursor.execute("DELETE FROM saldos_caixas WHERE DATE(data)=DATE(?)", (str(data_sel),))
+                    cursor.execute("""
+                        INSERT INTO saldos_caixas (data, caixa, caixa_2, caixa_total, caixa2_total) 
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (str(data_sel), real_caixa, real_caixa2, real_caixa, real_caixa2))
                     
-                cursor.execute("DELETE FROM saldos_bancos WHERE DATE(data)=DATE(?)", (str(data_sel),))
-                cursor.execute("INSERT INTO saldos_bancos (data) VALUES (?)", (str(data_sel),))
+                    cursor.execute("DELETE FROM saldos_bancos WHERE DATE(data)=DATE(?)", (str(data_sel),))
+                    cursor.execute("INSERT INTO saldos_bancos (data) VALUES (?)", (str(data_sel),))
                 
-                # Ajuste: Salva o valor REAL (absoluto) informado pelo usuário, ignorando o delta.
-                for b_col, val_real in real_bancos.items():
-                    # Garante que o valor gravado seja exatamente o que o usuário conferiu
-                    cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = ? WHERE DATE(data)=DATE(?)', (float(val_real), str(data_sel)))
+                    # Ajuste: Salva o valor REAL (absoluto) informado pelo usuário, ignorando o delta.
+                    for b_col, val_real in real_bancos.items():
+                        # Garante que o valor gravado seja exatamente o que o usuário conferiu
+                        cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = ? WHERE DATE(data)=DATE(?)', (float(val_real), str(data_sel)))
                          
-                conn.commit()
-                # ----------------- FEEDBACK VISUAL -----------------
-                st.balloons()
-                st.toast("Caixa Fechado com Sucesso!", icon="🔒")
-                st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
-                time.sleep(2)  # Pausa dramática para ver a festa
-                # ---------------------------------------------------
-                st.rerun()
+                    conn.commit()
+                    # ----------------- FEEDBACK VISUAL -----------------
+                    st.balloons()
+                    st.toast("Caixa Fechado com Sucesso!", icon="🔒")
+                    st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
+                    time.sleep(2)  # Pausa dramática para ver a festa
+                    # ---------------------------------------------------
+                    st.rerun()
                 
-            except Exception as e:
-                conn.rollback()
-                st.toast(f"Erro ao salvar: {e}", icon="❌")
+                except Exception as e:
+                    conn.rollback()
+                    st.toast(f"Erro ao salvar: {e}", icon="❌")
             
     conn.close()
 
