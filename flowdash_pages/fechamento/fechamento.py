@@ -1,6 +1,7 @@
 # flowdash_pages/fechamento/fechamento.py
 from __future__ import annotations
 
+import time
 import re
 import sqlite3
 import json
@@ -396,8 +397,12 @@ def pagina_fechamento_caixa(caminho_banco: str):
                     cursor.execute(f'UPDATE saldos_bancos SET "{b_col}" = ? WHERE DATE(data)=DATE(?)', (float(val_real), str(data_sel)))
                          
                 conn.commit()
-                st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
+                # ----------------- FEEDBACK VISUAL -----------------
                 st.balloons()
+                st.toast("Caixa Fechado com Sucesso!", icon="🔒")
+                st.session_state["fechamento_msg"] = ("✅ Fechamento Registrado com Sucesso!", "✅")
+                time.sleep(2)  # Pausa dramática para ver a festa
+                # ---------------------------------------------------
                 st.rerun()
                 
             except Exception as e:

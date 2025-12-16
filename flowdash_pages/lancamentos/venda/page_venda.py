@@ -63,6 +63,9 @@ def render_venda(state) -> None:
         )
 
         if res.get("ok"):
+            # Feedback rápido para não travar
+            st.toast(f"Venda de R$ {form.get('valor')} Registrada!", icon='✅')
+
             # Define a mensagem no state para ser pega pelo page_lancamentos (Toast)
             st.session_state["msg_ok"] = res.get("msg", "Venda registrada.")
             st.session_state["msg_ok_type"] = "success"  # Opcional, reforça ícone verde

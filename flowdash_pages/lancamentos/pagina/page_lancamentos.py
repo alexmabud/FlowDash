@@ -67,15 +67,13 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     """Renderiza a página agregadora de Lançamentos."""
     
     # [TRAVA DE SEGURANÇA - VERSÃO CORRIGIDA]
-    # [TRAVA DE SEGURANÇA - VERSÃO CORRIGIDA]
+    bloqueio_pendencia = False
     try:
         from flowdash_pages.fechamento.lock_manager import verificar_pendencia_bloqueante
         
         data_pendente = verificar_pendencia_bloqueante(caminho_banco)
         
         if data_pendente:
-
-            
             # Título grande e vermelho
             st.error(f"🚨 CAIXA DO DIA {data_pendente} NÃO FOI FECHADO!", icon="🚫")
             
@@ -89,8 +87,8 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
                 """
             )
             
-            # Bloqueia o resto da página
-            st.stop()
+            # Não bloqueia a página toda, apenas marca para esconder ações
+            bloqueio_pendencia = True
             
     except Exception as e:
         # Loga o erro no terminal mas permite o sistema abrir se a trava falhar
@@ -230,25 +228,26 @@ def render_page(caminho_banco: str, data_default: date | None = None) -> None:
     render_card_mercadorias(resumo.get("compras_list") or [], resumo.get("receb_list") or [])
 
     # ----- Ações (subpáginas) -----
-    state = SimpleNamespace(db_path=caminho_banco, caminho_banco=caminho_banco, data_lanc=data_lanc)
-    st.markdown("### ➕ Ações")
-    a1, a2 = st.columns(2)
-    with a1:
-        _safe_call("flowdash_pages.lancamentos.venda.page_venda", "render_venda", state)
-    with a2:
-        _safe_call("flowdash_pages.lancamentos.saida.page_saida", "render_saida", state)
+    if not bloqueio_pendencia:
+        state = SimpleNamespace(db_path=caminho_banco, caminho_banco=caminho_banco, data_lanc=data_lanc)
+        st.markdown("### ➕ Ações")
+        a1, a2 = st.columns(2)
+        with a1:
+            _safe_call("flowdash_pages.lancamentos.venda.page_venda", "render_venda", state)
+        with a2:
+            _safe_call("flowdash_pages.lancamentos.saida.page_saida", "render_saida", state)
 
-    
-    # Ocultar botões extras para vendedor
-    if not is_vendedor:
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            _safe_call("flowdash_pages.lancamentos.caixa2.page_caixa2", "render_caixa2", state)
-        with c2:
-            _safe_call("flowdash_pages.lancamentos.deposito.page_deposito", "render_deposito", state)
-        with c3:
-            _safe_call("flowdash_pages.lancamentos.transferencia.page_transferencia", "render_transferencia", state)
+        
+        # Ocultar botões extras para vendedor
+        if not is_vendedor:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                _safe_call("flowdash_pages.lancamentos.caixa2.page_caixa2", "render_caixa2", state)
+            with c2:
+                _safe_call("flowdash_pages.lancamentos.deposito.page_deposito", "render_deposito", state)
+            with c3:
+                _safe_call("flowdash_pages.lancamentos.transferencia.page_transferencia", "render_transferencia", state)
 
-    st.markdown("---")
-    st.markdown("### 📦 Mercadorias — Lançamentos")
-    _safe_call("flowdash_pages.lancamentos.mercadorias.page_mercadorias", "render_mercadorias", state)
+        st.markdown("---")
+        st.markdown("### 📦 Mercadorias — Lançamentos")
+        _safe_call("flowdash_pages.lancamentos.mercadorias.page_mercadorias", "render_mercadorias", state)

@@ -397,7 +397,8 @@ def _get_passivos_totais_cap(db_path: Optional[str]) -> Tuple[float, str]:
 
 def _get_total_consolidado_bancos_caixa(conn: sqlite3.Connection, db_path: str) -> Tuple[float, str]:
     try:
-        from flowdash_pages.fechamento.fechamento import _ultimo_caixas_ate, _somar_bancos_totais  # type: ignore
+        from flowdash_pages.fechamento.fechamento import _ultimo_caixas_ate
+        from flowdash_pages.finance_logic import _somar_bancos_totais  # type: ignore
         hoje = date.today()
         disp_caixa, disp_caixa2, _ = _ultimo_caixas_ate(db_path, hoje)
         bancos_totais = _somar_bancos_totais(db_path, hoje) or {}

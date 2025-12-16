@@ -257,8 +257,7 @@ def pagina_caixa(caminho_banco: str) -> None:
     if not usuario_atual:
         # Evita salvar como 'desconhecido'
         st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-from flowdash_pages.utils_timezone import agora_br
-
+    from flowdash_pages.utils_timezone import agora_br
     agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
     # --------------------------------------------------------------------
 
@@ -354,3 +353,6 @@ from flowdash_pages.utils_timezone import agora_br
             st.info("Nenhum dado cadastrado ainda.")
     except Exception as e:
         st.error(f"Erro ao carregar: {e}")
+
+def render(caminho_banco):
+    pagina_caixa(caminho_banco)

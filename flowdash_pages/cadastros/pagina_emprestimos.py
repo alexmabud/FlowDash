@@ -225,7 +225,7 @@ def pagina_emprestimos_financiamentos(caminho_banco: str):
             usuario_cadastro = _resolver_usuario_logado()
             if not usuario_cadastro:
                 st.warning("⚠️ Confirme o campo **Usuário logado** acima para salvar o empréstimo.")
-from flowdash_pages.utils_timezone import agora_br
+            from flowdash_pages.utils_timezone import agora_br
             data_lancamento = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
             submit = st.form_submit_button("📋 Salvar Empréstimo", disabled=(not usuario_cadastro))
@@ -362,7 +362,7 @@ from flowdash_pages.utils_timezone import agora_br
                         usuario_dep = _resolver_usuario_logado()
                         if not usuario_dep:
                             st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-from flowdash_pages.utils_timezone import agora_br
+                        from flowdash_pages.utils_timezone import agora_br
                         agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
                         if st.button("💾 Salvar saldo bancário", key=f"btn_dep_{id_selecionado}", disabled=(not usuario_dep)):
@@ -466,3 +466,6 @@ from flowdash_pages.utils_timezone import agora_br
 
     except Exception as e:
         st.error(f"Erro ao carregar empréstimos: {e}")
+
+def render(caminho_banco):
+    pagina_emprestimos_financiamentos(caminho_banco)

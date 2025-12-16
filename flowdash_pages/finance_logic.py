@@ -3,12 +3,23 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import math
 import pandas as pd
 from datetime import date, datetime, timedelta
 
 # ==============================================================================
 # 1. HELPERS GENÉRICOS DE SQL E DADOS
 # ==============================================================================
+
+def _safe_float(val) -> float:
+    """Converte para float com segurança (trata None, NaN, strings vazias)."""
+    try:
+        v = float(val)
+        if math.isnan(v):
+            return 0.0
+        return v
+    except (TypeError, ValueError):
+        return 0.0
 
 def _read_sql(conn: sqlite3.Connection, query: str, params=None) -> pd.DataFrame:
     """Helper curto para pandas read_sql."""
@@ -116,7 +127,7 @@ def _somar_entradas_liquidas_banco(conn: sqlite3.Connection, banco_alvo: str, da
         """
         cur = conn.execute(query, (banco_alvo, data_iso))
         val = cur.fetchone()[0]
-        return float(val or 0.0)
+        return _safe_float(val)
         
     except Exception: # Fallback para qualquer erro de esquema
         # Fallback: A coluna banco_destino não existe no banco do usuário.
@@ -131,7 +142,7 @@ def _somar_entradas_liquidas_banco(conn: sqlite3.Connection, banco_alvo: str, da
                 AND DATE(data) <= DATE(?)
             """
             val = conn.execute(q_fallback, (banco_alvo, data_iso)).fetchone()[0]
-            return float(val or 0.0)
+            return _safe_float(val)
         except Exception:
             return 0.0
 
@@ -141,7 +152,7 @@ def _somar_saidas_banco(conn: sqlite3.Connection, banco_alvo: str, data_corte: d
         data_iso = data_corte.strftime("%Y-%m-%d")
         cols = [r[1] for r in conn.execute("PRAGMA table_info(saida)")]
         # Usa helper para check case-insensitive
-        col_banco = _find_col(cols, ["banco", "conta"])
+        col_banco = _find_col(cols, ["banco", "conta", "banco_saida"])
         
         if not col_banco:
             return 0.0
@@ -149,7 +160,7 @@ def _somar_saidas_banco(conn: sqlite3.Connection, banco_alvo: str, data_corte: d
         query = f"SELECT SUM(valor) FROM saida WHERE {col_banco} = ? AND DATE(data) <= DATE(?)"
         cur = conn.execute(query, (banco_alvo, data_iso))
         val = cur.fetchone()[0]
-        return float(val or 0.0)
+        return _safe_float(val)
         
     except Exception:
         return 0.0
@@ -171,7 +182,8 @@ def _somar_movimentacoes_bancarias(conn: sqlite3.Connection, banco_alvo: str, da
                 AND DATE(data) <= DATE(?)
                 AND LOWER(COALESCE(origem,'')) NOT IN ('entrada', 'venda', 'saida', 'pix', 'lancamentos') 
         """
-        val_in = conn.execute(q_in, (banco_alvo, data_iso)).fetchone()[0] or 0.0
+        val_in = conn.execute(q_in, (banco_alvo, data_iso)).fetchone()[0]
+        val_in = _safe_float(val_in)
 
         # SAÍDAS: Ignora o que já veio da tabela saida
         q_out = """
@@ -180,57 +192,84 @@ def _somar_movimentacoes_bancarias(conn: sqlite3.Connection, banco_alvo: str, da
                 banco = ? 
                 AND tipo = 'saida'
                 AND DATE(data) <= DATE(?)
-                AND LOWER(COALESCE(origem,'')) != 'saida'
+                AND LOWER(COALESCE(origem,'')) NOT IN ('saida', 'saidas')
         """
-        val_out = conn.execute(q_out, (banco_alvo, data_iso)).fetchone()[0] or 0.0
+        val_out = conn.execute(q_out, (banco_alvo, data_iso)).fetchone()[0]
+        val_out = _safe_float(val_out)
         
-        return float(val_in - val_out)
+        return _safe_float(val_in - val_out)
     except Exception:
         return 0.0
 
 
 def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, bancos_ativos: list[str]) -> dict[str, float]:
-    """Calcula o saldo acumulado de cada banco até data_ref."""
+    """
+    Calcula o saldo acumulado de cada banco até data_ref.
+    Usa 'fechamento_caixa' como fonte da verdade para o último saldo consolidado (checkpoint).
+    """
     bancos_reais = [b for b in bancos_ativos if b.upper() not in ('CAIXA', 'CAIXA 2')]
     saldos = {b: 0.0 for b in bancos_reais}
     data_iso = data_ref.strftime("%Y-%m-%d")
 
     try:
-        # Busca snapshot
-        # Busca snapshot (pegamos os 5 últimos para tentar achar um válido caso o mais recente seja de um dia aberto)
-        query_snap = "SELECT * FROM saldos_bancos WHERE DATE(data) <= DATE(?) ORDER BY data DESC LIMIT 5"
-        df_snaps = pd.read_sql(query_snap, conn, params=(data_iso,))
+        # 1. Busca o último fechamento válido (<= data_ref)
+        # Prioriza fechamento_caixa pois é a fonte de verdade do "Real"
+        query_last_close = """
+            SELECT data, bancos_detalhe, banco_1, banco_2, banco_3
+            FROM fechamento_caixa 
+            WHERE DATE(data) <= DATE(?) 
+            ORDER BY data DESC LIMIT 1
+        """
+        row_close = conn.execute(query_last_close, (data_iso,)).fetchone()
         
         data_inicio_calc = date(2000, 1, 1)
 
-        # Itera sobre os candidatos para achar o "checkpoint" confiável
-        for idx, row in df_snaps.iterrows():
-            snap_date = pd.to_datetime(str(row['data'])).date()
+        if row_close:
+            close_date = pd.to_datetime(row_close[0]).date()
             
-            # Se for o próprio dia, só aceita se estiver fechado
-            if snap_date == data_ref:
-                if _verificar_fechamento_dia(conn, data_ref):
-                    # É válido (dia fechado)
-                    for b in bancos_reais:
-                        saldos[b] = float(row[b] or 0.0) if b in df_snaps.columns else 0.0
-                    return saldos
-                else:
-                    # Inválido/Stale, continua procurando um anterior
-                    continue
+            # Se for o próprio dia, retorna direto o fechado (não precisa calcular delta)
+            if close_date == data_ref:
+                # Tenta JSON
+                loaded_json = False
+                if row_close[1]:
+                    try:
+                        detalhe = json.loads(row_close[1])
+                        for b in bancos_reais:
+                            saldos[b] = _safe_float(detalhe.get(b, 0.0))
+                        loaded_json = True
+                    except: pass
+                
+                if not loaded_json:
+                    # Fallback colunas legado
+                    if 'Inter' in saldos: saldos['Inter'] = _safe_float(row_close[2])
+                    if 'Bradesco' in saldos: saldos['Bradesco'] = _safe_float(row_close[3])
+                    if 'InfinitePay' in saldos: saldos['InfinitePay'] = _safe_float(row_close[4])
+                
+                return saldos
             
-            # Se for data passada, aceitamos como checkpoint
-            if snap_date < data_ref:
-                for b in bancos_reais:
-                    saldos[b] = float(row[b] or 0.0) if b in df_snaps.columns else 0.0
-                data_inicio_calc = snap_date
-                break # Encontrou um checkpoint válido, para de recuar
- 
+            # Se for data anterior, usa como base e calcula delta
+            if close_date < data_ref:
+                data_inicio_calc = close_date
+                # Carrega base
+                loaded_json = False
+                if row_close[1]:
+                    try:
+                        detalhe = json.loads(row_close[1])
+                        for b in bancos_reais:
+                            saldos[b] = _safe_float(detalhe.get(b, 0.0))
+                        loaded_json = True
+                    except: pass
+                
+                if not loaded_json:
+                    if 'Inter' in saldos: saldos['Inter'] = _safe_float(row_close[2])
+                    if 'Bradesco' in saldos: saldos['Bradesco'] = _safe_float(row_close[3])
+                    if 'InfinitePay' in saldos: saldos['InfinitePay'] = _safe_float(row_close[4])
 
         str_inicio = data_inicio_calc.strftime("%Y-%m-%d")
         
-        # Loop de cálculo delta
+        # 2. Delta (Entradas - Saídas + Movimentações)
+        # Intervalo: (Data do Fechamento, Data Ref] -> Exclui o dia do fechamento pois já pegamos o saldo final dele
         for b in bancos_reais:
-            # Atenção: Passamos conn diretamente para usar a lógica de fallback
             val_ent = _somar_entradas_liquidas_delta(conn, b, str_inicio, data_iso)
             val_sai = _somar_saidas_delta(conn, b, str_inicio, data_iso)
             val_mov = _somar_movimentacoes_delta(conn, b, str_inicio, data_iso)
@@ -260,7 +299,8 @@ def _somar_entradas_liquidas_delta(conn, banco, inicio, fim):
                 ) = ? 
                 AND DATE(COALESCE(Data_Liq, Data)) > DATE(?)
                 AND DATE(COALESCE(Data_Liq, Data)) <= DATE(?)"""
-        return conn.execute(q, (banco, inicio, fim)).fetchone()[0] or 0.0
+        val = conn.execute(q, (banco, inicio, fim)).fetchone()[0]
+        return _safe_float(val)
     except Exception: # Catch-all para evitar crash se banco_destino nao existir
         # Fallback Delta
         try:
@@ -268,7 +308,8 @@ def _somar_entradas_liquidas_delta(conn, banco, inicio, fim):
                      WHERE banco = ? AND tipo = 'entrada'
                      AND LOWER(COALESCE(origem,'')) IN ('venda', 'entrada', 'pix')
                      AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)"""
-            return conn.execute(q_f, (banco, inicio, fim)).fetchone()[0] or 0.0
+            val = conn.execute(q_f, (banco, inicio, fim)).fetchone()[0]
+            return _safe_float(val)
         except Exception:
             return 0.0
 
@@ -276,11 +317,12 @@ def _somar_saidas_delta(conn, banco, inicio, fim):
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(saida)")]
         # Corrigido: Uso de _find_col para achar 'banco' ou 'conta' de forma case-insensitive
-        col = _find_col(cols, ["banco", "conta"])
+        col = _find_col(cols, ["banco", "conta", "banco_saida"])
         if not col: return 0.0
         
         q = f"SELECT SUM(valor) FROM saida WHERE {col} = ? AND DATE(data) > DATE(?) AND DATE(data) <= DATE(?)"
-        return conn.execute(q, (banco, inicio, fim)).fetchone()[0] or 0.0
+        val = conn.execute(q, (banco, inicio, fim)).fetchone()[0]
+        return _safe_float(val)
     except Exception:
         return 0.0
 
@@ -289,12 +331,14 @@ def _somar_movimentacoes_delta(conn, banco, inicio, fim):
         qi = """SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco=? AND tipo='entrada'
                 AND DATE(data)>DATE(?) AND DATE(data)<=DATE(?)
                 AND LOWER(COALESCE(origem,'')) NOT IN ('entrada','venda','saida', 'pix', 'lancamentos')"""
-        vi = conn.execute(qi, (banco, inicio, fim)).fetchone()[0] or 0.0
+        vi = conn.execute(qi, (banco, inicio, fim)).fetchone()[0]
+        vi = _safe_float(vi)
         
         qo = """SELECT SUM(valor) FROM movimentacoes_bancarias WHERE banco=? AND tipo='saida'
                 AND DATE(data)>DATE(?) AND DATE(data)<=DATE(?)
-                AND LOWER(COALESCE(origem,'')) != 'saida'"""
-        vo = conn.execute(qo, (banco, inicio, fim)).fetchone()[0] or 0.0
+                AND LOWER(COALESCE(origem,'')) NOT IN ('saida', 'saidas')"""
+        vo = conn.execute(qo, (banco, inicio, fim)).fetchone()[0]
+        vo = _safe_float(vo)
         return vi - vo
     except Exception:
         return 0.0

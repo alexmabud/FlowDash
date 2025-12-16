@@ -220,8 +220,7 @@ def pagina_saldos_bancarios(caminho_banco: str) -> None:
     usuario_atual = _resolver_usuario_logado()
     if not usuario_atual:
         st.warning("⚠️ Confirme o campo **Usuário logado** acima para continuar.")
-from flowdash_pages.utils_timezone import agora_br
-
+    from flowdash_pages.utils_timezone import agora_br
     agora_str = agora_br().strftime("%Y-%m-%d %H:%M:%S")
 
     if st.button("💾 Lançar Saldo (somar na mesma data)", use_container_width=True, disabled=(not usuario_atual)):
@@ -321,3 +320,6 @@ from flowdash_pages.utils_timezone import agora_br
             st.info("ℹ️ Nenhum lançamento registrado ainda.")
     except Exception as e:
         st.error(f"Erro ao carregar os lançamentos: {e}")
+
+def render(caminho_banco):
+    pagina_saldos_bancarios(caminho_banco)
