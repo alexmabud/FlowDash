@@ -787,6 +787,8 @@ def render_chips_principais(
             [
                 ("Vendas do dia", vendas_dia, True),
                 (f"Média Histórica ({dia_atual:02d}/{mes_atual:02d})", media_historica_dia, delta_media_dia),
+            ],
+            [
                 ("Vendas do mês", vendas_mes, True),
                 ("Vendas do ano", vendas_ano, True)
             ],
