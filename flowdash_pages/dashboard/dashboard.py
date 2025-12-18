@@ -761,7 +761,7 @@ def render_chips_principais(
     # --- Média Histórica do Dia (Sazonalidade Diária) ---
     # Filtra vendas em dias iguais ao de hoje (mesmo dia e mês) em anos anteriores
     # Ex: Média de vendas de todos os dias "15/12" da história
-    mask_hist_dia = (df["Data"].dt.day == dia_atual) & (df["Data"].dt.month == mes_atual)
+    mask_hist_dia = (df["Data"].dt.day == dia_atual) & (df["Data"].dt.month == mes_atual) & (df["ano"] < ano_atual)
     df_hist_dia = df.loc[mask_hist_dia]
     
     if not df_hist_dia.empty:
