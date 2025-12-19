@@ -2,6 +2,11 @@ import pandas as pd
 pd.set_option('future.no_silent_downcasting', True)
 import plotly.graph_objects as go
 import streamlit as st
+import sqlite3
+from datetime import datetime
+from typing import Tuple, Optional, Dict
+
+# Tenta importar Prophet
 try:
     from prophet import Prophet
     HAS_PROPHET = True
@@ -10,6 +15,7 @@ except ImportError:
     HAS_PROPHET = False
     print("AVISO: Prophet não instalado. Previsões desativadas.")
 
+# Tenta importar bibliotecas de dados macro
 try:
     from bcb import sgs
     HAS_BCB = True
@@ -22,26 +28,71 @@ try:
 except ImportError:
     HAS_SIDRAPY = False
 
-import numpy as np
-from typing import Tuple, Optional, Dict
+# ================= HELPER DE BANCO DE DADOS (PERSISTÊNCIA) =================
+def _init_tabela_previsoes(conn):
+    """Cria a tabela se não existir."""
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS historico_previsoes_ia (
+            mes_referencia TEXT PRIMARY KEY, -- Formato YYYY-MM
+            realista REAL,
+            pessimista REAL,
+            otimista REAL,
+            data_calculo DATETIME
+        );
+    """)
+    conn.commit()
 
+def _buscar_previsao_congelada(db_path: str, mes_ref: str) -> Optional[Dict]:
+    """Busca se já existe uma meta congelada para aquele mês."""
+    if not db_path: return None
+    try:
+        with sqlite3.connect(db_path) as conn:
+            _init_tabela_previsoes(conn)
+            cursor = conn.cursor()
+            cursor.execute("SELECT realista, pessimista, otimista FROM historico_previsoes_ia WHERE mes_referencia = ?", (mes_ref,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    'previsto': row[0],
+                    'pessimista': row[1],
+                    'otimista': row[2],
+                    'congelado': True
+                }
+    except Exception as e:
+        print(f"Erro ao buscar previsão congelada: {e}")
+    return None
+
+def _salvar_previsao_congelada(db_path: str, mes_ref: str, dados: Dict):
+    """Salva a previsão para não mudar mais."""
+    if not db_path: return
+    try:
+        with sqlite3.connect(db_path) as conn:
+            _init_tabela_previsoes(conn)
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT OR IGNORE INTO historico_previsoes_ia (mes_referencia, realista, pessimista, otimista, data_calculo)
+                VALUES (?, ?, ?, ?, ?)
+            """, (mes_ref, dados['yhat'], dados['yhat_lower'], dados['yhat_upper'], datetime.now()))
+            conn.commit()
+    except Exception as e:
+        print(f"Erro ao salvar previsão: {e}")
+
+# ================= LÓGICA MACROECONÔMICA =================
 def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> pd.DataFrame:
     """
-    Busca os 8 indicadores macroeconômicos combinados.
-    Retorna DataFrame mensal (MS) alinhado.
+    Busca os indicadores macroeconômicos combinados.
     """
     hoje = pd.Timestamp.now().normalize()
     data_fim = hoje + pd.DateOffset(months=meses_futuro + 6)
     start_date = data_inicio - pd.DateOffset(months=6) # Margem de segurança
 
-    # 1. Dados do BCB (SGS)
-    # IBC-Br (24363) é o "PIB Mensal"
     codigos_bcb = {
         'selic': 432,
         'ipca': 433,
         'dolar': 1,
         'pib_mensal': 24363, # IBC-Br (Proxy do PIB)
-        'confianca': 4393    # Índice de Confiança de Serviços (FGV via BCB) ou similar disponível
+        'confianca': 4393    # Índice de Confiança
     }
     
     try:
@@ -51,11 +102,10 @@ def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> p
         else:
             raise ImportError("BCB nao instalado")
     except Exception:
-        # Fallback seguro
         idx = pd.date_range(start=start_date, end=hoje, freq='MS')
         df_macro = pd.DataFrame(index=idx, columns=codigos_bcb.keys())
 
-    # 2. Dados do IBGE (Sidrapy) - PMC, Desemprego, Renda
+    # Dados do IBGE (Sidrapy)
     def buscar_sidra(table_code, variable, classification=None):
         if not HAS_SIDRAPY:
             return None
@@ -75,61 +125,75 @@ def _buscar_regressores_macro(data_inicio: pd.Timestamp, meses_futuro: int) -> p
             return None
         return None
 
-    # PMC (Varejo Ampliado) - Tabela 3416
     s_pmc = buscar_sidra("3416", "564", "11046/40311")
     if s_pmc is not None: df_macro['pmc'] = s_pmc
     else: df_macro['pmc'] = 0
 
-    # Taxa de Desocupação (PNAD) - Tabela 6381
     s_desemprego = buscar_sidra("6381", "4099") 
     if s_desemprego is not None: df_macro['desemprego'] = s_desemprego
     else: df_macro['desemprego'] = 0
 
-    # Rendimento Médio Real - Tabela 6381 (Var 5932)
     s_renda = buscar_sidra("6381", "5932")
     if s_renda is not None: df_macro['renda_media'] = s_renda
     else: df_macro['renda_media'] = 0
 
-    # 3. Consolidação
+    # Consolidação
     idx_full = pd.date_range(start=df_macro.index.min(), end=data_fim, freq='MS')
     df_macro = df_macro.reindex(idx_full)
     df_macro = df_macro.ffill().bfill().fillna(0).infer_objects(copy=False)
     
     return df_macro
 
-# from typing import Tuple, Optional, Dict # already imported above
+# ================= MOTOR PROPHET =================
+def _treinar_e_prever_prophet(df_treino, meses_futuro, regressores_macro=None):
+    """Função interna isolada para treinar o modelo."""
+    if df_treino.empty: return None, None
+    
+    data_inicio = df_treino['ds'].min()
+    # Busca macro apenas se não foi passado
+    if regressores_macro is None:
+        regressores_macro = _buscar_regressores_macro(data_inicio, meses_futuro)
+    
+    df_prophet = df_treino.merge(regressores_macro, left_on='ds', right_index=True, how='left')
+    df_prophet = df_prophet.ffill().bfill().fillna(0).infer_objects(copy=False)
+    
+    modelo = Prophet(
+        yearly_seasonality=True, 
+        weekly_seasonality=False, 
+        daily_seasonality=False, 
+        growth='linear',
+        seasonality_prior_scale=20.0
+    )
+    modelo.add_country_holidays(country_name='BR')
+    
+    regressores_alvo = ['selic', 'ipca', 'desemprego']
+    for reg in regressores_alvo:
+        if reg in df_prophet.columns:
+            modelo.add_regressor(reg)
+            
+    modelo.fit(df_prophet)
+    
+    futuro = modelo.make_future_dataframe(periods=meses_futuro + 1, freq='MS')
+    futuro = futuro.merge(regressores_macro, left_on='ds', right_index=True, how='left')
+    futuro = futuro.ffill().bfill().fillna(0).infer_objects(copy=False)
+    
+    previsao = modelo.predict(futuro)
+    return previsao, df_prophet 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12) -> Tuple[go.Figure, pd.DataFrame, Dict]:
+def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12, db_path: str = None) -> Tuple[go.Figure, pd.DataFrame, Dict]:
     if not HAS_PROPHET:
         fig = go.Figure()
-        fig.add_annotation(
-            text="Biblioteca 'Prophet' não instalada.<br>Instale para ver previsões (pip install prophet).",
-            showarrow=False,
-            font=dict(size=14, color="red")
-        )
+        fig.add_annotation(text="Instale 'prophet' (pip install prophet)", showarrow=False, font=dict(color="red"))
         return fig, pd.DataFrame(), {}
 
-    # --- Parte 1: Tratamento de Vendas (Mantenha a lógica existente de resample) ---
+    # --- Tratamento Inicial ---
     if df_vendas_bruto.empty: return go.Figure(), pd.DataFrame(), {}
     df = df_vendas_bruto.copy()
     
-    # Identificar colunas de data e valor
     cols_lower = {c.lower(): c for c in df.columns}
-    
-    # Tenta achar coluna de data
-    col_data = None
-    for cand in ['data', 'data_venda', 'dt_venda', 'date']:
-        if cand in cols_lower:
-            col_data = cols_lower[cand]
-            break
-            
-    # Tenta achar coluna de valor
-    col_valor = None
-    for cand in ['valor', 'valor_total', 'vlr', 'total']:
-        if cand in cols_lower:
-            col_valor = cols_lower[cand]
-            break
+    col_data = next((cols_lower[c] for c in ['data', 'data_venda', 'dt_venda', 'date'] if c in cols_lower), None)
+    col_valor = next((cols_lower[c] for c in ['valor', 'valor_total', 'vlr', 'total'] if c in cols_lower), None)
             
     if not col_data or not col_valor:
         return go.Figure(), pd.DataFrame(), {}
@@ -137,125 +201,115 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
     df['ds'] = pd.to_datetime(df[col_data], errors='coerce')
     df['y'] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
     df = df.dropna(subset=['ds'])
+    df = df[df['ds'].dt.year >= 2022] # Filtro de qualidade
     
-    # FILTRO DE QUALIDADE: Removemos 2021 (dados de implantação/incompletos)
-    df = df[df['ds'].dt.year >= 2022]
-    
-    # Agrupa por mês (MS)
     df_mensal = df.set_index('ds').resample('MS')['y'].sum().reset_index()
-    
     first_valid = df_mensal[df_mensal['y'] > 0].index.min()
     if pd.notna(first_valid): df_mensal = df_mensal.loc[first_valid:].copy()
     
     if len(df_mensal) < 6:
         fig = go.Figure()
-        fig.add_annotation(text="Dados insuficientes para previsão (mínimo 6 meses)", showarrow=False)
+        fig.add_annotation(text="Dados insuficientes (mínimo 6 meses)", showarrow=False)
         return fig, pd.DataFrame(), {}
 
-    # --- AJUSTE CIRÚRGICO: Separar Treino vs Mês Atual ---
     hoje = pd.Timestamp.now().normalize()
-    data_atual = hoje.replace(day=1) # Primeiro dia do mês atual
-    
-    # Treino: Tudo ANTES do mês atual
-    df_treino = df_mensal[df_mensal['ds'] < data_atual].copy()
-    
-    # Dados do Mês Atual (para comparação)
-    df_mes_atual = df_mensal[df_mensal['ds'] == data_atual]
-    valor_realizado_atual = float(df_mes_atual['y'].iloc[0]) if not df_mes_atual.empty else 0.0
-    
-    if len(df_treino) < 6:
-         # Fallback se sobrar poucos dados após remover o mês atual
-         df_treino = df_mensal.copy()
+    data_mes_atual = hoje.replace(day=1) # Ex: 01/12/2025
+    mes_ref_str = data_mes_atual.strftime('%Y-%m') # "2025-12"
 
-    # --- Parte 2: Buscar 8 Regressores ---
-    try:
-        data_inicio = df_treino['ds'].min()
-        df_macro = _buscar_regressores_macro(data_inicio, meses_futuro)
+    # ================= 1. LÓGICA DO "ACOMPANHAMENTO" (Mês Atual) =================
+    
+    metricas_mes_atual = {'data': data_mes_atual}
+    
+    # Busca o Realizado (isso sempre atualiza, é a venda real)
+    df_real_atual = df_mensal[df_mensal['ds'] == data_mes_atual]
+    valor_realizado = float(df_real_atual['y'].iloc[0]) if not df_real_atual.empty else 0.0
+    metricas_mes_atual['realizado'] = valor_realizado
+
+    # Busca a Meta (congelada ou calcula agora com dados passados)
+    meta_congelada = _buscar_previsao_congelada(db_path, mes_ref_str)
+    
+    if meta_congelada:
+        # USA A CONGELADA (DO BANCO)
+        metricas_mes_atual.update(meta_congelada)
+    else:
+        # GERA UMA NOVA (Baseada APENAS no passado) E CONGELA
+        # Treina usando tudo estritamente ANTES do mês atual
+        df_treino_passado = df_mensal[df_mensal['ds'] < data_mes_atual].copy()
         
-        # --- Parte 3: Merge (Usando df_treino) ---
-        df_prophet = df_treino.merge(df_macro, left_on='ds', right_index=True, how='left')
-        df_prophet = df_prophet.ffill().bfill().fillna(0).infer_objects(copy=False)
-        
-        # --- Parte 4: Treino ---
-        modelo = Prophet(
-            yearly_seasonality=True, 
-            weekly_seasonality=False, 
-            daily_seasonality=False, 
-            growth='linear',
-            seasonality_prior_scale=20.0
-        )
-        modelo.add_country_holidays(country_name='BR')
-        
-        # LISTA ATUALIZADA - APENAS OS PILARES ESTÁVEIS
-        regressores_alvo = [
-            'selic',       # Custo do dinheiro/crédito
-            'ipca',        # Poder de compra
-            'desemprego'   # Renda disponível
-        ]
-        
-        for reg in regressores_alvo:
-            if reg in df_prophet.columns:
-                modelo.add_regressor(reg)
+        if len(df_treino_passado) >= 6:
+            try:
+                # Prevemos apenas o próximo passo (mês atual)
+                prev_temp, _ = _treinar_e_prever_prophet(df_treino_passado, 1, None)
+                row_prev = prev_temp[prev_temp['ds'] == data_mes_atual]
                 
-        modelo.fit(df_prophet)
+                if not row_prev.empty:
+                    dados_save = {
+                        'yhat': float(row_prev['yhat'].iloc[0]),
+                        'yhat_lower': float(row_prev['yhat_lower'].iloc[0]),
+                        'yhat_upper': float(row_prev['yhat_upper'].iloc[0])
+                    }
+                    # SALVA NO BANCO PARA SEMPRE
+                    _salvar_previsao_congelada(db_path, mes_ref_str, dados_save)
+                    
+                    metricas_mes_atual['previsto'] = dados_save['yhat']
+                    metricas_mes_atual['pessimista'] = dados_save['yhat_lower']
+                    metricas_mes_atual['otimista'] = dados_save['yhat_upper']
+            except Exception as e:
+                metricas_mes_atual['error'] = str(e)
+        else:
+            # Dados insuficientes no passado para gerar meta
+            metricas_mes_atual['previsto'] = 0.0
+            
+    # ================= 2. LÓGICA DO GRÁFICO (Futuro Dinâmico) =================
+    # Para o gráfico, queremos usar TODO o dado disponível para projetar o futuro distante
+    
+    df_treino_full = df_mensal[df_mensal['ds'] <= data_mes_atual].copy()
+    
+    try:
+        previsao_full, df_prophet_full = _treinar_e_prever_prophet(df_treino_full, meses_futuro, None)
         
-        # --- Parte 5: Previsão (Incluindo Mês Atual como "Futuro") ---
-        futuro = modelo.make_future_dataframe(periods=meses_futuro + 1, freq='MS')
-        futuro = futuro.merge(df_macro, left_on='ds', right_index=True, how='left')
-        futuro = futuro.ffill().bfill().fillna(0).infer_objects(copy=False)
-        
-        previsao = modelo.predict(futuro)
-        
-        # Extrair previsão para o mês atual
-        prev_atual_row = previsao[previsao['ds'] == data_atual]
-        valor_previsto_atual = float(prev_atual_row['yhat'].iloc[0]) if not prev_atual_row.empty else 0.0
-        valor_pessimista_atual = float(prev_atual_row['yhat_lower'].iloc[0]) if not prev_atual_row.empty else 0.0
-        valor_otimista_atual = float(prev_atual_row['yhat_upper'].iloc[0]) if not prev_atual_row.empty else 0.0
-        
-        metricas_mes_atual = {
-            'data': data_atual,
-            'realizado': valor_realizado_atual,
-            'previsto': valor_previsto_atual,
-            'pessimista': valor_pessimista_atual,
-            'otimista': valor_otimista_atual
-        }
-        
-        # --- Parte 6: Visualização (Plotly) ---
+        # --- Montagem do Gráfico ---
         fig = go.Figure()
         
         def _fmt(x):
-            try:
-                return f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            except:
-                return "R$ 0,00"
+            try: return f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+            except: return "R$ 0,00"
     
-        # Histórico (Treino)
-        df_prophet['y_fmt'] = df_prophet['y'].apply(_fmt)
+        # Histórico
+        df_prophet_full['y_fmt'] = df_prophet_full['y'].apply(_fmt)
         fig.add_trace(go.Scatter(
-            x=df_prophet['ds'], y=df_prophet['y'],
+            x=df_prophet_full['ds'], y=df_prophet_full['y'],
             mode='lines+markers', name='Histórico Realizado',
-            text=df_prophet['y_fmt'], hovertemplate='%{text}<extra></extra>',
+            text=df_prophet_full['y_fmt'], hovertemplate='%{text}<extra></extra>',
             line=dict(color='black', width=2), marker=dict(size=6)
         ))
         
-        # Ponto do Mês Atual (Realizado) - Comparação Visual
-        if valor_realizado_atual > 0:
+        # Ponto do Mês Atual (Realizado)
+        if valor_realizado > 0:
             fig.add_trace(go.Scatter(
-                x=[data_atual], y=[valor_realizado_atual],
+                x=[data_mes_atual], y=[valor_realizado],
                 mode='markers', name='Realizado (Mês Atual)',
-                text=[_fmt(valor_realizado_atual)], hovertemplate='%{text}<extra>Atual</extra>',
+                text=[_fmt(valor_realizado)], hovertemplate='%{text}<extra>Atual</extra>',
                 marker=dict(color='#27ae60', size=10, symbol='diamond')
             ))
+
+        # Ponto da Meta Congelada (Visualização no gráfico)
+        if 'previsto' in metricas_mes_atual and metricas_mes_atual['previsto'] > 0:
+             fig.add_trace(go.Scatter(
+                x=[data_mes_atual], y=[metricas_mes_atual['previsto']],
+                mode='markers', name='Meta (Congelada)',
+                text=[f"Meta: {_fmt(metricas_mes_atual['previsto'])}"],
+                hovertemplate='%{text}<extra>Meta IA</extra>',
+                marker=dict(color='#9b59b6', size=8, symbol='x')
+            ))
         
-        # Previsão (Começando do Mês Atual em diante)
-        # Filtra apenas o futuro para plotar pontilhado
-        data_corte_treino = df_prophet['ds'].max()
-        df_futuro_plot = previsao[previsao['ds'] > data_corte_treino].copy()
+        # Linha de Previsão (Futuro APÓS mês atual)
+        df_futuro_plot = previsao_full[previsao_full['ds'] > data_mes_atual].copy()
         df_futuro_plot['yhat_fmt'] = df_futuro_plot['yhat'].apply(_fmt)
         
         fig.add_trace(go.Scatter(
             x=df_futuro_plot['ds'], y=df_futuro_plot['yhat'],
-            mode='lines', name='Previsão (IA)',
+            mode='lines', name='Previsão Futura',
             text=df_futuro_plot['yhat_fmt'], hovertemplate='%{text}<extra>Previsão</extra>',
             line=dict(color='#2980b9', width=2, dash='dot')
         ))
@@ -273,7 +327,7 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
         ))
         
         fig.update_layout(
-            title="Previsão de Faturamento (IA + 8 Indicadores Macro)",
+            title="Previsão de Faturamento (IA + Macroeconomia)",
             xaxis_title="Data",
             yaxis_title="Valor (R$)",
             hovermode="x unified",
@@ -281,92 +335,55 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
             margin=dict(l=20, r=20, t=60, b=20)
         )
         
-        # Remove o mês atual do df_futuro_plot retornado para não duplicar nos cards de "Próximo Mês"
-        df_futuro_cards = df_futuro_plot[df_futuro_plot['ds'] > data_atual].copy()
-        
-        return fig, df_futuro_cards, metricas_mes_atual
+        return fig, df_futuro_plot, metricas_mes_atual
 
     except Exception as e:
         print(f"ERRO PROPHET: {e}")
-        fig = go.Figure()
-        fig.add_annotation(
-            text=f"Erro no motor de previsão: {str(e)[:100]}...<br>Verifique logs.",
-            showarrow=False,
-            font=dict(size=14, color="red")
-        )
-        return fig, pd.DataFrame(), {'error': str(e)}
+        return go.Figure(), pd.DataFrame(), {'error': str(e)}
 
 
 def calcular_sazonalidade_semanal(df_vendas_bruto: pd.DataFrame) -> list[float]:
     """
-    Calcula a % de representatividade média de cada dia da semana (0=Seg, 6=Dom).
-    Retorna uma lista de 7 floats que somam 100.0.
+    Calcula a % de representatividade média de cada dia da semana.
     """
-    if df_vendas_bruto.empty:
-        return [14.3] * 7  # Retorna distribuição igual se não houver dados
-
+    if df_vendas_bruto.empty: return [14.3] * 7
     df = df_vendas_bruto.copy()
-    # Garante coluna de data
     cols_lower = {c.lower(): c for c in df.columns}
     col_data = next((cols_lower[c] for c in ['data', 'data_venda', 'dt_venda', 'date'] if c in cols_lower), None)
     col_valor = next((cols_lower[c] for c in ['valor', 'valor_total', 'vlr', 'total'] if c in cols_lower), None)
-
-    if not col_data or not col_valor:
-        return [14.3] * 7
-
+    if not col_data or not col_valor: return [14.3] * 7
     df['ds'] = pd.to_datetime(df[col_data], errors='coerce')
     df['y'] = pd.to_numeric(df[col_valor], errors='coerce').fillna(0)
     df = df.dropna(subset=['ds'])
-    
-    # Filtra últimos 12 meses para pegar sazonalidade recente
     data_corte = df['ds'].max() - pd.DateOffset(months=12)
     df = df[df['ds'] >= data_corte]
-
-    df['weekday'] = df['ds'].dt.weekday  # 0=Segunda, 6=Domingo
-    
-    # Soma total por dia da semana
+    df['weekday'] = df['ds'].dt.weekday
     agrupado = df.groupby('weekday')['y'].sum()
     total = agrupado.sum()
-    
     percentuais = []
     for dia in range(7):
         val = agrupado.get(dia, 0.0)
         pct = (val / total * 100.0) if total > 0 else 0.0
         percentuais.append(pct)
-        
-    # Ajuste fino para somar exatamente 100% (arredondamento)
     soma_atual = sum(percentuais)
     if soma_atual > 0:
         fator = 100.0 / soma_atual
         percentuais = [p * fator for p in percentuais]
-    else:
-        percentuais = [100/7] * 7
-        
+    else: percentuais = [100/7] * 7
     return percentuais
 
 def calcular_share_usuario(df_vendas_bruto: pd.DataFrame, nome_usuario: str) -> float:
     """
-    Calcula a % que este usuário representa do total de vendas da loja.
+    Calcula a % que este usuário representa do total de vendas.
     """
-    if df_vendas_bruto.empty or not nome_usuario:
-        return 100.0
-        
-    if nome_usuario.upper() == "LOJA":
-        return 100.0
-
+    if df_vendas_bruto.empty or not nome_usuario: return 100.0
+    if nome_usuario.upper() == "LOJA": return 100.0
     df = df_vendas_bruto.copy()
-    # Tenta achar coluna de usuário/vendedor
     cols_lower = {c.lower(): c for c in df.columns}
     col_user = next((cols_lower[c] for c in ['usuario', 'vendedor', 'user'] if c in cols_lower), None)
     col_valor = next((cols_lower[c] for c in ['valor', 'valor_total'] if c in cols_lower), None)
-
-    if not col_user or not col_valor:
-        return 100.0 # Fallback
-
+    if not col_user or not col_valor: return 100.0
     total_loja = df[col_valor].sum()
     total_user = df[df[col_user].astype(str) == nome_usuario][col_valor].sum()
-
-    if total_loja == 0:
-        return 0.0
-        
+    if total_loja == 0: return 0.0
     return (total_user / total_loja) * 100.0
