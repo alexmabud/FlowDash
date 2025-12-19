@@ -846,7 +846,7 @@ def render_endividamento(db_path: str) -> None:
     simplified = bool(st.session_state.get("fd_modo_mobile", False))
     db = cap.DB(db_path)
     df_loans_raw = cap._load_loans_raw(db)
-    df_loans_view = cap._build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
+    df_loans_view = cap._build_loans_view(db, df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
 
     if df_loans_view.empty:
         st.info("Nenhum empréstimo encontrado.")

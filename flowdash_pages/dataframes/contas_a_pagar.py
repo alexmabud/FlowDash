@@ -418,33 +418,78 @@ def _cap_month_summary_by_tipo(db: DB, ref_year: int, ref_month: int, tipo_key: 
     return out.reset_index(drop=True)
 
 # ===================== Empréstimos =====================
-def _build_loans_view(df: pd.DataFrame) -> pd.DataFrame:
+def _build_loans_view(db: DB, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Visão Híbrida de Empréstimos (Verificada com Schema do Banco):
+    1. Dinâmico: Saldo = Soma(valor_evento - valor_pago_acumulado) da tabela contas_a_pagar_mov.
+    2. Estático (Fallback): Usa 'valor_em_aberto' ou 'valor_total' do cadastro se não houver parcelas.
+    """
     if df.empty:
         return df
-    id_col   = _first_existing(df, ["id", "Id", "ID"])
-    desc_col = _first_existing(df, ["descricao", "Descrição", "titulo", "nome", "credor"])
-    vparc_col = _first_existing(df, ["valor_parcela", "parcela_valor", "Valor_Parcela", "parcela"])
-    sdev_col  = _first_existing(df, ["saldo_devedor", "Saldo_Devedor"])
-    vtot_col   = _first_existing(df, ["valor_total", "principal", "valor", "Valor_Total"])
-    pagas_col  = _first_existing(df, ["parcelas_pagas", "parcelas_pag", "qtd_parcelas_pagas", "Parcelas_Pagas"])
 
+    # --- 1. Prepara dados do Cadastro (emprestimos_financiamentos) ---
     out = pd.DataFrame()
-    out["id"] = df[id_col].astype(str) if id_col else df.index.astype(str)
-    out["descricao"] = df[desc_col].astype(str) if desc_col else "(sem descrição)"
-    out["Valor da Parcela Mensal"] = pd.to_numeric(df.get(vparc_col, 0), errors="coerce").fillna(0.0)
+    # Garante conversão de ID para string para o merge
+    out["id"] = df["id"].astype(str)
+    
+    # Busca descrição e valor da parcela (com tratamento de erro)
+    out["descricao"] = df.get("descricao", "(sem descrição)").astype(str)
+    out["Valor da Parcela Mensal"] = pd.to_numeric(df.get("valor_parcela", 0), errors="coerce").fillna(0.0)
 
-    if sdev_col:
-        out["Saldo Devedor do Empréstimo"] = pd.to_numeric(df[sdev_col], errors="coerce").fillna(0.0)
-    else:
-        try:
-            tot   = pd.to_numeric(df.get(vtot_col, 0), errors="coerce").fillna(0.0)
-            pagas = pd.to_numeric(df.get(pagas_col, 0), errors="coerce").fillna(0.0)
-            parc  = out["Valor da Parcela Mensal"]
-            out["Saldo Devedor do Empréstimo"] = (tot - (pagas * parc)).clip(lower=0)
-        except Exception:
-            out["Saldo Devedor do Empréstimo"] = 0.0
+    # Lógica do Saldo Estático (Plano B)
+    # Tenta usar 'valor_em_aberto'. Se estiver vazio/zero, tenta 'valor_total'.
+    def get_static_balance(row):
+        val_aberto = pd.to_numeric(row.get("valor_em_aberto"), errors="coerce")
+        if pd.notna(val_aberto) and val_aberto > 0:
+            return float(val_aberto)
+            
+        val_total = pd.to_numeric(row.get("valor_total"), errors="coerce")
+        if pd.notna(val_total):
+            return float(val_total)
+        return 0.0
 
-    out = out[["id", "descricao", "Saldo Devedor do Empréstimo", "Valor da Parcela Mensal"]].copy()
+    out["_static_saldo"] = df.apply(get_static_balance, axis=1)
+
+    # --- 2. Prepara dados do Movimento (contas_a_pagar_mov) ---
+    try:
+        cap = _load_contas_apagar_mov(db)
+    except Exception:
+        cap = pd.DataFrame() # Proteção caso a query falhe
+    
+    loan_has_parcels = {}   # IDs que possuem parcelas lançadas
+    loan_dynamic_saldo = {} # Saldo calculado (Soma Valor - Pago)
+
+    if not cap.empty and "emprestimo_id" in cap.columns:
+        # Garante tipos numéricos para evitar erro de soma
+        cap["_evt_val"] = pd.to_numeric(cap.get("valor_evento", 0), errors="coerce").fillna(0.0)
+        cap["_evt_pago"] = pd.to_numeric(cap.get("valor_pago_acumulado", 0), errors="coerce").fillna(0.0)
+        
+        # Calcula o saldo de cada parcela (não deixa ficar negativo)
+        cap["_saldo_parcela"] = (cap["_evt_val"] - cap["_evt_pago"]).clip(lower=0.0)
+        
+        # Filtra apenas linhas que têm vínculo com empréstimo
+        cap_loans = cap[cap["emprestimo_id"].notna()].copy()
+        cap_loans["_loan_id_str"] = cap_loans["emprestimo_id"].astype(int).astype(str)
+        
+        # Agrupa
+        grp = cap_loans.groupby("_loan_id_str")
+        loan_has_parcels = grp.size().to_dict()
+        loan_dynamic_saldo = grp["_saldo_parcela"].sum().to_dict()
+
+    # --- 3. Aplica a Lógica Híbrida ---
+    def resolve_saldo(row):
+        lid = str(row["id"])
+        # Se existem parcelas no financeiro, MANDAM as parcelas (mesmo que a soma seja 0 = quitado)
+        if lid in loan_has_parcels and loan_has_parcels[lid] > 0:
+            return loan_dynamic_saldo.get(lid, 0.0)
+        
+        # Se NÃO tem parcelas, usa o valor do cadastro (para não mostrar 0 em empréstimo novo)
+        return row["_static_saldo"]
+
+    out["Saldo Devedor do Empréstimo"] = out.apply(resolve_saldo, axis=1)
+
+    # Seleção e Ordenação final
+    out = out[["id", "descricao", "Saldo Devedor do Empréstimo", "Valor da Parcela Mensal"]]
     out = out.sort_values(by=["descricao", "id"], kind="stable").reset_index(drop=True)
     return out
 
@@ -865,7 +910,7 @@ def render(db_path_pref: Optional[str] = None):
 
     # ===== CÁLCULOS =====
     df_loans_raw = _load_loans_raw(db)
-    df_loans = _build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
+    df_loans = _build_loans_view(db, df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
     loans_sums = _loans_totals(df_loans)
 
     df_cards_view = _cards_view(db, ref_year, ref_month)
