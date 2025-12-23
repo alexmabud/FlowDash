@@ -30,6 +30,7 @@ from shared.db import get_conn
 from utils.utils import coerce_data, formatar_moeda
 from flowdash_pages.cadastros.cadastro_classes import BancoRepository
 from flowdash_pages.lancamentos.shared_ui import canonicalizar_banco, upsert_saldos_bancos
+from flowdash_pages.finance_logic import _somar_bancos_totais
 
 
 # ===================== Tipos =====================
@@ -57,40 +58,7 @@ def carregar_nomes_bancos(caminho_banco: str) -> List[str]:
     return df["nome"].tolist() if df is not None and not df.empty else []
 
 
-def _try_saldo_banco(caminho_banco: str, banco_nome: str, data_str: str) -> Optional[float]:
-    """Calcula o saldo acumulado (≤ data) de um banco em `saldos_bancos`.
-
-    Usa a tabela wide `saldos_bancos`, somando os valores da coluna do banco
-    até a data informada (inclusive). Se algo falhar, retorna `None`.
-
-    Args:
-        caminho_banco: Caminho do arquivo SQLite.
-        banco_nome: Nome (coluna) do banco na tabela.
-        data_str: Data no formato "YYYY-MM-DD".
-
-    Returns:
-        Saldo acumulado (float) ou `None` se não for possível calcular.
-    """
-    try:
-        with get_conn(caminho_banco) as conn:
-            df = pd.read_sql("SELECT * FROM saldos_bancos", conn)
-        if df is None or df.empty:
-            return None
-
-        # Detecta coluna de data
-        date_col = next((c for c in df.columns if c.lower() in ("data", "date")), None)
-        if date_col:
-            df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-            limite = pd.to_datetime(data_str, errors="coerce")
-            if pd.isna(limte := limite):
-                return None
-            df = df[df[date_col] <= limte]
-
-        if banco_nome in df.columns:
-            return float(pd.to_numeric(df[banco_nome], errors="coerce").fillna(0.0).sum())
-    except Exception:
-        return None
-    return None
+# Helper: _try_saldo_banco REMOVED (replaced by finance_logic._somar_bancos_totais)
 
 
 def _ensure_cols_movs(caminho_banco: str) -> None:
@@ -247,12 +215,23 @@ def registrar_transferencia_bancaria(
     # Garante colunas extras em `movimentacoes_bancarias`
     _ensure_cols_movs(caminho_banco)
 
-    # (Opcional) checar saldo do banco origem
-    saldo_origem = _try_saldo_banco(caminho_banco, banco_origem, data_str)
-    if saldo_origem is not None and valor_f > saldo_origem:
-        raise ValueError(
-            f"Saldo insuficiente no banco '{banco_origem}'. Disponível até {data_str}: {formatar_moeda(saldo_origem)}"
-        )
+    # (Opcional) checar saldo do banco origem USANDO lógica completa (Inclui Vendas)
+    try:
+        saldos_dict = _somar_bancos_totais(caminho_banco, data_dt)
+        if isinstance(saldos_dict, dict):
+            saldo_origem = saldos_dict.get(banco_origem)
+            if saldo_origem is not None:
+                # Se houver saldo calculado, valida
+                if valor_f > saldo_origem:
+                     raise ValueError(
+                        f"Saldo insuficiente no banco '{banco_origem}'. Disponível em {data_str}: {formatar_moeda(saldo_origem)}"
+                    )
+    except Exception as e:
+        # Se falhar a validação de saldo (ex: erro de cálculo), apenas loga ou ignora,
+        # mas se for ValueError (insuficiente), deixa passar.
+        if isinstance(e, ValueError):
+            raise e
+        pass
 
     # --- grava duas movimentações (saida/entrada) ---
     repo = MovimentacoesRepository(caminho_banco)
