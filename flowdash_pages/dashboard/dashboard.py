@@ -1983,19 +1983,23 @@ def render_bloco_balanco_mensal(df_entrada: pd.DataFrame, df_saida: pd.DataFrame
         st.markdown("**Valores Mensais**")
         st.dataframe(tabela_fmt, use_container_width=True)
 
-def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
+def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict], ano_reposicao: int) -> None:
     simplified = bool(st.session_state.get("fd_modo_mobile", False))
-    st.subheader("Reposição / Estoque")
+    st.subheader(f"Reposição / Estoque ({ano_reposicao})")
+    
     if df_mercadorias.empty:
-        st.info("Sem dados de mercadorias.")
-        return
-    anos_disp = sorted(df_mercadorias["ano"].dropna().unique())
-    if not anos_disp:
-        st.info("Nenhum ano disponível para reposição.")
-        return
-    ano_reposicao = st.selectbox("Ano – Reposição", options=anos_disp, index=len(anos_disp) - 1 if anos_disp else 0)
-    df_ano = df_mercadorias[df_mercadorias["ano"] == ano_reposicao]
-    reposicao = df_ano.groupby("mes")["Valor"].sum().reindex(range(1, 13)).fillna(0.0)
+        # Cria estrutura vazia para não quebrar o gráfico se não houver mercadorias no geral
+        df_ano = pd.DataFrame(columns=["mes", "Valor"])
+    else:
+        df_ano = df_mercadorias[df_mercadorias["year_int"] == ano_reposicao] if "year_int" in df_mercadorias.columns else df_mercadorias[df_mercadorias["ano"] == ano_reposicao]
+
+    if df_ano.empty:
+       reposicao = pd.Series([0.0]*12, index=range(1, 13))
+       # Apenas aviso discreto se quiser
+       # st.info(f"Sem dados de reposição para {ano_reposicao}.")
+    else:
+       reposicao = df_ano.groupby("mes")["Valor"].sum().reindex(range(1, 13)).fillna(0.0)
+
     cmv = [metrics[m - 1].get("cmv", 0.0) if m - 1 < len(metrics) else 0.0 for m in range(1, 13)]
 
     # Cores da paleta roxa
@@ -2512,7 +2516,7 @@ def render_dashboard(caminho_banco: Optional[str]):
                 render_bloco_heatmap(df_entrada, [int(a) for a in anos_multiselect], is_mobile=IS_MOBILE)
 
     with st.container():
-        render_reposicao(df_mercadorias, metrics)
+        render_reposicao(df_mercadorias, metrics, int(ano_selecionado))
 
     st.divider() # Adiciona divisor explicito para corrigir problemas de layout/overlap
 
