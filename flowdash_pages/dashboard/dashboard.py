@@ -500,7 +500,7 @@ def render_metas_resumo_dashboard(db_path: str) -> None:
     df_entrada["UsuarioUpper"] = df_entrada.get("Usuario", "LOJA").astype(str).str.upper()
     df_loja = df_entrada[df_entrada["UsuarioUpper"] != "LOJA"]
     mask_dia = df_loja["Data"].dt.date == ref_day
-    mask_sem = (df_loja["Data"].dt.date >= inicio_sem) & (df_loja["Data"].dt.date <= ref_day)
+    mask_sem = (df_loja["Data"].dt.date >= inicio_sem) & (df_loja["Data"].dt.date <= ref_day) & (df_loja["Data"].dt.date >= inicio_mes)
     mask_mes = (df_loja["Data"].dt.date >= inicio_mes) & (df_loja["Data"].dt.date <= ref_day)
     valor_dia = df_loja.loc[mask_dia, "Valor"].sum()
     valor_sem = df_loja.loc[mask_sem, "Valor"].sum()
@@ -1734,7 +1734,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
     # Prepara a série principal de Lucro Líquido
     lucros_plot = []
     for idx, val in enumerate(lucros_raw, start=1):
-        if idx < 10:
+        if ano == 2025 and idx < 10:
             lucros_plot.append(None)
             continue
         try:
@@ -1799,7 +1799,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
     title_size = 22 if is_mobile else 18
     height = 550 if is_mobile else 350
 
-    if ano == 2025:
+    if ano >= 2025:
         show_lucro = any(v is not None for v in serie_lucro_liquido)
         if show_lucro:
             # Calcula limites para o eixo Y para evitar corte dos rótulos
@@ -1871,7 +1871,7 @@ def render_bloco_lucro_liquido(metrics: List[Dict], ano: int, vars_dre, db_path:
             if is_mobile:
                 fig_lucro.update_traces(text=None, texttemplate=None)
 
-    if ano != 2025:
+    if ano < 2025:
         st.warning("Lucro líquido só está disponível a partir de outubro de 2025. Não há dados consistentes para anos anteriores.")
     else:
         if show_lucro and fig_lucro is not None:

@@ -2284,8 +2284,8 @@ def _render_kpis_mes_cards(db_path: str, ano: int, mes: int, vars_dre: VarsDRE) 
               extra_tip=tip_hist_ytd),
     ], "k-cresc"))
 
-    margem_ebitda_ratio = (margem_ebitda_pct_val / 100.0) if margem_ebitda_pct_val is not None else None
-    margem_operacional_ratio = (margem_operacional_pct_val / 100.0) if margem_operacional_pct_val is not None else None
+    margem_ebitda_ratio = margem_ebitda_pct_val if margem_ebitda_pct_val is not None else None
+    margem_operacional_ratio = margem_operacional_pct_val if margem_operacional_pct_val is not None else None
 
     ebitda_display = _fmt_brl(m["ebitda"])
     if margem_ebitda_ratio is not None:
