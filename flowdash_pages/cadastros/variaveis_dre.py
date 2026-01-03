@@ -4,12 +4,38 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import json  # <--- Funcionalidade do showroom
 from typing import Optional, Tuple, List, Callable, Dict, Any
 import html as _html
 from datetime import date, datetime
 
 import pandas as pd
 import streamlit as st
+
+# --- MIGRATION SAFEGUARD ---
+def _ensure_mix_schema_v2(db_path):
+    """Garante que a tabela mix_produtos tenha as colunas preco_medio e markup."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        
+        # Verifica colunas existentes
+        cur.execute("PRAGMA table_info(mix_produtos)")
+        cols = [r[1] for r in cur.fetchall()]
+        
+        # Adiciona se faltar
+        if 'preco_medio' not in cols:
+            cur.execute("ALTER TABLE mix_produtos ADD COLUMN preco_medio REAL DEFAULT 0.0")
+        if 'markup' not in cols:
+            cur.execute("ALTER TABLE mix_produtos ADD COLUMN markup REAL DEFAULT 2.0")
+            
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try: conn.close()
+        except: pass
+# ---------------------------
 
 # ============== Descoberta de DB (segura) ==============
 def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
@@ -210,7 +236,7 @@ def _upsert(conn: sqlite3.Connection, chave: str, tipo: str,
         )
     conn.commit()
 
-# ====== Variáveis que PODEM ser gravadas no DB (somente as 8 pedidas) ======
+# ====== Variáveis que PODEM ser gravadas no DB (somente as permitidas) ======
 _ALLOWED_KEYS = {
     # calculados e bases do DRE
     "ativos_totais_base",
@@ -228,6 +254,11 @@ _ALLOWED_KEYS = {
     # estoque base
     "dre_estoque_inicial_live",
     "dre_data_corte_live",
+    # NOVAS: Estoque & Mix (Adicionadas para Tab 2 funcionar)
+    "dre_estoque_mes_min_pct",
+    "dre_estoque_mes_ideal_pct",
+    "dre_estoque_mes_max_pct",
+    "dre_quebra_padrao_pct"
 }
 
 def _upsert_allowed(conn: sqlite3.Connection, chave: str, tipo: str,
@@ -349,6 +380,11 @@ def _preload_session_from_sources(conn: sqlite3.Connection, db_path: Optional[st
         "aliquota_simples_nacional_live": ("aliquota_simples_nacional", "num"),
         "pl_imobilizado_valor_total": ("pl_imobilizado_valor_total", "num"),
         "dep_taxa_mensal_percent_live": ("dep_taxa_mensal_percent_live", "num"),
+        # NOVOS (Tab 2)
+        "dre_estoque_mes_min_pct_live": ("dre_estoque_mes_min_pct", "num"),
+        "dre_estoque_mes_ideal_pct_live": ("dre_estoque_mes_ideal_pct", "num"),
+        "dre_estoque_mes_max_pct_live": ("dre_estoque_mes_max_pct", "num"),
+        "dre_quebra_padrao_pct_live": ("dre_quebra_padrao_pct", "num"),
     }
     for key_widget, (db_key, tipo) in mapping_db.items():
         try:
@@ -365,8 +401,12 @@ def _stack(renderers: List[Callable[[], None]]) -> None:
         with st.container():
             r()
 
-# ============== Helpers de domínio ==============
+# ============== Helpers de domínio (CORREÇÃO APLICADA AQUI) ==============
 def _get_passivos_totais_cap(db_path: Optional[str]) -> Tuple[float, str]:
+    """
+    Retorna o Saldo Devedor Total (Passivos) igual ao card do Contas a Pagar:
+    Empréstimos (Saldo Devedor) + Cartões (Aberto) + Boletos (Saldo Devedor).
+    """
     try:
         from flowdash_pages.dataframes.contas_a_pagar import (  # type: ignore
             _load_loans_raw, _build_loans_view, _loans_totals,
@@ -374,18 +414,31 @@ def _get_passivos_totais_cap(db_path: Optional[str]) -> Tuple[float, str]:
             _build_boletos_view, _boletos_totals_view, DB
         )
         hoje = date.today()
+        # Instancia classe DB exigida pelo contas_a_pagar.py
         db = DB(db_path or "data/flowdash_data.db")
 
+        # 1. EMPRÉSTIMOS
         df_loans_raw = _load_loans_raw(db)
-        df_loans_view = _build_loans_view(df_loans_raw) if not df_loans_raw.empty else pd.DataFrame()
+        if not df_loans_raw.empty:
+            # CORREÇÃO CRÍTICA: Passando (db, df) como o arquivo de origem exige
+            try:
+                df_loans_view = _build_loans_view(db, df_loans_raw)
+            except TypeError:
+                # Fallback caso a função mude
+                df_loans_view = _build_loans_view(df_loans_raw)
+        else:
+            df_loans_view = pd.DataFrame()
         loans_sums = _loans_totals(df_loans_view)
 
+        # 2. CARTÕES
         df_cards_view = _cards_view(db, hoje.year, hoje.month)
         cards_sums = _cards_totals(df_cards_view)
 
+        # 3. BOLETOS
         df_boletos_view = _build_boletos_view(db, hoje.year, hoje.month)
         bols_sums = _boletos_totals_view(df_boletos_view)
 
+        # Soma Total Consolidada
         total_saldo = (
             float(loans_sums.get("saldo_total", 0.0)) +
             float(cards_sums.get("aberto_total", 0.0)) +
@@ -520,6 +573,64 @@ def _compute_receita_liquida_acum(conn: sqlite3.Connection, data_corte_iso: str)
     except Exception as e:
         return 0.0, f"Erro ao calcular receita líquida acumulada: {e}"
 
+# ============== MIX DE PRODUTOS (Backend Helpers - Adicionado para Tab 2) ==============
+def get_all_products(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Retorna lista de todos os produtos (dicionários)."""
+    db_path = _ensure_db_path_or_raise(db_path)
+    conn = _connect(db_path)
+    _ensure_table_mix(conn) # Garante que a tabela existe
+    try:
+        rows = conn.execute("SELECT * FROM mix_produtos ORDER BY classificacao, nome_categoria").fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+def toggle_status(product_id: int, db_path: Optional[str] = None) -> bool:
+    """Alterna o status do produto (ativo <-> inativo)."""
+    db_path = _ensure_db_path_or_raise(db_path)
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute("SELECT status FROM mix_produtos WHERE id = ?", (product_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        
+        current_status = row["status"]
+        new_status = "inativo" if current_status == "ativo" else "ativo"
+        
+        conn.execute("UPDATE mix_produtos SET status = ? WHERE id = ?", (new_status, product_id))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def delete_product(product_id: int, db_path: Optional[str] = None) -> bool:
+    """Deleta permanentemente um produto."""
+    db_path = _ensure_db_path_or_raise(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.execute("DELETE FROM mix_produtos WHERE id = ?", (product_id,))
+        conn.commit()
+        return True
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+def _ensure_table_mix(conn: sqlite3.Connection):
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mix_produtos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome_categoria TEXT UNIQUE NOT NULL,
+            percentual_ideal REAL DEFAULT 0.0,
+            classificacao TEXT DEFAULT 'A',
+            status TEXT DEFAULT 'ativo'
+        );
+    """)
+    conn.commit()
+
 # ============== API pública p/ DRE (estoque atual on-the-fly) ==============
 def get_estoque_atual_estimado(db_path_pref: Optional[str] = None) -> float:
     """
@@ -563,8 +674,9 @@ def get_estoque_atual_estimado(db_path_pref: Optional[str] = None) -> float:
 
 # ============== UI ==============
 def render(db_path_pref: Optional[str] = None):
-    """Cadastros › Variáveis do DRE (só 8 variáveis no DB; demais via JSON p/ não zerar)."""
+    """Cadastros › Variáveis do DRE e Gestão de Estoque."""
     db_path = _ensure_db_path_or_raise(db_path_pref)
+    _ensure_mix_schema_v2(db_path) # Garante schema atualizado para o Mix
     conn = _connect(db_path)
     _ensure_table(conn)
 
@@ -575,267 +687,505 @@ def render(db_path_pref: Optional[str] = None):
     except Exception:
         pass
 
-    st.markdown("### 🧩 Cadastros › Variáveis do DRE")
+    st.markdown("### 🧩 Cadastros › Variáveis do DRE & Estoque")
 
-    # ===== Estoque (persistência via JSON)
-    with st.container():
-        st.subheader("Estoque")
+    # === ESTRUTURA DE ABAS (Tab 1: Código Original / Tab 2: Código Novo do Mix) ===
+    tab1, tab2 = st.tabs(["Variáveis DRE", "Estoque & Mix"])
 
-        estoque_inicial_live = number_input_state(
-            "Estoque inicial (R$)",
-            key="dre_estoque_inicial_live",
-            default=0.0,
-            min_value=0.0, step=100.0, format="%.2f",
-            help="Base manual do valor de estoque no início do período. Usada no cálculo do estoque atual estimado. Persistida em arquivo (não no banco).",
-            on_change=_on_change_persist("dre_estoque_inicial_live", db_path=db_path),
-        )
+    # ================== ABA 1: VARIÁVEIS DRE (CÓDIGO ORIGINAL) ==================
+    with tab1:
+        # ===== Estoque (persistência via JSON)
+        with st.container():
+            st.subheader("Estoque")
 
-        data_corte_widget = date_input_state(
-            "Data de corte do estoque",
-            key="dre_data_corte_live",
-            default=date.today(),
-            format="DD/MM/YYYY",
-            help="Data a partir da qual as compras (mercadorias) entram no 'Estoque base na data de corte'. Afeta CMV e estoque atual estimado. Persistida em arquivo.",
-            on_change=_on_change_persist("dre_data_corte_live", db_path=db_path),
-        )
-        data_corte_iso_live = data_corte_widget.strftime("%Y-%m-%d")
-
-        estoque_base_auto_live, hint_calc_live = _compute_estoque_base_corte(conn, data_corte_iso_live)
-        estoque_total_live = float(estoque_inicial_live or 0.0) + float(estoque_base_auto_live or 0.0)
-        markup_medio_live = _get_num(conn, "markup_medio", 2.40)
-        receita_acum_live, hint_rec_live = _compute_receita_liquida_acum(conn, data_corte_iso_live)
-        cmv_est_live = float(receita_acum_live or 0.0) / float(markup_medio_live or 1.0)
-        estoque_atual_est_live = float(estoque_total_live or 0.0) - float(cmv_est_live or 0.0)
-
-        _stack([
-            lambda: st.text_input(
-                "Estoque base na data de corte (R$)",
-                _fmt_brl(estoque_base_auto_live),
-                disabled=True,
-                key="vi_txt_estoque_base_corte",
-                help="Soma das compras de mercadoria a partir da Data de corte. Calculado automaticamente a partir da tabela 'mercadorias'."
-            ),
-            lambda: st.text_input(
-                "Total de estoque (R$) — inicial + base",
-                _fmt_brl(estoque_total_live),
-                disabled=True,
-                key="vi_txt_total_estoque",
-                help="Soma do Estoque inicial com o Estoque base na data de corte."
-            ),
-            lambda: st.text_input(
-                "Receita líquida acumulada (desde a data de corte)",
-                _fmt_brl(receita_acum_live),
-                disabled=True,
-                key="vi_txt_receita_acum",
-                help="Vendas líquidas acumuladas desde a Data de corte, usadas para estimar CMV via Markup médio."
-            ),
-            lambda: st.text_input(
-                "CMV acumulado (estimado)",
-                _fmt_brl(cmv_est_live),
-                disabled=True,
-                key="vi_txt_cmv_acum",
-                help="Estimativa do Custo das Mercadorias Vendidas = Receita líquida acumulada ÷ Markup médio."
-            ),
-            lambda: st.text_input(
-                "Estoque atual (estimado)",
-                _fmt_brl(estoque_atual_est_live),
-                disabled=True,
-                key="vi_txt_estoque_atual_1",
-                help="Estoque atual aproximado = (Estoque inicial + Estoque base) − CMV estimado."
-            ),
-        ])
-
-        if hint_calc_live:
-            st.caption(f"ℹ️ {hint_calc_live}")
-        if hint_rec_live:
-            st.caption(f"ℹ️ {hint_rec_live}")
-
-    st.divider()
-
-    # ===== Patrimônio / Investimento
-    with st.container():
-        st.subheader("Indicadores para Patrimônio Líquido / ROE / ROI / ROA")
-
-        bancos_total_preview, hint_bancos = _get_total_consolidado_bancos_caixa(conn, db_path)
-        if hint_bancos:
-            st.caption(f"ℹ️ Fechamento: {hint_bancos}")
-
-        try:
-            estoque_atual_est_calc = estoque_atual_est_live
-        except Exception:
-            estoque_atual_est_calc = 0.0
-
-        passivos_totais_preview, hint_cap = _get_passivos_totais_cap(db_path)
-        if hint_cap:
-            st.caption(f"ℹ️ CAP: {hint_cap}")
-
-        # Imobilizado (persistência via JSON)
-        imobilizado_valor_input = number_input_state(
-            "Valor total dos bens (R$) – Imobilizado",
-            key="pl_imobilizado_valor_total",
-            default=0.0,
-            min_value=0.0, step=100.0, format="%.2f",
-            help="Somatório do imobilizado (fachada, mobiliário, TI, etc.). Entra nos Ativos Totais. Persistido em arquivo (não no banco).",
-            on_change=_on_change_upsert_num("pl_imobilizado_valor_total", "pl_imobilizado_valor_total", "Valor total dos bens (R$) – Imobilizado", db_path),
-        )
-        _upsert_allowed(conn, "pl_imobilizado_valor_total", "num", imobilizado_valor_input, None, "Valor total dos bens (R$) – Imobilizado")
-        _persist_keys_to_json(["pl_imobilizado_valor_total"], db_path)
-
-        # Cálculos (ativos / PL)
-        ativos_totais_preview = float(bancos_total_preview or 0.0) + float(estoque_atual_est_calc or 0.0) + float(imobilizado_valor_input or 0.0)
-        pl_preview = float(ativos_totais_preview) - float(passivos_totais_preview or 0.0)
-
-        # Persistências no DB (somente as 8)
-        _upsert_allowed(conn, "ativos_totais_base", "num", ativos_totais_preview, None, "Ativos Totais (calc.) — usado no DRE")
-        _upsert_allowed(conn, "patrimonio_liquido_base", "num", pl_preview, None, "Patrimônio Líquido (calc.) — usado no DRE")
-
-        def _ativos_calc_green():
-            st.text_input(
-                "Ativos Totais - Utilizado no DRE",
-                value=_fmt_brl(ativos_totais_preview),
-                disabled=True,
-                key="vi_txt_ativos_totais_calc_green",
-                help="Soma de Bancos+Caixas + Estoque atual (estimado) + Imobilizado. Persistido no DB como 'ativos_totais_base'."
-            )
-
-        def _pl_calc_green():
-            st.text_input(
-                "Patrimônio Líquido - Utilizado no DRE",
-                value=_fmt_brl(pl_preview),
-                disabled=True,
-                key="vi_txt_pl_calc_persist",
-                help="Ativos Totais − Passivos Totais (CAP). Persistido no DB como 'patrimonio_liquido_base'."
-            )
-
-        # Investimento Base (DB)
-        investimento_default = _nonneg(_get_num(conn, "investimento_total_base", 0.0))
-        def _invest_input():
-            val = number_input_state(
-                "Investimento Total Base (R$) - Utilizado no DRE",
-                key="investimento_total_base_live",
-                default=investimento_default,
+            estoque_inicial_live = number_input_state(
+                "Estoque inicial (R$)",
+                key="dre_estoque_inicial_live",
+                default=0.0,
                 min_value=0.0, step=100.0, format="%.2f",
-                help="Aportes/reformas/capital investido acumulado. Usado para ROI. Persistido no DB como 'investimento_total_base'.",
-                on_change=_on_change_upsert_num("investimento_total_base", "investimento_total_base_live", "Investimento Total Base (R$)", db_path),
+                help="Base manual do valor de estoque no início do período. Usada no cálculo do estoque atual estimado. Persistida em arquivo (não no banco).",
+                on_change=_on_change_persist("dre_estoque_inicial_live", db_path=db_path),
             )
-            _upsert_allowed(conn, "investimento_total_base", "num", val, None, "Investimento Total Base (R$)")
 
-        _stack([
-            lambda: st.text_input(
-                "Bancos + Caixa (Total consolidado)",
-                _fmt_brl(bancos_total_preview),
+            data_corte_widget = date_input_state(
+                "Data de corte do estoque",
+                key="dre_data_corte_live",
+                default=date.today(),
+                format="DD/MM/YYYY",
+                help="Data a partir da qual as compras (mercadorias) entram no 'Estoque base na data de corte'. Afeta CMV e estoque atual estimado. Persistida em arquivo.",
+                on_change=_on_change_persist("dre_data_corte_live", db_path=db_path),
+            )
+            data_corte_iso_live = data_corte_widget.strftime("%Y-%m-%d")
+
+            estoque_base_auto_live, hint_calc_live = _compute_estoque_base_corte(conn, data_corte_iso_live)
+            estoque_total_live = float(estoque_inicial_live or 0.0) + float(estoque_base_auto_live or 0.0)
+            markup_medio_live = _get_num(conn, "markup_medio", 2.40)
+            receita_acum_live, hint_rec_live = _compute_receita_liquida_acum(conn, data_corte_iso_live)
+            cmv_est_live = float(receita_acum_live or 0.0) / float(markup_medio_live or 1.0)
+            estoque_atual_est_live = float(estoque_total_live or 0.0) - float(cmv_est_live or 0.0)
+
+            _stack([
+                lambda: st.text_input(
+                    "Estoque base na data de corte (R$)",
+                    _fmt_brl(estoque_base_auto_live),
+                    disabled=True,
+                    key="vi_txt_estoque_base_corte",
+                    help="Soma das compras de mercadoria a partir da Data de corte. Calculado automaticamente a partir da tabela 'mercadorias'."
+                ),
+                lambda: st.text_input(
+                    "Total de estoque (R$) — inicial + base",
+                    _fmt_brl(estoque_total_live),
+                    disabled=True,
+                    key="vi_txt_total_estoque",
+                    help="Soma do Estoque inicial com o Estoque base na data de corte."
+                ),
+                lambda: st.text_input(
+                    "Receita líquida acumulada (desde a data de corte)",
+                    _fmt_brl(receita_acum_live),
+                    disabled=True,
+                    key="vi_txt_receita_acum",
+                    help="Vendas líquidas acumuladas desde a Data de corte, usadas para estimar CMV via Markup médio."
+                ),
+                lambda: st.text_input(
+                    "CMV acumulado (estimado)",
+                    _fmt_brl(cmv_est_live),
+                    disabled=True,
+                    key="vi_txt_cmv_acum",
+                    help="Estimativa do Custo das Mercadorias Vendidas = Receita líquida acumulada ÷ Markup médio."
+                ),
+                lambda: st.text_input(
+                    "Estoque atual (estimado)",
+                    _fmt_brl(estoque_atual_est_live),
+                    disabled=True,
+                    key="vi_txt_estoque_atual_1",
+                    help="Estoque atual aproximado = (Estoque inicial + Estoque base) − CMV estimado."
+                ),
+            ])
+
+            if hint_calc_live:
+                st.caption(f"ℹ️ {hint_calc_live}")
+            if hint_rec_live:
+                st.caption(f"ℹ️ {hint_rec_live}")
+
+        st.divider()
+
+        # ===== Patrimônio / Investimento
+        with st.container():
+            st.subheader("Indicadores para Patrimônio Líquido / ROE / ROI / ROA")
+
+            bancos_total_preview, hint_bancos = _get_total_consolidado_bancos_caixa(conn, db_path)
+            if hint_bancos:
+                st.caption(f"ℹ️ Fechamento: {hint_bancos}")
+
+            try:
+                estoque_atual_est_calc = estoque_atual_est_live
+            except Exception:
+                estoque_atual_est_calc = 0.0
+
+            passivos_totais_preview, hint_cap = _get_passivos_totais_cap(db_path)
+            if hint_cap:
+                st.caption(f"ℹ️ CAP: {hint_cap}")
+
+            # Imobilizado (persistência via JSON)
+            imobilizado_valor_input = number_input_state(
+                "Valor total dos bens (R$) – Imobilizado",
+                key="pl_imobilizado_valor_total",
+                default=0.0,
+                min_value=0.0, step=100.0, format="%.2f",
+                help="Somatório do imobilizado (fachada, mobiliário, TI, etc.). Entra nos Ativos Totais. Persistido em arquivo (não no banco).",
+                on_change=_on_change_upsert_num("pl_imobilizado_valor_total", "pl_imobilizado_valor_total", "Valor total dos bens (R$) – Imobilizado", db_path),
+            )
+            _upsert_allowed(conn, "pl_imobilizado_valor_total", "num", imobilizado_valor_input, None, "Valor total dos bens (R$) – Imobilizado")
+            _persist_keys_to_json(["pl_imobilizado_valor_total"], db_path)
+
+            # Cálculos (ativos / PL)
+            ativos_totais_preview = float(bancos_total_preview or 0.0) + float(estoque_atual_est_calc or 0.0) + float(imobilizado_valor_input or 0.0)
+            pl_preview = float(ativos_totais_preview) - float(passivos_totais_preview or 0.0)
+
+            # Persistências no DB (somente as permitidas)
+            _upsert_allowed(conn, "ativos_totais_base", "num", ativos_totais_preview, None, "Ativos Totais (calc.) — usado no DRE")
+            _upsert_allowed(conn, "patrimonio_liquido_base", "num", pl_preview, None, "Patrimônio Líquido (calc.) — usado no DRE")
+
+            def _ativos_calc_green():
+                st.text_input(
+                    "Ativos Totais - Utilizado no DRE",
+                    value=_fmt_brl(ativos_totais_preview),
+                    disabled=True,
+                    key="vi_txt_ativos_totais_calc_green",
+                    help="Soma de Bancos+Caixas + Estoque atual (estimado) + Imobilizado. Persistido no DB como 'ativos_totais_base'."
+                )
+
+            def _pl_calc_green():
+                st.text_input(
+                    "Patrimônio Líquido - Utilizado no DRE",
+                    value=_fmt_brl(pl_preview),
+                    disabled=True,
+                    key="vi_txt_pl_calc_persist",
+                    help="Ativos Totais − Passivos Totais (CAP). Persistido no DB como 'patrimonio_liquido_base'."
+                )
+
+            # Investimento Base (DB)
+            investimento_default = _nonneg(_get_num(conn, "investimento_total_base", 0.0))
+            def _invest_input():
+                val = number_input_state(
+                    "Investimento Total Base (R$) - Utilizado no DRE",
+                    key="investimento_total_base_live",
+                    default=investimento_default,
+                    min_value=0.0, step=100.0, format="%.2f",
+                    help="Aportes/reformas/capital investido acumulado. Usado para ROI. Persistido no DB como 'investimento_total_base'.",
+                    on_change=_on_change_upsert_num("investimento_total_base", "investimento_total_base_live", "Investimento Total Base (R$)", db_path),
+                )
+                _upsert_allowed(conn, "investimento_total_base", "num", val, None, "Investimento Total Base (R$)")
+
+            _stack([
+                lambda: st.text_input(
+                    "Bancos + Caixa (Total consolidado)",
+                    _fmt_brl(bancos_total_preview),
+                    disabled=True,
+                    key="vi_txt_bancos_caixa_total",
+                    help="Total disponível somando saldos dos bancos e dos caixas. Vem do módulo Fechamento."
+                ),
+                lambda: st.text_input(
+                    "Passivos Totais (CAP)",
+                    _fmt_brl(passivos_totais_preview),
+                    disabled=True,
+                    key="vi_txt_passivos_totais",
+                    help="Dívidas consolidadas (empréstimos, cartões a pagar, boletos). Vem do módulo Contas a Pagar."
+                ),
+                _ativos_calc_green,
+                _pl_calc_green,
+                _invest_input,
+            ])
+
+        st.divider()
+
+        # ===== Depreciação
+        with st.container():
+            st.subheader("Depreciação")
+
+            st.text_input(
+                "Valor total dos bens (R$)",
+                value=_fmt_brl(st.session_state.get("pl_imobilizado_valor_total", 0.0)),
                 disabled=True,
-                key="vi_txt_bancos_caixa_total",
-                help="Total disponível somando saldos dos bancos e dos caixas. Vem do módulo Fechamento."
-            ),
-            lambda: st.text_input(
-                "Passivos Totais (CAP)",
-                _fmt_brl(passivos_totais_preview),
+                key="vi_txt_dep_valor_bens",
+                help="Espelha o valor informado em Imobilizado. Base para estimar a depreciação mensal padrão."
+            )
+
+            taxa_dep = number_input_state(
+                "Taxa mensal (%)",
+                key="dep_taxa_mensal_percent_live",
+                default=0.0,
+                min_value=0.0, step=0.10, format="%.2f",
+                help="Percentual mensal estimado para depreciação do imobilizado. Persistido em arquivo (não no DB).",
+                on_change=_on_change_upsert_num("dep_taxa_mensal_percent_live", "dep_taxa_mensal_percent_live", "Taxa mensal (%)", db_path),
+            )
+            _upsert_allowed(conn, "dep_taxa_mensal_percent_live", "num", taxa_dep, None, "Taxa mensal (%)")
+            _persist_keys_to_json(["dep_taxa_mensal_percent_live"], db_path)
+
+            imobilizado_valor = float(st.session_state.get("pl_imobilizado_valor_total", 0.0) or 0.0)
+            estimativa = float(imobilizado_valor * ((taxa_dep or 0.0) / 100.0))
+
+            _upsert_allowed(conn, "depreciacao_mensal_padrao", "num", estimativa, None, "Depreciação mensal p/ EBITDA (R$)")
+
+            _green_label("Depreciação mensal padrão (R$/mês) - Utilizado no DRE")
+            st.text_input(
+                "Depreciação mensal padrão (R$/mês) - Utilizado no DRE",
+                value=_fmt_brl(estimativa),
                 disabled=True,
-                key="vi_txt_passivos_totais",
-                help="Dívidas consolidadas (empréstimos, cartões a pagar, boletos). Vem do módulo Contas a Pagar."
-            ),
-            _ativos_calc_green,
-            _pl_calc_green,
-            _invest_input,
-        ])
+                key="vi_txt_dep_estimativa",
+                help="Valor em R$/mês usado no DRE para EBIT/EBITDA. Persistido no DB como 'depreciacao_mensal_padrao'."
+            )
 
-    st.divider()
+        st.divider()
 
-    # ===== Depreciação
-    with st.container():
-        st.subheader("Depreciação")
+        # ===== Parâmetros Básicos (todas no DB)
+        with st.container():
+            st.subheader("Parâmetros Básicos")
 
-        st.text_input(
-            "Valor total dos bens (R$)",
-            value=_fmt_brl(st.session_state.get("pl_imobilizado_valor_total", 0.0)),
-            disabled=True,
-            key="vi_txt_dep_valor_bens",
-            help="Espelha o valor informado em Imobilizado. Base para estimar a depreciação mensal padrão."
-        )
+            _green_label("Fundo de promoção (%) - Utilizado no DRE")
+            fundo_default = _nonneg(_get_num(conn, "fundo_promocao_percent", 1.00))
+            fundo = number_input_state(
+                "Fundo de promoção (%) - Utilizado no DRE",
+                key="fundo_promocao_percent_live",
+                default=fundo_default,
+                min_value=0.0, step=0.01, format="%.2f",
+                label_visibility="collapsed",
+                help="Percentual do faturamento destinado a fundo de promoção. Usado no DRE e persistido no DB.",
+                on_change=_on_change_upsert_num("fundo_promocao_percent", "fundo_promocao_percent_live", "Fundo de promoção (%)", db_path)
+            )
+            _upsert_allowed(conn, "fundo_promocao_percent", "num", fundo, None, "Fundo de promoção (%)")
 
-        taxa_dep = number_input_state(
-            "Taxa mensal (%)",
-            key="dep_taxa_mensal_percent_live",
-            default=0.0,
-            min_value=0.0, step=0.10, format="%.2f",
-            help="Percentual mensal estimado para depreciação do imobilizado. Persistido em arquivo (não no DB).",
-            on_change=_on_change_upsert_num("dep_taxa_mensal_percent_live", "dep_taxa_mensal_percent_live", "Taxa mensal (%)", db_path),
-        )
-        _upsert_allowed(conn, "dep_taxa_mensal_percent_live", "num", taxa_dep, None, "Taxa mensal (%)")
-        _persist_keys_to_json(["dep_taxa_mensal_percent_live"], db_path)
+            _green_label("Sacolas (%) - Utilizado no DRE")
+            sacolas_default = _nonneg(_get_num(conn, "sacolas_percent", 1.20))
+            sacolas = number_input_state(
+                "Sacolas (%) - Utilizado no DRE",
+                key="sacolas_percent_live",
+                default=sacolas_default,
+                min_value=0.0, step=0.01, format="%.2f",
+                label_visibility="collapsed",
+                help="Percentual médio gasto com sacolas sobre a receita. Usado no DRE e persistido no DB.",
+                on_change=_on_change_upsert_num("sacolas_percent", "sacolas_percent_live", "Custo de sacolas (%)", db_path)
+            )
+            _upsert_allowed(conn, "sacolas_percent", "num", sacolas, None, "Custo de sacolas (%)")
 
-        imobilizado_valor = float(st.session_state.get("pl_imobilizado_valor_total", 0.0) or 0.0)
-        estimativa = float(imobilizado_valor * ((taxa_dep or 0.0) / 100.0))
+            _green_label("Markup médio)")
+            markup_default = _nonneg(_get_num(conn, "markup_medio", 2.40))
+            markup = number_input_state(
+                "Markup médio - Utilizado no DRE",
+                key="markup_medio_live",
+                default=markup_default,
+                min_value=0.0, step=0.1, format="%.2f",
+                label_visibility="collapsed",
+                help="Coeficiente médio de precificação (Preço/CMV). Usado para estimar CMV quando não há custo unitário. Persistido no DB.",
+                on_change=_on_change_upsert_num("markup_medio", "markup_medio_live", "Markup médio (coeficiente)", db_path)
+            )
+            _upsert_allowed(conn, "markup_medio", "num", markup, None, "Markup médio (coeficiente)")
 
-        _upsert_allowed(conn, "depreciacao_mensal_padrao", "num", estimativa, None, "Depreciação mensal p/ EBITDA (R$)")
+            _green_label("Simples Nacional (%) - Utilizado no DRE")
+            simples_default = _nonneg(_get_num(conn, "aliquota_simples_nacional", 4.32))
+            simples = number_input_state(
+                "Simples Nacional (%) - Utilizado no DRE",
+                key="aliquota_simples_nacional_live",
+                default=simples_default,
+                min_value=0.0, step=0.01, format="%.2f",
+                label_visibility="collapsed",
+                help="Alíquota efetiva média de tributos no Simples sobre a receita. Usado no DRE e persistido no DB.",
+                on_change=_on_change_upsert_num("aliquota_simples_nacional", "aliquota_simples_nacional_live", "Alíquota Simples Nacional (%)", db_path)
+            )
+            _upsert_allowed(conn, "aliquota_simples_nacional", "num", simples, None, "Alíquota Simples Nacional (%)")
 
-        _green_label("Depreciação mensal padrão (R$/mês) - Utilizado no DRE")
-        st.text_input(
-            "Depreciação mensal padrão (R$/mês) - Utilizado no DRE",
-            value=_fmt_brl(estimativa),
-            disabled=True,
-            key="vi_txt_dep_estimativa",
-            help="Valor em R$/mês usado no DRE para EBIT/EBITDA. Persistido no DB como 'depreciacao_mensal_padrao'."
-        )
+    # ================== ABA 2: ESTOQUE & MIX (NOVO CÓDIGO) ==================
+    with tab2:
+        st.subheader("⚙️ Parâmetros Globais de Estoque")
+        
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+             min_v = number_input_state(
+                "Mínimo (% Ideal)", key="dre_estoque_mes_min_pct_live",
+                default=_get_num(conn, "dre_estoque_mes_min_pct", 80.0), step=1.0, format="%.1f",
+                on_change=_on_change_upsert_num("dre_estoque_mes_min_pct", "dre_estoque_mes_min_pct_live", "Estoque Mínimo", db_path)
+             )
+             _upsert_allowed(conn, "dre_estoque_mes_min_pct", "num", min_v, None, "Estoque Mínimo")
+        
+        with c2:
+             ideal_v = number_input_state(
+                "Ideal (% Previsão)", key="dre_estoque_mes_ideal_pct_live",
+                default=_get_num(conn, "dre_estoque_mes_ideal_pct", 100.0), step=1.0, format="%.1f",
+                on_change=_on_change_upsert_num("dre_estoque_mes_ideal_pct", "dre_estoque_mes_ideal_pct_live", "Estoque Ideal", db_path)
+             )
+             _upsert_allowed(conn, "dre_estoque_mes_ideal_pct", "num", ideal_v, None, "Estoque Ideal")
 
-    st.divider()
+        with c3:
+             max_v = number_input_state(
+                "Máximo (% Ideal)", key="dre_estoque_mes_max_pct_live",
+                default=_get_num(conn, "dre_estoque_mes_max_pct", 120.0), step=1.0, format="%.1f",
+                on_change=_on_change_upsert_num("dre_estoque_mes_max_pct", "dre_estoque_mes_max_pct_live", "Estoque Máximo", db_path)
+             )
+             _upsert_allowed(conn, "dre_estoque_mes_max_pct", "num", max_v, None, "Estoque Máximo")
 
-    # ===== Parâmetros Básicos (todas no DB)
-    with st.container():
-        st.subheader("Parâmetros Básicos")
+        with c4:
+             quebra_v = number_input_state(
+                "Quebra Padrão (%)", key="dre_quebra_padrao_pct_live",
+                default=_get_num(conn, "dre_quebra_padrao_pct", 2.0), step=0.1, format="%.1f",
+                on_change=_on_change_upsert_num("dre_quebra_padrao_pct", "dre_quebra_padrao_pct_live", "Quebra Padrão", db_path)
+             )
+             _upsert_allowed(conn, "dre_quebra_padrao_pct", "num", quebra_v, None, "Quebra Padrão")
 
-        _green_label("Fundo de promoção (%) - Utilizado no DRE")
-        fundo_default = _nonneg(_get_num(conn, "fundo_promocao_percent", 1.00))
-        fundo = number_input_state(
-            "Fundo de promoção (%) - Utilizado no DRE",
-            key="fundo_promocao_percent_live",
-            default=fundo_default,
-            min_value=0.0, step=0.01, format="%.2f",
-            label_visibility="collapsed",
-            help="Percentual do faturamento destinado a fundo de promoção. Usado no DRE e persistido no DB.",
-            on_change=_on_change_upsert_num("fundo_promocao_percent", "fundo_promocao_percent_live", "Fundo de promoção (%)", db_path)
-        )
-        _upsert_allowed(conn, "fundo_promocao_percent", "num", fundo, None, "Fundo de promoção (%)")
+        st.divider()
+        st.divider()
+        st.subheader("📦 Mix de Produtos (Gerenciamento)")
 
-        _green_label("Sacolas (%) - Utilizado no DRE")
-        sacolas_default = _nonneg(_get_num(conn, "sacolas_percent", 1.20))
-        sacolas = number_input_state(
-            "Sacolas (%) - Utilizado no DRE",
-            key="sacolas_percent_live",
-            default=sacolas_default,
-            min_value=0.0, step=0.01, format="%.2f",
-            label_visibility="collapsed",
-            help="Percentual médio gasto com sacolas sobre a receita. Usado no DRE e persistido no DB.",
-            on_change=_on_change_upsert_num("sacolas_percent", "sacolas_percent_live", "Custo de sacolas (%)", db_path)
-        )
-        _upsert_allowed(conn, "sacolas_percent", "num", sacolas, None, "Custo de sacolas (%)")
+        # --- Formulário de Adição Rápida ---
+        with st.expander("➕ Adicionar Novo Produto", expanded=False):
+            with st.form("form_add_product"):
+                c_add1, c_add2, c_add3 = st.columns([3, 2, 2])
+                with c_add1:
+                    new_nome = st.text_input("Nome da Categoria/Produto")
+                with c_add2:
+                    new_pct = st.number_input("% Ideal", min_value=0.0, max_value=100.0, step=0.1)
+                with c_add3:
+                    new_class = st.selectbox("Classificação", ["A", "B", "C", "Lançamento"])
+                
+                if st.form_submit_button("Adicionar"):
+                    if new_nome:
+                        try:
+                            conn.execute(
+                                "INSERT INTO mix_produtos (nome_categoria, percentual_ideal, classificacao, status) VALUES (?, ?, ?, 'ativo')",
+                                (new_nome, new_pct, new_class)
+                            )
+                            conn.commit()
+                            st.success(f"'{new_nome}' adicionado!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Erro ao adicionar: {e}")
+                    else:
+                        st.warning("Preencha o nome.")
 
-        _green_label("Markup médio)")
-        markup_default = _nonneg(_get_num(conn, "markup_medio", 2.40))
-        markup = number_input_state(
-            "Markup médio - Utilizado no DRE",
-            key="markup_medio_live",
-            default=markup_default,
-            min_value=0.0, step=0.1, format="%.2f",
-            label_visibility="collapsed",
-            help="Coeficiente médio de precificação (Preço/CMV). Usado para estimar CMV quando não há custo unitário. Persistido no DB.",
-            on_change=_on_change_upsert_num("markup_medio", "markup_medio_live", "Markup médio (coeficiente)", db_path)
-        )
-        _upsert_allowed(conn, "markup_medio", "num", markup, None, "Markup médio (coeficiente)")
+        st.divider()
 
-        _green_label("Simples Nacional (%) - Utilizado no DRE")
-        simples_default = _nonneg(_get_num(conn, "aliquota_simples_nacional", 4.32))
-        simples = number_input_state(
-            "Simples Nacional (%) - Utilizado no DRE",
-            key="aliquota_simples_nacional_live",
-            default=simples_default,
-            min_value=0.0, step=0.01, format="%.2f",
-            label_visibility="collapsed",
-            help="Alíquota efetiva média de tributos no Simples sobre a receita. Usado no DRE e persistido no DB.",
-            on_change=_on_change_upsert_num("aliquota_simples_nacional", "aliquota_simples_nacional_live", "Alíquota Simples Nacional (%)", db_path)
-        )
-        _upsert_allowed(conn, "aliquota_simples_nacional", "num", simples, None, "Alíquota Simples Nacional (%)")
+        # --- Listagem e Ações ---
+        products = get_all_products(db_path)
+        
+        # Validação do 100%
+        total_ideal = sum(p['percentual_ideal'] for p in products)
+        diff = abs(total_ideal - 100.0)
+        if diff <= 0.1:
+            st.success(f"✅ Total do Mix: {total_ideal:.1f}% (Correto)")
+        else:
+            st.error(f"⚠️ Total do Mix: {total_ideal:.1f}% (Deve ser 100%)")
+
+        if not products:
+            st.info("Nenhum produto cadastrado.")
+        else:
+            # -----------------------------------------------------
+            # LISTAGEM DO MIX (Editável em Grade)
+            # -----------------------------------------------------
+            st.markdown("##### 📝 Definição do Mix e Parâmetros Financeiros")
+            st.caption("Ajuste o % Ideal e o Preço Médio para cada categoria.")
+            
+            # Header
+            h1, h2, h3, h5, h6 = st.columns([3.5, 1.2, 1.2, 1, 0.5])
+            h1.markdown("**Categoria**")
+            h2.markdown("**% Ideal**")
+            h3.markdown("**P. Médio (R$)**")
+            h5.markdown("**Class**")
+            h6.markdown("**🗑️**")
+            
+            updates = []
+            
+            for p in products:
+                pid = p['id']
+                cat_name = p['nome_categoria']
+                
+                # Campos Editáveis
+                c1, c2, c3, c5, c6 = st.columns([3.5, 1.2, 1.2, 1, 0.5])
+                
+                with c1:
+                    st.text(cat_name)
+                    # Status Toggle mini
+                    is_active = (p['status'] == 'ativo')
+                    if st.checkbox("Ativo", value=is_active, key=f"active_{pid}") != is_active:
+                         toggle_status(pid, db_path)
+                         st.rerun()
+
+                pct_ideal = c2.number_input(f"pct_{pid}", value=float(p['percentual_ideal']), min_value=0.0, max_value=100.0, step=0.1, key=f"mix_pct_{pid}", label_visibility="collapsed")
+                
+                # Novos Campos: Preço
+                preco_val = float(p.get('preco_medio') or 0.0)
+                
+                preco_medio = c3.number_input(f"pr_{pid}", value=preco_val, min_value=0.0, step=5.0, format="%.2f", key=f"mix_pr_{pid}", label_visibility="collapsed")
+                
+                with c5:
+                     st.caption(p['classificacao'])
+                
+                with c6:
+                    if st.button("x", key=f"del_{pid}", help="Excluir Categoria"):
+                        if delete_product(pid, db_path):
+                            st.rerun()
+                
+                updates.append((pct_ideal, preco_medio, pid))
+            
+            st.markdown("<br>", unsafe_allow_html=True)
+            
+            if st.button("💾 Salvar Alterações do Mix"):
+                try:
+                    conn.executemany(
+                        "UPDATE mix_produtos SET percentual_ideal=?, preco_medio=? WHERE id=?",
+                        updates
+                    )
+                    conn.commit()
+                    st.toast("Mix e Parâmetros atualizados!", icon="✅")
+                    # st.rerun() # Opcional, o toast já avisa
+                except Exception as e:
+                    st.error(f"Erro ao salvar mix: {e}")
+
+            st.divider()
+
+            # -----------------------------------------------------
+            # CONFIGURAÇÃO DE MOSTRUÁRIO (Baseada no Mix)
+            # -----------------------------------------------------
+            st.subheader("🖼️ Configuração de Mostruário (Físico)")
+            st.caption("Defina a quantidade de peças para o showroom. O custo é calculado com base no Preço do Mix e no **Markup Médio Global**.")
+            
+            # Recupera Markup Global (usando _get_num que já existe)
+            markup_global_val = _get_num(conn, "markup_medio", 2.40) or 1.0
+
+            # Load config quantitativa apenas (qtd)
+            config_mostruario_old = {}
+            try:
+                row_conf = conn.execute("SELECT valor_text FROM dre_variaveis WHERE chave='config_mostruario_json'").fetchone()
+                if row_conf and row_conf[0]:
+                    config_mostruario_old = json.loads(row_conf[0])
+            except: pass
+            
+            mc1, mc2, mc3, mc4 = st.columns([3, 1.5, 1.5, 2])
+            mc1.markdown("**Categoria**")
+            mc2.markdown("**Qtd Peças (Fixo)**")
+            mc3.markdown(f"**Custo Unit.** (Mk: {markup_global_val:.2f})")
+            mc4.markdown("**Custo Total**")
+            
+            new_config_json = {}
+            total_showroom = 0.0
+            
+            for p in products:
+                if p['status'] != 'ativo': continue
+                
+                cat = p['nome_categoria']
+                pid = p['id']
+                
+                # Valores atuais do Mix (tela) vs Banco
+                # Como o usuario pode ter editado acima, idealmente salvamos antes, mas aqui lemos 'p' do banco
+                pr = float(p.get('preco_medio') or 0.0)
+                
+                # Usa MARKUP GLOBAL
+                mk = markup_global_val
+                if mk <= 0: mk = 1.0
+                custo_unit = pr / mk
+                
+                # Qtd vem do JSON antigo ou 0
+                vals_old = config_mostruario_old.get(cat, {})
+                qtd_saved = int(vals_old.get('qtd', 0))
+                
+                cc1, cc2, cc3, cc4 = st.columns([3, 1.5, 1.5, 2])
+                cc1.text(cat)
+                
+                qtd_new = cc2.number_input(f"qtd_sh_{pid}", value=qtd_saved, step=1, min_value=0, key=f"k_qtd_{pid}", label_visibility="collapsed")
+                
+                cc3.markdown(f"{_fmt_brl(custo_unit)}")
+                
+                custo_tot = qtd_new * custo_unit
+                cc4.markdown(f"**{_fmt_brl(custo_tot)}**")
+                
+                total_showroom += custo_tot
+                
+                # Salvamos no JSON o snapshot
+                new_config_json[cat] = {
+                    'qtd': qtd_new,
+                    'preco': pr,
+                    'markup': mk,
+                    'custo': custo_tot
+                }
+
+            st.markdown(f"#### Total Showroom: {_fmt_brl(total_showroom)}")
+            
+            if st.button("💾 Salvar Showroom"):
+                try:
+                    js = json.dumps(new_config_json)
+                    conn.execute(
+                        """
+                        INSERT INTO dre_variaveis (chave, tipo, valor_num, valor_text, descricao)
+                        VALUES ('config_mostruario_json', 'text', ?, ?, 'Config Mostruário V2')
+                        ON CONFLICT(chave) DO UPDATE SET
+                            valor_num=excluded.valor_num,
+                            valor_text=excluded.valor_text,
+                            updated_at=datetime('now')
+                        """,
+                        (total_showroom, js)
+                    )
+                    conn.commit()
+                    st.success("Configuração de Showroom salva!")
+                except Exception as e:
+                    st.error(f"Erro ao salvar: {e}")
 
     # ===== Salvaguarda final (idempotente) — mantém compatibilidade com fluxos antigos
     prefs = _load_ui_prefs(db_path)

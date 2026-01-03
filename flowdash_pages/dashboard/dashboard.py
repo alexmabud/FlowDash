@@ -25,6 +25,7 @@ from flowdash_pages.dre.dre import (
 )
 from flowdash_pages.finance_logic import _somar_bancos_totais, _ultimo_caixas_ate
 from flowdash_pages.dashboard.prophet_engine import criar_grafico_previsao
+from flowdash_pages.cadastros.variaveis_dre import get_estoque_atual_estimado
 
 
 # ========================= Helpers gerais =========================
@@ -2055,6 +2056,226 @@ def render_reposicao(df_mercadorias: pd.DataFrame, metrics: List[Dict]) -> None:
             st.plotly_chart(fig_anual, use_container_width=True, config=_plotly_config(simplified=simplified))
 
 
+from datetime import datetime
+from calendar import monthrange
+
+def render_gestao_estoque_otb(db_path: str, metricas_atual: Optional[Dict] = None, df_previsoes: pd.DataFrame = None):
+    import json
+    # st.markdown("---") # Removido para evitar duplicidade de divisores e conflito visual
+    st.header("📦 Planejamento de Estoque (Orçamento Baseado no Mix)")
+
+    # 1. Recuperar Configuração (Mostruário & Mix)
+    config_mostruario_json = {} 
+    
+    try:
+        with get_conn(db_path) as conn:
+            # Carrega Mix Completo
+            df_mix = pd.read_sql("SELECT * FROM mix_produtos WHERE status='ativo'", conn)
+            
+            # Carrega JSON de Mostruário
+            row = conn.execute("SELECT valor_text FROM dre_variaveis WHERE chave='config_mostruario_json'").fetchone()
+            if row and row[0]:
+                config_mostruario_json = json.loads(row[0])
+    except Exception:
+        df_mix = pd.DataFrame()
+    
+    # Total Showroom (Reserva Técnica)
+    total_mostruario_custo = 0.0
+    if config_mostruario_json:
+         total_mostruario_custo = sum(float(v.get('custo', 0.0)) for v in config_mostruario_json.values())
+
+    # 2. Seletor de Período (Baseado na IA)
+    agora = datetime.now()
+    opcoes_periodo = []
+    
+    # Mês Atual
+    prev_atual = metricas_atual.get('previsto', 0.0) if metricas_atual else 0.0
+    opcoes_periodo.append({
+        'label': f"Mês Atual ({MESES_LABELS[agora.month-1]}/{agora.year})",
+        'data': agora,
+        'previsao': prev_atual
+    })
+    
+    # Meses Futuros (Prophet)
+    if df_previsoes is not None:
+        futuro = df_previsoes[df_previsoes['ds'] > pd.Timestamp(agora)].head(5)
+        for _, row in futuro.iterrows():
+            d = row['ds']
+            m_label = MESES_LABELS[d.month-1]
+            opcoes_periodo.append({
+                'label': f"{m_label}/{d.year}",
+                'data': d,
+                'previsao': row['yhat']
+            })
+            
+    c_sel1, c_sel2 = st.columns([3, 1])
+    with c_sel1:
+        escolha_label = st.selectbox("📅 Selecione o Mês de Referência para Compras", [o['label'] for o in opcoes_periodo])
+    
+    selecionado = next(o for o in opcoes_periodo if o['label'] == escolha_label)
+    previsao_faturamento = selecionado['previsao']
+    
+    with c_sel2:
+        st.metric("Previsão de Venda (IA)", _fmt_currency(previsao_faturamento))
+
+    # 3. Cálculo do Orçamento de Compra (Weighted Logic)
+    # -------------------------------------------------------------------------
+    # Retrieve Global Markup
+    import sqlite3
+    markup_global_val = 2.40
+    try:
+        with get_conn(db_path) as conn:
+            row_mk = conn.execute("SELECT valor_num FROM dre_variaveis WHERE chave = 'markup_medio' LIMIT 1").fetchone()
+            if row_mk and row_mk[0]:
+                markup_global_val = float(row_mk[0])
+    except:
+        pass
+
+    st.markdown("### 🛒 Distribuição do Orçamento (Necessidade de Giro)")
+    st.caption(f"Valores calculados aplicando a % do Mix sobre a previsão de **{_fmt_currency(previsao_faturamento)}**, dividido pelo Markup Médio Global (**{markup_global_val:.2f}**).")
+    
+    if df_mix.empty:
+        st.info("Cadastre o Mix de Produtos para ver o orçamento.")
+        return
+
+    rows = []
+    soma_necessidade_custo = 0.0
+    
+    for _, row in df_mix.iterrows():
+        cat = row['nome_categoria']
+        pct = float(row.get('percentual_ideal', 0.0))
+        
+        # USA MARKUP GLOBAL
+        mk_cat = markup_global_val
+        if mk_cat <= 0: mk_cat = 2.0 
+        
+        # 1. Quanto essa categoria representa da venda prevista? (R$)
+        faturamento_alvo_cat = previsao_faturamento * (pct / 100.0)
+        
+        # 2. Quanto isso custa para repor/ter em estoque? (Custo)
+        necessidade_custo_cat = faturamento_alvo_cat / mk_cat
+        
+        soma_necessidade_custo += necessidade_custo_cat
+        
+        rows.append({
+            "Categoria": cat,
+            "% Mix": pct / 100.0,
+            "Markup (Global)": mk_cat,
+            "Meta Venda (R$)": faturamento_alvo_cat,
+            "Nec. Giro (Custo)": necessidade_custo_cat
+        })
+    
+    df_budget = pd.DataFrame(rows).sort_values("Nec. Giro (Custo)", ascending=False)
+    
+    # 4. KPIs Globais Recalculados
+    # -------------------------------------------------------------------------
+    # Recupera Estoque Total Atual (Global)
+    try:
+        estoque_fisico_total = get_estoque_atual_estimado(db_path)
+    except: 
+        estoque_fisico_total = 0.0
+        
+    estoque_disponivel_giro = max(0.0, estoque_fisico_total - total_mostruario_custo)
+    
+    # O Gap Global é: O que eu preciso ter (Soma das necessidades) - O que eu tenho (Global)
+    # Nota: Isso assume que o que você tem está bem distribuído. Como não sabemos, é a melhor estimativa.
+    saldo_compra_global = max(0.0, soma_necessidade_custo - estoque_disponivel_giro)
+    
+    # Exibição dos KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Estoque Atual (Estimado)", _fmt_currency(estoque_fisico_total), help="Valor vindo da página Variáveis do DRE (Cálculo Rápido).")
+    c2.metric("Reserva Mostruário", _fmt_currency(total_mostruario_custo), help="Valor retido em peças de mostruário.")
+    c3.metric("Necessidade Total (Giro)", _fmt_currency(soma_necessidade_custo), help="Quanto você deveria ter de estoque para suportar a venda prevista.")
+    
+    # Estoque Ideal Total (Mostruário + Giro)
+    total_necessario = total_mostruario_custo + soma_necessidade_custo
+    c4.metric("Estoque Ideal Total", _fmt_currency(total_necessario), 
+              help="Soma de Reserva Mostruário + Necessidade Total (Giro). O quanto sua loja deveria ter hoje.")
+
+    st.divider()
+
+    # -------------------------------------------------------------
+    # Gráfico de Velocímetro (Gauge) - Saúde do Estoque
+    # -------------------------------------------------------------
+    # Recupera parâmetros de Min/Max (% do Ideal)
+    min_pct = 80.0
+    max_pct = 120.0
+    try:
+        with get_conn(db_path) as conn:
+            r_min = conn.execute("SELECT valor_num FROM dre_variaveis WHERE chave='dre_estoque_mes_min_pct'").fetchone()
+            r_max = conn.execute("SELECT valor_num FROM dre_variaveis WHERE chave='dre_estoque_mes_max_pct'").fetchone()
+            if r_min: min_pct = float(r_min[0])
+            if r_max: max_pct = float(r_max[0])
+    except: pass
+
+    # Calcula valores absolutos dos limiares
+    # Se total_necessario for zero, evita erro visual
+    base_ideal = total_necessario if total_necessario > 0 else 1.0 
+    
+    val_min = base_ideal * (min_pct / 100.0)
+    val_max = base_ideal * (max_pct / 100.0)
+    
+    # Define zona crítica (ex: abaixo de 60% do ideal se o mínimo for 80, ou simplesmente 75% do mínimo)
+    # Vamos assumir uma margem: Critico é < (Min - 20%)
+    crit_pct = max(0.0, min_pct - 20.0)
+    val_crit = base_ideal * (crit_pct / 100.0)
+    
+    # Define a faixa máxima do gráfico (um pouco acima do Max ou do Atual, o que for maior)
+    chart_max = max(val_max * 1.5, estoque_fisico_total * 1.2)
+    
+    fig_gauge = go.Figure(
+        data=[go.Indicator(
+            mode = "gauge+number+delta",
+            value = estoque_fisico_total,
+            domain = {'x': [0, 1], 'y': [0, 1]},
+            title = {'text': "Saúde do Estoque", 'font': {'size': 20}},
+            number = {'prefix': "R$ ", 'font': {'size': 26}}, # Remove valueformat to let layout handles separators
+            delta = {'reference': total_necessario, 'prefix': "Target: R$ ", 'relative': False},
+            gauge = {
+                'axis': {'range': [None, chart_max], 'tickwidth': 1, 'tickprefix': 'R$ '},
+                'bar': {'color': "darkblue"},
+                'bgcolor': "white",
+                'borderwidth': 2,
+                'bordercolor': "gray",
+                'steps': [
+                    {'range': [0, val_crit], 'color': '#ffcccc'},      # Vermelho Claro (Crítico)
+                    {'range': [val_crit, val_min], 'color': '#fff5cc'},# Amarelo (Atenção)
+                    {'range': [val_min, val_max], 'color': '#ccffcc'}, # Verde Claro (Ideal)
+                    {'range': [val_max, chart_max], 'color': '#cce5ff'} # Azul Claro (Excesso)
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': total_necessario
+                }
+            }
+        )],
+        layout={'separators': '.,'} # Force BR separators
+    )
+    
+    st.plotly_chart(fig_gauge, use_container_width=True)
+    
+    # Escaping '$' to prevent Latex rendering issues in Streamlit
+    cap_min = _fmt_currency(val_min).replace("R$", "R\\$")
+    cap_max = _fmt_currency(val_max).replace("R$", "R\\$")
+    st.caption(f"**Faixa Ideal:** {cap_min} até {cap_max} ({min_pct:.0f}% a {max_pct:.0f}% do Ideal).")
+    st.divider()
+
+    # 5. Tabela de Orçamento
+    # -------------------------------------------------------------------------
+    st.dataframe(
+        df_budget.style.format({
+            "% Mix": "{:.1%}",
+            "Markup (Global)": "{:.2f}",
+            "Meta Venda (R$)": _fmt_currency,
+            "Nec. Giro (Custo)": _fmt_currency
+        }).background_gradient(subset=["Nec. Giro (Custo)"], cmap="Purples"),
+        use_container_width=True,
+        hide_index=True
+    )
+    
+    st.info(f"💡 **Dica:** Utilize a coluna **Nec. Giro (Custo)** como seu orçamento limite para compras de cada categoria neste mês.")
+
 # ========================= Entrada principal =========================
 def render_dashboard(caminho_banco: Optional[str]):
     """
@@ -2137,6 +2358,8 @@ def render_dashboard(caminho_banco: Optional[str]):
         meses_futuro = st.slider("Meses para prever", min_value=1, max_value=24, value=12)
         
         # Apenas chama a função. O "engine" se vira para buscar IPCA, Selic, tratar dados, etc.
+        metricas_atual = None
+        dados_futuros = pd.DataFrame()
         if not df_entrada.empty:
             with st.spinner("O Oráculo está consultando o Banco Central e prevendo o futuro..."):
                 # Passa o df_entrada BRUTO
@@ -2240,6 +2463,9 @@ def render_dashboard(caminho_banco: Optional[str]):
                  st.error(f"Não foi possível gerar a previsão: {metricas_atual['error']}")
             else:
                  st.warning("Dados insuficientes para gerar previsão (mínimo 6 meses de histórico).")
+
+            # (Gestão de Estoque movido para final da página)
+
         else:
             st.info("Sem dados de entrada para previsão.")
 
@@ -2287,6 +2513,12 @@ def render_dashboard(caminho_banco: Optional[str]):
 
     with st.container():
         render_reposicao(df_mercadorias, metrics)
+
+    st.divider() # Adiciona divisor explicito para corrigir problemas de layout/overlap
+
+    with st.container():
+        dados_futuros_otb = dados_futuros if 'dados_futuros' in locals() else pd.DataFrame()
+        render_gestao_estoque_otb(db_path, metricas_atual, dados_futuros_otb)
 
 
 
