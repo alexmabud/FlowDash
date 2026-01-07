@@ -8,6 +8,30 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 
 # ==============================================================================
+# Whitelist de Tabelas Seguras (proteção contra SQL injection)
+# ==============================================================================
+
+_TABELAS_PERMITIDAS = {
+    "mercadorias",
+    "usuarios",
+    "correcao_caixa",
+    "fechamento_caixa",
+    "compras",
+    "contas_a_pagar",
+    "cartoes_credito",
+    "saldos_bancos",
+    "metas",
+    "fatura_cartao",
+    "saida",
+    "saldos_caixas",
+    "emprestimos_financiamentos",
+    "taxas_maquinas",
+    "entrada",
+    "movimentacoes",
+    "variaveis_dre",
+}
+
+# ==============================================================================
 # 1. HELPERS GENÉRICOS DE SQL E DADOS
 # ==============================================================================
 
@@ -33,8 +57,33 @@ def _verificar_fechamento_dia(conn: sqlite3.Connection, data_ref: date) -> bool:
         return False
 
 def _carregar_tabela(conn: sqlite3.Connection, tabela: str) -> pd.DataFrame:
-    """Carrega tabela inteira (uso com cuidado em tabelas grandes)."""
-    return pd.read_sql(f"SELECT * FROM {tabela}", conn)
+    """
+    Carrega tabela inteira (uso com cuidado em tabelas grandes).
+
+    Args:
+        conn: Conexão SQLite ativa.
+        tabela: Nome da tabela a carregar.
+
+    Returns:
+        DataFrame com os dados da tabela.
+
+    Raises:
+        ValueError: Se a tabela não estiver na whitelist de tabelas permitidas.
+
+    Security:
+        Usa whitelist para prevenir SQL injection.
+    """
+    # Validação de segurança: whitelist de tabelas
+    nome_normalizado = (tabela or "").strip().lower()
+
+    if not nome_normalizado:
+        raise ValueError("Nome de tabela vazio")
+
+    if nome_normalizado not in _TABELAS_PERMITIDAS:
+        raise ValueError(f"Tabela '{tabela}' não está na whitelist de tabelas permitidas")
+
+    # Seguro usar f-string aqui pois nome_normalizado foi validado pela whitelist
+    return pd.read_sql(f"SELECT * FROM {nome_normalizado}", conn)
 
 def _norm(s: str) -> str:
     """Normaliza strings para comparação (upper, strip)."""

@@ -3,6 +3,31 @@ import sqlite3
 import pandas as pd
 
 # ============================
+# Whitelist de Tabelas Seguras
+# ============================
+
+# Tabelas permitidas no banco (proteção contra SQL injection)
+_TABELAS_PERMITIDAS = {
+    "mercadorias",
+    "usuarios",
+    "correcao_caixa",
+    "fechamento_caixa",
+    "compras",
+    "contas_a_pagar",
+    "cartoes_credito",
+    "saldos_bancos",
+    "metas",
+    "fatura_cartao",
+    "saida",
+    "saldos_caixas",
+    "emprestimos_financiamentos",
+    "taxas_maquinas",
+    "entrada",
+    "movimentacoes",
+    "variaveis_dre",
+}
+
+# ============================
 # Função Genérica
 # ============================
 
@@ -16,12 +41,31 @@ def carregar_tabela(nome_tabela: str, caminho_banco: str) -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: Dados da tabela ou DataFrame vazio em caso de erro.
+
+    Raises:
+        ValueError: Se o nome da tabela não estiver na whitelist de tabelas permitidas.
+
+    Security:
+        Usa whitelist para prevenir SQL injection. Apenas tabelas em _TABELAS_PERMITIDAS
+        podem ser consultadas.
     """
+    # Validação de segurança: whitelist de tabelas
+    nome_normalizado = (nome_tabela or "").strip().lower()
+
+    if not nome_normalizado:
+        print("[ERRO] Nome de tabela vazio")
+        return pd.DataFrame()
+
+    if nome_normalizado not in _TABELAS_PERMITIDAS:
+        print(f"[ERRO SEGURANÇA] Tentativa de acesso a tabela não permitida: '{nome_tabela}'")
+        raise ValueError(f"Tabela '{nome_tabela}' não está na whitelist de tabelas permitidas")
+
     try:
         with sqlite3.connect(caminho_banco) as conn:
-            return pd.read_sql(f"SELECT * FROM {nome_tabela}", conn)
+            # Seguro usar f-string aqui pois nome_normalizado foi validado pela whitelist
+            return pd.read_sql(f"SELECT * FROM {nome_normalizado}", conn)
     except Exception as e:
-        print(f"[ERRO] Não foi possível carregar a tabela '{nome_tabela}': {e}")
+        print(f"[ERRO] Não foi possível carregar a tabela '{nome_normalizado}': {e}")
         return pd.DataFrame()
 
 # ============================
