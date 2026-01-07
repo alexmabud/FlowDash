@@ -46,3 +46,6 @@ data/**
 *.db
 !data/flowdash_template.db
 .streamlit/secrets.toml
+
+# --- Claude Code context (local only) ---
+.claude.md
