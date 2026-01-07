@@ -61,9 +61,13 @@ def strip_tz_to_local_naive(dt, fmt: str = "%Y-%m-%d %H:%M:%S", tz: str = "Ameri
 # ---------------------------------------------------------------------
 # Segurança
 # ---------------------------------------------------------------------
-def gerar_hash_senha(senha: str) -> str:
+
+def criar_hash_senha_bcrypt(senha: str) -> str:
     """
-    Gera hash SHA-256 de uma senha em texto claro.
+    Cria hash bcrypt seguro de uma senha em texto claro.
+
+    Bcrypt inclui salt automático e é resistente a ataques de força bruta.
+    Use esta função para criar senhas de novos usuários.
 
     Parâmetros
     ----------
@@ -73,7 +77,41 @@ def gerar_hash_senha(senha: str) -> str:
     Retorno
     -------
     str
-        Hex digest do hash SHA-256.
+        Hash bcrypt (formato $2b$..., ~60 caracteres).
+
+    Exemplo
+    -------
+    >>> hash_senha = criar_hash_senha_bcrypt("minhaSenha123!")
+    >>> # Armazena hash_senha no banco de dados
+    """
+    import bcrypt
+
+    if senha is None:
+        senha = ""
+
+    # bcrypt.hashpw retorna bytes, convertemos para string
+    hash_bytes = bcrypt.hashpw(senha.encode('utf-8'), bcrypt.gensalt())
+    return hash_bytes.decode('utf-8')
+
+
+def gerar_hash_senha(senha: str) -> str:
+    """
+    Gera hash SHA-256 de uma senha em texto claro.
+
+    ⚠️ DEPRECATED: Esta função usa SHA-256 sem salt e não é segura.
+    Use `criar_hash_senha_bcrypt()` para novos usuários.
+
+    Mantida apenas para compatibilidade com código legado durante migração.
+
+    Parâmetros
+    ----------
+    senha : str
+        Senha informada pelo usuário.
+
+    Retorno
+    -------
+    str
+        Hex digest do hash SHA-256 (64 caracteres hexadecimais).
     """
     if senha is None:
         senha = ""

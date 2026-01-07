@@ -14,13 +14,37 @@ from typing import Dict, Any, Optional, List
 import sqlite3
 import secrets
 import string
+import hashlib
 
+import bcrypt
 import streamlit as st  # import permitido; evitamos apenas acessar session_state cedo
 from shared.safe_session import (
     exists as _ss_exists,
     get as _ss_get,
 )
-from utils.utils import gerar_hash_senha
+from utils.utils import criar_hash_senha_bcrypt
+
+
+# -----------------------------------------------------------------------------
+# Helpers de segurança
+# -----------------------------------------------------------------------------
+
+def _is_bcrypt_hash(hash_str: str) -> bool:
+    """
+    Detecta se o hash é bcrypt ou SHA-256.
+
+    Bcrypt hashes começam com $2b$ ou $2a$ e têm ~60 caracteres.
+    SHA-256 hashes são hexadecimais com 64 caracteres.
+
+    Args:
+        hash_str: String do hash armazenado.
+
+    Returns:
+        True se for bcrypt, False se for SHA-256 ou outro formato.
+    """
+    if not isinstance(hash_str, str):
+        return False
+    return hash_str.startswith('$2b$') or hash_str.startswith('$2a$')
 
 
 # -----------------------------------------------------------------------------
@@ -29,33 +53,93 @@ from utils.utils import gerar_hash_senha
 
 def validar_login(email: str, senha: str, caminho_banco: str) -> Dict[str, Any] | None:
     """
-    Valida o login do usuário com base no banco de dados.
+    Valida o login do usuário com migração híbrida SHA-256 → bcrypt.
+
+    Suporta ambos métodos de hash durante período de migração:
+    - Bcrypt: método atual e seguro (preferencial)
+    - SHA-256: método legado (migra automaticamente para bcrypt no login bem-sucedido)
 
     Args:
         email: E-mail informado.
-        senha: Senha em texto plano (será transformada em hash).
+        senha: Senha em texto plano.
         caminho_banco: Caminho absoluto do banco SQLite.
 
     Returns:
         dict com {nome, email, perfil} se válido; caso contrário, None.
+
+    Migração:
+        Se a senha estiver em SHA-256 e o login for bem-sucedido,
+        o hash será automaticamente convertido para bcrypt no banco.
     """
     if not email or not senha or not caminho_banco:
         return None
 
-    senha_hash = gerar_hash_senha(senha)
-    query = """
-        SELECT nome, email, perfil
-        FROM usuarios
-        WHERE email = ? AND senha = ? AND ativo = 1
-    """
+    try:
+        with sqlite3.connect(caminho_banco) as conn:
+            conn.row_factory = sqlite3.Row
 
-    with sqlite3.connect(caminho_banco) as conn:
-        cur = conn.execute(query, (email, senha_hash))
-        row = cur.fetchone()
+            # Busca usuário pelo email
+            cur = conn.execute(
+                "SELECT nome, email, perfil, senha FROM usuarios WHERE email = ? AND ativo = 1",
+                (email,)
+            )
+            usuario = cur.fetchone()
 
-    if row:
-        return {"nome": row[0], "email": row[1], "perfil": row[2]}
-    return None
+            if not usuario:
+                return None
+
+            hash_armazenado = usuario['senha']
+
+            # 1. Tenta validação com bcrypt (método novo e preferencial)
+            if _is_bcrypt_hash(hash_armazenado):
+                try:
+                    if bcrypt.checkpw(senha.encode('utf-8'), hash_armazenado.encode('utf-8')):
+                        # Login bem-sucedido com bcrypt
+                        return {
+                            "nome": usuario['nome'],
+                            "email": usuario['email'],
+                            "perfil": usuario['perfil']
+                        }
+                except Exception:
+                    # Falha na verificação bcrypt (senha incorreta ou hash corrompido)
+                    return None
+
+            # 2. Fallback: validação com SHA-256 (método legado) + migração automática
+            else:
+                hash_senha_sha256 = hashlib.sha256(senha.encode('utf-8')).hexdigest()
+
+                if hash_senha_sha256 == hash_armazenado:
+                    # ✅ Login bem-sucedido com SHA-256!
+                    # Agora migra automaticamente para bcrypt
+                    novo_hash_bcrypt = bcrypt.hashpw(senha.encode('utf-8'), bcrypt.gensalt())
+
+                    try:
+                        conn.execute(
+                            "UPDATE usuarios SET senha = ? WHERE email = ?",
+                            (novo_hash_bcrypt.decode('utf-8'), email)
+                        )
+                        conn.commit()
+
+                        # Log da migração (opcional - pode comentar se não quiser logs)
+                        print(f"[MIGRAÇÃO BCRYPT] Usuário '{email}' migrado de SHA-256 para bcrypt")
+
+                    except Exception as e:
+                        # Se falhar a migração, ainda permite login (não bloqueia usuário)
+                        print(f"[AVISO] Falha ao migrar senha para bcrypt: {e}")
+
+                    # Retorna usuário logado (independente do sucesso da migração)
+                    return {
+                        "nome": usuario['nome'],
+                        "email": usuario['email'],
+                        "perfil": usuario['perfil']
+                    }
+
+            # Senha incorreta (nem bcrypt nem SHA-256 bateram)
+            return None
+
+    except Exception as e:
+        print(f"[ERRO] Falha no login: {e}")
+        return None
 
 
 def obter_usuario(email: str, caminho_banco: str) -> Dict[str, Any] | None:
