@@ -15,6 +15,7 @@ import sqlite3
 import secrets
 import string
 import hashlib
+import re
 
 import bcrypt
 import streamlit as st  # import permitido; evitamos apenas acessar session_state cedo
@@ -47,6 +48,38 @@ def _is_bcrypt_hash(hash_str: str) -> bool:
     return hash_str.startswith('$2b$') or hash_str.startswith('$2a$')
 
 
+def _validar_formato_email(email: str) -> bool:
+    """
+    Valida o formato de um endereço de email usando regex.
+
+    Regex baseado em RFC 5322 (simplificado para casos comuns).
+    Aceita formatos padrão como: usuario@dominio.com, nome.sobrenome@empresa.com.br
+
+    Args:
+        email: String do email a ser validado.
+
+    Returns:
+        True se o formato for válido, False caso contrário.
+
+    Examples:
+        >>> _validar_formato_email("usuario@exemplo.com")
+        True
+        >>> _validar_formato_email("email_invalido")
+        False
+        >>> _validar_formato_email("usuario@dominio")
+        False
+    """
+    if not email or not isinstance(email, str):
+        return False
+
+    # Regex simplificado mas robusto para validação de email
+    # Aceita: letras, números, pontos, hífens, underscores no usuário
+    # Exige: @ + domínio + . + TLD (2+ caracteres)
+    padrao = r'^[a-zA-Z0-9._%-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    return re.match(padrao, email) is not None
+
+
 # -----------------------------------------------------------------------------
 # Login / validação no banco
 # -----------------------------------------------------------------------------
@@ -72,6 +105,11 @@ def validar_login(email: str, senha: str, caminho_banco: str) -> Dict[str, Any] 
         o hash será automaticamente convertido para bcrypt no banco.
     """
     if not email or not senha or not caminho_banco:
+        return None
+
+    # Validação de formato do email
+    if not _validar_formato_email(email):
+        print(f"[AVISO] Formato de email inválido: '{email}'")
         return None
 
     try:
@@ -149,6 +187,10 @@ def obter_usuario(email: str, caminho_banco: str) -> Dict[str, Any] | None:
     if not email or not caminho_banco:
         return None
 
+    # Validação de formato do email
+    if not _validar_formato_email(email):
+        return None
+
     query = "SELECT nome, email, perfil FROM usuarios WHERE email = ? AND ativo = 1"
     with sqlite3.connect(caminho_banco) as conn:
         cur = conn.execute(query, (email,))
@@ -163,7 +205,11 @@ def criar_sessao(email: str, caminho_banco: str) -> str | None:
     """Gera um token de sessão, salva no banco e retorna o token."""
     if not email or not caminho_banco:
         return None
-    
+
+    # Validação de formato do email
+    if not _validar_formato_email(email):
+        return None
+
     # Gera token seguro de 32 chars
     alphabet = string.ascii_letters + string.digits
     token = ''.join(secrets.choice(alphabet) for i in range(32))
@@ -199,6 +245,11 @@ def encerrar_sessao(email: str, caminho_banco: str) -> None:
     """Remove o token de sessão do usuário."""
     if not email or not caminho_banco:
         return
+
+    # Validação de formato do email
+    if not _validar_formato_email(email):
+        return
+
     try:
         with sqlite3.connect(caminho_banco) as conn:
             conn.execute("UPDATE usuarios SET token_sessao = NULL WHERE email = ?", (email,))
