@@ -6,6 +6,8 @@ import sqlite3
 from datetime import datetime
 from typing import Tuple, Optional, Dict
 
+from utils.utils import formatar_moeda as _fmt
+
 # Tenta importar Prophet
 try:
     from prophet import Prophet
@@ -270,11 +272,7 @@ def criar_grafico_previsao(df_vendas_bruto: pd.DataFrame, meses_futuro: int = 12
         
         # --- Montagem do Gráfico ---
         fig = go.Figure()
-        
-        def _fmt(x):
-            try: return f"R$ {float(x):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            except: return "R$ 0,00"
-    
+
         # Histórico
         df_prophet_full['y_fmt'] = df_prophet_full['y'].apply(_fmt)
         fig.add_trace(go.Scatter(

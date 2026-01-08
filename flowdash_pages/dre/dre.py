@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 from datetime import date
 from utils import formatar_moeda, formatar_percentual
+from utils.utils import formatar_moeda as _fmt_brl
 import importlib
 
 logger = logging.getLogger(__name__)
@@ -245,13 +246,6 @@ def _periodo_ym(ano: int, mes: int) -> Tuple[str, str, str]:
     fim = f"{ano:04d}-{mes:02d}-{last:02d}"
     comp = f"{ano:04d}-{mes:02d}"
     return ini, fim, comp
-
-def _fmt_brl(v: float) -> str:
-    try:
-        s = f"{float(v):,.2f}"
-        return "R$ " + s.replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
 
 def _fmt_pct(v: float, casas: int = 1) -> str:
     try:

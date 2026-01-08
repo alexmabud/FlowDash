@@ -22,6 +22,7 @@ from html import escape
 # Preferir o pacote `utils` (que já faz alias se preciso); cair para utils.utils se necessário.
 try:
     from utils import formatar_valor
+    from utils.utils import formatar_moeda as _fmt_brl
 except Exception:
     try:
         from utils.utils import formatar_valor  # compatibilidade antiga
@@ -408,11 +409,6 @@ def upsert_saldos_bancos(caminho_banco: str, data_str: str, banco_nome: str, val
 # ============================================================================
 # Helpers de feedback para pagamentos (UX + sanity)
 # ============================================================================
-def _fmt_brl(v: float) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return f"R$ {v}"
 
 def _msg_pagamento(ret: dict) -> tuple[str, str]:
     """

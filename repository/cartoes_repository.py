@@ -32,6 +32,8 @@ Dependências
 import sqlite3
 from typing import Optional, Tuple, List
 
+from utils.utils import formatar_moeda as _fmt_brl
+
 
 class CartoesRepository:
     """
@@ -123,9 +125,6 @@ def listar_destinos_fatura_em_aberto(db_path: str):
         - saldo (float)          -> quanto falta pagar (principal)
     """
     from datetime import datetime
-
-    def _fmt_brl(v: float) -> str:
-        return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
     def _fmt_dm(v: str) -> str:
         try:

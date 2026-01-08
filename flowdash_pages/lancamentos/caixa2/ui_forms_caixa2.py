@@ -24,17 +24,10 @@ from __future__ import annotations
 from datetime import date, datetime
 import streamlit as st
 
+from utils.utils import formatar_moeda as _fmt_brl
+
 __all__ = ["render_form"]
 
-
-def _fmt_brl(x: float | str | None) -> str:
-    """Formata em BRL (ex.: 'R$ 1.234,56'), tolerando None/str."""
-    try:
-        n = float(x or 0.0)
-    except Exception:
-        n = 0.0
-    s = f"{n:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
-    return f"R$ {s}"
 
 
 def _fmt_data_br(d: str | date) -> str:
