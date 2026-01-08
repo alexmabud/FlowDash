@@ -11,7 +11,6 @@ Streamlit Session State (via `shared.safe_session`) para evitar o erro:
 from __future__ import annotations
 
 from typing import Dict, Any, Optional, List
-import sqlite3
 import secrets
 import string
 import hashlib
@@ -23,6 +22,7 @@ from shared.safe_session import (
     exists as _ss_exists,
     get as _ss_get,
 )
+from shared.db import get_conn
 from utils.utils import criar_hash_senha_bcrypt
 
 
@@ -113,9 +113,7 @@ def validar_login(email: str, senha: str, caminho_banco: str) -> Dict[str, Any] 
         return None
 
     try:
-        with sqlite3.connect(caminho_banco) as conn:
-            conn.row_factory = sqlite3.Row
-
+        with get_conn(caminho_banco) as conn:
             # Busca usuário pelo email
             cur = conn.execute(
                 "SELECT nome, email, perfil, senha FROM usuarios WHERE email = ? AND ativo = 1",
@@ -192,7 +190,7 @@ def obter_usuario(email: str, caminho_banco: str) -> Dict[str, Any] | None:
         return None
 
     query = "SELECT nome, email, perfil FROM usuarios WHERE email = ? AND ativo = 1"
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         cur = conn.execute(query, (email,))
         row = cur.fetchone()
 
@@ -215,7 +213,7 @@ def criar_sessao(email: str, caminho_banco: str) -> str | None:
     token = ''.join(secrets.choice(alphabet) for i in range(32))
     
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             conn.execute("UPDATE usuarios SET token_sessao = ? WHERE email = ?", (token, email))
             conn.commit()
         return token
@@ -230,7 +228,7 @@ def validar_sessao(token: str, caminho_banco: str) -> Dict[str, Any] | None:
         
     query = "SELECT nome, email, perfil FROM usuarios WHERE token_sessao = ? AND ativo = 1"
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             cur = conn.execute(query, (token,))
             row = cur.fetchone()
             
@@ -251,7 +249,7 @@ def encerrar_sessao(email: str, caminho_banco: str) -> None:
         return
 
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             conn.execute("UPDATE usuarios SET token_sessao = NULL WHERE email = ?", (email,))
             conn.commit()
     except Exception:

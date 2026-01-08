@@ -2,6 +2,8 @@
 import sqlite3
 import pandas as pd
 
+from shared.db import get_conn
+
 # ============================
 # Whitelist de Tabelas Seguras
 # ============================
@@ -61,7 +63,7 @@ def carregar_tabela(nome_tabela: str, caminho_banco: str) -> pd.DataFrame:
         raise ValueError(f"Tabela '{nome_tabela}' não está na whitelist de tabelas permitidas")
 
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             # Seguro usar f-string aqui pois nome_normalizado foi validado pela whitelist
             return pd.read_sql(f"SELECT * FROM {nome_normalizado}", conn)
     except Exception as e:

@@ -8,6 +8,8 @@ import math
 import pandas as pd
 from datetime import date, datetime, timedelta
 
+from shared.db import get_conn
+
 # ==============================================================================
 # Whitelist de Tabelas Seguras (proteção contra SQL injection)
 # ==============================================================================
@@ -414,7 +416,7 @@ def _somar_bancos_totais(obj: dict | str, *args) -> float | dict:
         caminho_banco = obj
         try:
             data_ref = args[0] if args else date.today()
-            with sqlite3.connect(caminho_banco) as conn:
+            with get_conn(caminho_banco) as conn:
                 bancos = _get_bancos_ativos(conn)
                 return _get_saldos_bancos_acumulados(conn, data_ref, bancos)
         except Exception:
@@ -426,7 +428,7 @@ def _somar_bancos_totais(obj: dict | str, *args) -> float | dict:
 # ==============================================================================
 
 def _ultimo_caixas_ate(caminho_banco: str, data_limite: date) -> tuple:
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         row = conn.execute("SELECT caixa_total, caixa2_total, data FROM saldos_caixas WHERE DATE(data)<=DATE(?) ORDER BY data DESC LIMIT 1", (str(data_limite),)).fetchone()
         if row: return (float(row[0] or 0), float(row[1] or 0), pd.to_datetime(row[2]).date() if row[2] else None)
     return (0.0, 0.0, None)
@@ -455,22 +457,22 @@ def _calcular_saldo_projetado(conn, data_ref):
 
 # Helpers de UI
 def _dinheiro_e_pix_por_data(caminho_banco, data_ref):
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         d = str(data_ref)
         vd = conn.execute("SELECT SUM(valor) FROM entrada WHERE UPPER(Forma_de_Pagamento)='DINHEIRO' AND DATE(Data)=DATE(?)", (d,)).fetchone()[0] or 0
         vp = conn.execute("SELECT SUM(valor) FROM entrada WHERE UPPER(Forma_de_Pagamento)='PIX' AND DATE(Data)=DATE(?)", (d,)).fetchone()[0] or 0
         return float(vd), float(vp)
 
 def _cartao_d1_liquido_por_data_liq(caminho_banco, data_liq_ref):
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         return float(conn.execute("SELECT SUM(valor_liquido) FROM entrada WHERE DATE(Data_Liq)=DATE(?) AND UPPER(Forma_de_Pagamento) NOT IN ('DINHEIRO','PIX')", (str(data_liq_ref),)).fetchone()[0] or 0)
 
 def _saidas_total_do_dia(caminho_banco, data_ref):
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         return float(conn.execute("SELECT SUM(valor) FROM saida WHERE DATE(data)=DATE(?)", (str(data_ref),)).fetchone()[0] or 0)
 
 def _correcoes_caixa_do_dia(caminho_banco, data_ref):
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         d = str(data_ref)
         dia = conn.execute("SELECT correcao FROM fechamento_caixa WHERE DATE(data)=DATE(?)", (d,)).fetchone()
         acum = conn.execute("SELECT SUM(correcao) FROM fechamento_caixa WHERE DATE(data)<=DATE(?)", (d,)).fetchone()
