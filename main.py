@@ -46,7 +46,6 @@ from datetime import datetime, timezone, timedelta
 from typing import Callable, Optional
 
 import streamlit as st
-import streamlit as st
 # CookieManager removido em favor de Query Params (mais robusto no Cloud)
 # from streamlit_autorefresh import st_autorefresh
 
