@@ -14,6 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from shared.db import get_conn
+from utils.utils import formatar_moeda as _fmt_brl
 
 # --- MIGRATION SAFEGUARD ---
 def _ensure_mix_schema_v2(db_path):
@@ -294,12 +295,6 @@ def _get_text(conn: sqlite3.Connection, chave: str, default: str = "") -> str:
     except Exception:
         pass
     return default
-
-def _fmt_brl(v: float) -> str:
-    try:
-        return f"R$ {float(v or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
 
 def _green_label(text: str) -> None:
     # Removido: não renderiza títulos verdes para permitir tooltip padrão nos widgets

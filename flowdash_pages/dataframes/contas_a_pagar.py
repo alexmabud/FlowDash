@@ -16,6 +16,8 @@ import pandas as pd
 from pandas.api.types import is_datetime64_dtype
 import streamlit as st
 
+from utils.utils import formatar_moeda as _fmt_brl
+
 # ===================== Descoberta de DB (segura) =====================
 def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
     if pref and os.path.exists(pref):
@@ -59,12 +61,6 @@ class DB:
 
 
 # ===================== Helpers UI =====================
-def _fmt_brl(v: Any) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
-
 def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
         if c in df.columns:

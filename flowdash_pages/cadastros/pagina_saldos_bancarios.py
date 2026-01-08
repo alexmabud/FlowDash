@@ -24,6 +24,7 @@ import streamlit as st
 
 from repository.movimentacoes_repository import MovimentacoesRepository
 from flowdash_pages.cadastros.cadastro_classes import BancoRepository
+from utils.utils import formatar_moeda as _formatar_moeda_br
 
 
 # ------------------------- helpers internos -------------------------
@@ -35,10 +36,6 @@ def _garantir_colunas_bancos(conn: sqlite3.Connection, bancos: list[str]) -> Non
     for b in faltantes:
         conn.execute(f'ALTER TABLE saldos_bancos ADD COLUMN "{b}" REAL DEFAULT 0.0')
 
-
-def _formatar_moeda_br(v: float) -> str:
-    """Formata número como moeda BR: R$ 1.234,56 (sem depender de locale)."""
-    return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def _derive_nome_from_email(login: str) -> str:
