@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import json  # <--- Funcionalidade do showroom
+import logging
 from typing import Optional, Tuple, List, Callable, Dict, Any
 import html as _html
 from datetime import date, datetime
@@ -33,8 +34,10 @@ def _ensure_mix_schema_v2(db_path):
     except Exception:
         pass
     finally:
-        try: conn.close()
-        except: pass
+        try:
+            conn.close()
+        except Exception as e:
+            logging.warning(f"Erro ao fechar conexão em _ensure_mix_schema_v2: {e}")
 # ---------------------------
 
 # ============== Descoberta de DB (segura) ==============
@@ -1116,7 +1119,9 @@ def render(db_path_pref: Optional[str] = None):
                 row_conf = conn.execute("SELECT valor_text FROM dre_variaveis WHERE chave='config_mostruario_json'").fetchone()
                 if row_conf and row_conf[0]:
                     config_mostruario_old = json.loads(row_conf[0])
-            except: pass
+            except Exception as e:
+                logging.error(f"Erro ao carregar config_mostruario_json: {e}")
+                # Fallback para {} é intencional
             
             mc1, mc2, mc3, mc4 = st.columns([3, 1.5, 1.5, 2])
             mc1.markdown("**Categoria**")

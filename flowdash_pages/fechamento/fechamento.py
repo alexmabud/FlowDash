@@ -5,6 +5,7 @@ import time
 import re
 import sqlite3
 import json
+import logging
 from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
@@ -246,7 +247,9 @@ def pagina_fechamento_caixa(caminho_banco: str):
         if dados_salvos and dados_salvos.get('bancos_detalhe'):
              try:
                  bancos_salvos_dict = json.loads(dados_salvos['bancos_detalhe'])
-             except: pass
+             except Exception as e:
+                 logging.warning(f"Erro ao carregar bancos_detalhe em fechamento: {e}")
+                 st.warning("⚠️ Não consegui carregar os detalhes de bancos do fechamento anterior.")
     else:
         st.toast("🔓 Dia aberto para fechamento.", icon="📝")
 

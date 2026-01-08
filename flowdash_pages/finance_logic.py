@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import logging
 import math
 import pandas as pd
 from datetime import date, datetime, timedelta
@@ -286,8 +287,13 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, banc
                         for b in bancos_reais:
                             saldos[b] = _safe_float(detalhe.get(b, 0.0))
                         loaded_json = True
-                    except: pass
-                
+                    except Exception as e:
+                        logging.error(
+                            f"Erro ao fazer parse de JSON bancos_detalhe em fechamento "
+                            f"(data={data_ref}): {e}",
+                            exc_info=True
+                        )
+
                 if not loaded_json:
                     # Fallback colunas legado
                     if 'Inter' in saldos: saldos['Inter'] = _safe_float(row_close[2])
@@ -307,8 +313,13 @@ def _get_saldos_bancos_acumulados(conn: sqlite3.Connection, data_ref: date, banc
                         for b in bancos_reais:
                             saldos[b] = _safe_float(detalhe.get(b, 0.0))
                         loaded_json = True
-                    except: pass
-                
+                    except Exception as e:
+                        logging.error(
+                            f"Erro ao fazer parse de JSON bancos_detalhe histórico "
+                            f"(fechamento={close_date}, ref={data_ref}): {e}",
+                            exc_info=True
+                        )
+
                 if not loaded_json:
                     if 'Inter' in saldos: saldos['Inter'] = _safe_float(row_close[2])
                     if 'Bradesco' in saldos: saldos['Bradesco'] = _safe_float(row_close[3])
