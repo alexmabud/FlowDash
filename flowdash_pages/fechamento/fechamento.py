@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import streamlit as st
 from flowdash_pages.utils_timezone import hoje_br
+from shared.db import get_conn
 
 # ==============================================================================
 # 1. IMPORTS & UTILS
@@ -212,8 +213,8 @@ def pagina_fechamento_caixa(caminho_banco: str):
     data_sel = st.date_input("📅 Data do Fechamento", key="dt_fechamento")
     st.markdown(f"**🗓️ Fechamento do dia — {data_sel}**")
 
-    
-    conn = sqlite3.connect(caminho_banco)
+
+    conn = get_conn(caminho_banco)
     _garantir_colunas_fechamento(conn)
     
     bancos_ativos = _get_bancos_ativos(conn)
@@ -418,7 +419,7 @@ def pagina_fechamento_caixa(caminho_banco: str):
     # ========================== HISTÓRICO ==========================
     st.markdown("### 📋 Histórico Completo de Fechamentos")
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             df_fech = _read_sql(
                 conn,
                 """

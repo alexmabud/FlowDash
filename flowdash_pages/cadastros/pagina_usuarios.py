@@ -50,6 +50,7 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 
+from shared.db import get_conn
 from utils.utils import gerar_hash_senha, senha_forte
 from utils.pin_utils import validar_pin  # util centralizado
 from flowdash_pages.cadastros.cadastro_classes import Usuario
@@ -142,7 +143,7 @@ def pagina_usuarios(caminho_banco: str) -> None:
                 senha_hash = gerar_hash_senha(senha)
                 ativo_valor = 1 if ativo == "Sim" else 0
                 try:
-                    with sqlite3.connect(caminho_banco) as conn:
+                    with get_conn(caminho_banco) as conn:
                         conn.execute("""
                             INSERT INTO usuarios (nome, email, senha, perfil, ativo, pin)
                             VALUES (?, ?, ?, ?, ?, ?)
@@ -158,7 +159,7 @@ def pagina_usuarios(caminho_banco: str) -> None:
 
     st.markdown("### 📋 Usuários Cadastrados:")
 
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         df = pd.read_sql("SELECT id, nome, email, perfil, ativo FROM usuarios", conn)
 
     if not df.empty:

@@ -13,11 +13,13 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
+from shared.db import get_conn
+
 # --- MIGRATION SAFEGUARD ---
 def _ensure_mix_schema_v2(db_path):
     """Garante que a tabela mix_produtos tenha as colunas preco_medio e markup."""
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_conn(db_path)
         cur = conn.cursor()
         
         # Verifica colunas existentes
@@ -74,7 +76,7 @@ def _load_ui_prefs(db_path: Optional[str] = None) -> Dict[str, Any]:
     prefs: Dict[str, Any] = {}
     try:
         path = _ensure_db_path_or_raise(db_path)
-        conn = _connect(path)
+        conn = get_conn(path)
         _ensure_table(conn)
         rows = conn.execute(
             "SELECT chave, tipo, valor_num, valor_text FROM dre_variaveis"
@@ -98,7 +100,7 @@ def _save_ui_prefs(prefs: Dict[str, Any], db_path: Optional[str] = None) -> None
     """Persiste chaves permitidas diretamente em dre_variaveis (sem JSON)."""
     try:
         path = _ensure_db_path_or_raise(db_path)
-        conn = _connect(path)
+        conn = get_conn(path)
         _ensure_table(conn)
         for k, v in prefs.items():
             tipo = "text"
@@ -145,7 +147,7 @@ def _on_change_upsert_num(db_key: str, widget_key: str, descricao: str, db_path:
     def _cb():
         try:
             path = db_path or st.session_state.get("db_path")
-            conn = _connect(_ensure_db_path_or_raise(path))
+            conn = get_conn(_ensure_db_path_or_raise(path))
             _ensure_table(conn)
             v = _nonneg(st.session_state.get(widget_key, 0.0))
             _upsert_allowed(conn, db_key, "num", v, None, descricao)
@@ -165,15 +167,6 @@ CREATE TABLE IF NOT EXISTS dre_variaveis (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
-
-def _connect(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA busy_timeout = 30000;")
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA synchronous = NORMAL;")
-    conn.row_factory = sqlite3.Row
-    return conn
 
 def _ensure_table(conn: sqlite3.Connection) -> None:
     conn.execute(_SQL_CREATE)
@@ -580,7 +573,7 @@ def _compute_receita_liquida_acum(conn: sqlite3.Connection, data_corte_iso: str)
 def get_all_products(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retorna lista de todos os produtos (dicionários)."""
     db_path = _ensure_db_path_or_raise(db_path)
-    conn = _connect(db_path)
+    conn = get_conn(db_path)
     _ensure_table_mix(conn) # Garante que a tabela existe
     try:
         rows = conn.execute("SELECT * FROM mix_produtos ORDER BY classificacao, nome_categoria").fetchall()
@@ -591,7 +584,7 @@ def get_all_products(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
 def toggle_status(product_id: int, db_path: Optional[str] = None) -> bool:
     """Alterna o status do produto (ativo <-> inativo)."""
     db_path = _ensure_db_path_or_raise(db_path)
-    conn = _connect(db_path)
+    conn = get_conn(db_path)
     try:
         cur = conn.execute("SELECT status FROM mix_produtos WHERE id = ?", (product_id,))
         row = cur.fetchone()
@@ -612,7 +605,7 @@ def toggle_status(product_id: int, db_path: Optional[str] = None) -> bool:
 def delete_product(product_id: int, db_path: Optional[str] = None) -> bool:
     """Deleta permanentemente um produto."""
     db_path = _ensure_db_path_or_raise(db_path)
-    conn = _connect(db_path)
+    conn = get_conn(db_path)
     try:
         conn.execute("DELETE FROM mix_produtos WHERE id = ?", (product_id,))
         conn.commit()
@@ -641,7 +634,7 @@ def get_estoque_atual_estimado(db_path_pref: Optional[str] = None) -> float:
                                − (Receita líquida acumulada ÷ Markup médio)
     """
     db_path = _ensure_db_path_or_raise(db_path_pref)
-    conn = _connect(db_path)
+    conn = get_conn(db_path)
     _ensure_table(conn)
 
     prefs = _load_ui_prefs(db_path)
@@ -680,7 +673,7 @@ def render(db_path_pref: Optional[str] = None):
     """Cadastros › Variáveis do DRE e Gestão de Estoque."""
     db_path = _ensure_db_path_or_raise(db_path_pref)
     _ensure_mix_schema_v2(db_path) # Garante schema atualizado para o Mix
-    conn = _connect(db_path)
+    conn = get_conn(db_path)
     _ensure_table(conn)
 
     _preload_session_from_sources(conn, db_path)
