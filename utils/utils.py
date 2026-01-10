@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 from decimal import Decimal, InvalidOperation
 from datetime import date, datetime
+from shared.db import get_conn
 
 # ---------------------------------------------------------------------
 # (NOVO) Datas/Tempo - helpers para salvar sem timezone
@@ -197,10 +198,7 @@ def garantir_trigger_totais_saldos_caixas(caminho_banco: str) -> None:
     Compatível com esquemas existentes que possuam coluna `data` NOT NULL sem default.
     Detecta colunas via PRAGMA e preenche dinamicamente no INSERT inicial.
     """
-    import sqlite3
-
-    with sqlite3.connect(caminho_banco, timeout=30) as conn:
-        conn.execute("PRAGMA foreign_keys = ON;")
+    with get_conn(caminho_banco) as conn:
 
         # Cria tabela se não existir (com defaults para evitar NOT NULL)
         conn.execute("""

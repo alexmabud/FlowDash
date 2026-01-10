@@ -70,6 +70,7 @@ from shared.dbx_io import enviar_db_local, baixar_db_para_local
 from shared.dropbox_client import get_dbx  # para ler metadata (SDK)
 
 from shared.branding import sidebar_brand, page_header, login_brand
+from shared.db import get_conn
 
 
 # -----------------------------------------------------------------------------
@@ -140,7 +141,7 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 def _has_table(path: pathlib.Path, table: str) -> bool:
     """Checa existência de uma tabela no SQLite."""
     try:
-        with sqlite3.connect(str(path)) as conn:
+        with get_conn(str(path)) as conn:
             cur = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;",
                 (table,),

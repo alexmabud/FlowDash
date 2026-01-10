@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from typing import Dict, Tuple
+from shared.db import get_conn
 
 DEFAULT_FILE_PATH = "/FlowDash/data/flowdash_data.db"
 
@@ -95,15 +96,12 @@ def validate_sqlite(path: str) -> Tuple[bool, str]:
     if not os.path.exists(path):
         return False, "arquivo não existe"
     try:
-        conn = sqlite3.connect(path)
-        try:
+        with get_conn(path) as conn:
             cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usuarios';")
             row = cur.fetchone()
             if not row:
                 return False, "sem tabela 'usuarios'"
             return True, "ok"
-        finally:
-            conn.close()
     except Exception as e:
         return False, f"erro ao abrir: {e}"
 

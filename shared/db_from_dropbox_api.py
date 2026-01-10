@@ -54,10 +54,13 @@ import requests
 
 # Integração com camada de DB do projeto (para registrar caminho na sessão)
 try:
-    from shared.db import set_db_path_in_session as _set_db_path_in_session
+    from shared.db import set_db_path_in_session as _set_db_path_in_session, get_conn as _get_conn
 except Exception:
     def _set_db_path_in_session(path: str) -> str:  # fallback neutro
         return path
+    import sqlite3 as _sqlite3
+    def _get_conn(path: str):  # fallback
+        return _sqlite3.connect(path)
 
 # Integração opcional com Streamlit secrets (sem quebrar quando não estiver no runtime do Streamlit)
 try:
@@ -169,7 +172,7 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
-        with sqlite3.connect(str(path)) as conn:
+        with _get_conn(str(path)) as conn:
             cur = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?;", (table,)
             )

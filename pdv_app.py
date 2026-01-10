@@ -28,6 +28,7 @@ from shared.db_from_dropbox_api import ensure_local_db_api
 from shared.dropbox_config import load_dropbox_settings, mask_token  # noqa: F401
 from shared.dbx_io import enviar_db_local, baixar_db_para_local
 from shared.dropbox_client import get_dbx, download_bytes
+from shared.db import get_conn
 
 # ------------------------- Config inicial -------------------------
 st.set_page_config(page_title="FlowDash PDV", layout="wide")
@@ -85,7 +86,7 @@ def _is_sqlite(path: pathlib.Path) -> bool:
 
 def _has_table(path: pathlib.Path, table: str) -> bool:
     try:
-        with sqlite3.connect(str(path)) as conn:
+        with get_conn(str(path)) as conn:
             return conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1;", (table,)
             ).fetchone() is not None
@@ -218,7 +219,7 @@ st.markdown(
 def _conn() -> sqlite3.Connection:
     if not DB_PATH or not os.path.exists(DB_PATH):
         st.error(f"❌ Banco de dados não encontrado: `{DB_PATH or '(vazio)'}`"); st.stop()
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False); conn.row_factory = sqlite3.Row; return conn
+    return get_conn(DB_PATH)
 
 @st.cache_data(show_spinner=False, ttl=30)
 def _entrada_date_bounds() -> Tuple[date, date]:
@@ -410,7 +411,7 @@ except Exception:
             from utils.utils import gerar_hash_senha
             senha_hash = gerar_hash_senha(senha)
             caminho_banco = caminho_banco or DB_PATH
-            with sqlite3.connect(caminho_banco) as conn:
+            with get_conn(caminho_banco) as conn:
                 row = conn.execute(
                     "SELECT id, nome, email, perfil FROM usuarios WHERE email=? AND senha=? AND ativo=1",
                     (email, senha_hash),
