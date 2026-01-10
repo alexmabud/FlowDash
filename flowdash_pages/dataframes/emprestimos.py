@@ -17,6 +17,7 @@ from utils.column_discovery import (
     infer_currency_columns as _infer_currency_cols,
     infer_percent_columns as _infer_percent_cols
 )
+from shared.db import get_conn
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -59,7 +60,7 @@ def _connect(db_like: Optional[str]) -> Optional[sqlite3.Connection]:
         st.caption(str(e))
         return None
     try:
-        return sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        return get_conn(db)
     except Exception as e:
         st.error("❌ Erro ao conectar no banco (Empréstimos/Financiamentos).")
         st.exception(e)

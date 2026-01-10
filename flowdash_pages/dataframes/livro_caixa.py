@@ -15,6 +15,7 @@ from utils.column_discovery import (
     infer_reference_column as _infer_ref_col,
     infer_value_column as _infer_valor_col
 )
+from shared.db import get_conn
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -195,7 +196,7 @@ def render(db_path_pref: Optional[str] = None) -> None:
 
     # Carrega dados
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_conn(db_path) as conn:
             df, table_used = _load_livro_caixa(conn)
     except Exception as e:
         st.error(str(e))

@@ -17,6 +17,7 @@ from flowdash_pages.dataframes import mercadorias as page_mercadorias
 from flowdash_pages.dataframes import emprestimos as page_emprestimos  # mantém
 from flowdash_pages.dataframes import contas_a_pagar as page_contas_a_pagar  # NOVO (padronizado)
 from utils.utils import formatar_moeda as _fmt_moeda
+from shared.db import get_conn
 
 # Descoberta de DB (segura)
 try:
@@ -60,7 +61,7 @@ def _connect() -> Optional[sqlite3.Connection]:
         st.caption(str(e))
         return None
     try:
-        return sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        return get_conn(db)
     except Exception as e:
         st.error("❌ Erro ao conectar no banco de dados.")
         st.exception(e)

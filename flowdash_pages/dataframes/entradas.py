@@ -15,6 +15,7 @@ from flowdash_pages.dataframes.filtros import (
     resumo_por_mes,
 )
 from utils.utils import formatar_moeda as _fmt_moeda_str
+from shared.db import get_conn
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -60,7 +61,7 @@ def _connect(db_like: Optional[str]) -> Optional[sqlite3.Connection]:
         st.caption(str(e))
         return None
     try:
-        return sqlite3.connect(db, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+        return get_conn(db)
     except Exception as e:
         st.error("❌ Erro ao conectar no banco (Entradas).")
         st.exception(e)
