@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import streamlit as st
 from .actions_pagina import listar_transferencias_bancos_do_dia
+from utils.utils import formatar_moeda as _fmt_val
 
 # NEW: suporte a DataFrame
 try:
@@ -98,22 +99,6 @@ def _coerce_number(value) -> float:
         return float(s)
     except Exception:
         return 0.0
-
-
-def _fmt_val(v) -> str:
-    """Formata número/str para moeda BR.
-
-    Args:
-        v: Valor a ser formatado.
-
-    Returns:
-        Valor no formato "R$ 1.234,56".
-    """
-    try:
-        num = _coerce_number(v)
-        return f"R$ {num:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
 
 
 def _df_to_html_table(df) -> str:

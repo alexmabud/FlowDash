@@ -22,6 +22,7 @@ import streamlit as st
 import pandas as pd
 
 from utils.pin_utils import validar_pin
+from utils.utils import formatar_moeda as _fmt_moeda
 from shared.branding import sidebar_brand, page_header, login_brand
 from shared.db_from_dropbox_api import ensure_local_db_api
 from shared.dropbox_config import load_dropbox_settings, mask_token  # noqa: F401
@@ -234,8 +235,6 @@ def _entrada_date_bounds() -> Tuple[date, date]:
         return (today, today)
 
 # ------------------------- Metas helpers (LOJA) -------------------------
-def _fmt_moeda(v: float) -> str:
-    return f"R$ {float(v or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def _inicio_semana(dt: date) -> date: return dt - timedelta(days=dt.weekday())
 def _calcular_percentual(valor: float, meta: float) -> float:

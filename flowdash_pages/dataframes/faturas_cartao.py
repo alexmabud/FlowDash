@@ -9,6 +9,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 from flowdash_pages.dataframes.filtros import selecionar_mes
+from utils.utils import formatar_moeda as _fmt_moeda
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -65,12 +66,6 @@ PT_BR_MESES = {
     1: "Jan", 2: "Fev", 3: "Mar", 4: "Abr", 5: "Mai", 6: "Jun",
     7: "Jul", 8: "Ago", 9: "Set", 10: "Out", 11: "Nov", 12: "Dez"
 }
-
-def _fmt_moeda(v) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
 
 def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> pd.io.formats.style.Styler:
     ncols = df.shape[1]

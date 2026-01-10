@@ -22,7 +22,7 @@ from typing import List, Optional, Tuple, TypedDict
 import pandas as pd
 
 from shared.db import get_conn
-from utils.utils import formatar_valor
+from utils.utils import formatar_valor, formatar_moeda as _fmt_ptbr_valor
 from flowdash_pages.cadastros.cadastro_classes import BancoRepository
 from flowdash_pages.lancamentos.shared_ui import canonicalizar_banco, upsert_saldos_bancos
 from flowdash_pages.lancamentos.caixa2.actions_caixa2 import _ensure_snapshot_herdado
@@ -51,11 +51,6 @@ def _to_date_str(data_lanc) -> str:
     if pd.isna(d):
         raise ValueError("Data de lançamento inválida.")
     return d.date().isoformat()
-
-
-def _fmt_ptbr_valor(v: float) -> str:
-    """Formata float em 'R$ X.XXX,YY' (padrão pt-BR) sem depender de locale."""
-    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 
 def carregar_nomes_bancos(caminho_banco: str) -> List[str]:

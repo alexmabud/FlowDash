@@ -9,6 +9,7 @@ from datetime import date
 
 import pandas as pd
 import streamlit as st
+from utils.utils import formatar_moeda as _fmt_moeda
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -112,14 +113,6 @@ def _infer_valor_col(df: pd.DataFrame) -> Optional[str]:
         if pd.api.types.is_numeric_dtype(df[c]):
             return c
     return None
-
-def _fmt_moeda(v) -> str:
-    try:
-        x = float(v)
-    except Exception:
-        x = 0.0
-    s = f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    return f"R$ {s}"
 
 def _legend_html() -> str:
     return """

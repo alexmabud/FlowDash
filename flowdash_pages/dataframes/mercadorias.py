@@ -8,6 +8,7 @@ from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from utils.utils import formatar_moeda as _fmt_moeda
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -78,12 +79,6 @@ _VALOR_CANDIDATAS = [
     "valor_mercadoria", "ValorMercadoria",
     "valor", "Valor", "preco_total", "preço_total", "total",
 ]
-
-def _fmt_moeda(v) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
 
 def _fmt_moeda_str(v) -> str:
     # alias para manter o mesmo nome utilizado em Entradas/Saídas

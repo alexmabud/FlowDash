@@ -14,6 +14,7 @@ from flowdash_pages.dataframes.filtros import (
     selecionar_mes,
     resumo_por_mes,
 )
+from utils.utils import formatar_moeda as _fmt_moeda_str
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -94,12 +95,6 @@ def _safe_to_datetime(s: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(s):
         return s
     return pd.to_datetime(s, errors="coerce")
-
-def _fmt_moeda_str(v) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
 
 def _zebra(df: pd.DataFrame, dark: str = "#12161d", light: str = "#1b212b") -> pd.io.formats.style.Styler:
     ncols = df.shape[1]

@@ -26,6 +26,7 @@ from flowdash_pages.dre.dre import (
 from flowdash_pages.finance_logic import _somar_bancos_totais, _ultimo_caixas_ate
 from flowdash_pages.dashboard.prophet_engine import criar_grafico_previsao
 from flowdash_pages.cadastros.variaveis_dre import get_estoque_atual_estimado
+from utils.utils import formatar_moeda as _fmt_currency
 
 
 # ========================= Helpers gerais =========================
@@ -64,13 +65,6 @@ PAGAMENTO_COLS = [
 ]
 
 MESES_LABELS = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
-
-
-def _fmt_currency(v: float) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
 
 
 def _fmt_percent(v: float) -> str:

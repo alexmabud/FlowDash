@@ -16,6 +16,7 @@ from flowdash_pages.dataframes import saidas as page_saidas
 from flowdash_pages.dataframes import mercadorias as page_mercadorias
 from flowdash_pages.dataframes import emprestimos as page_emprestimos  # mantém
 from flowdash_pages.dataframes import contas_a_pagar as page_contas_a_pagar  # NOVO (padronizado)
+from utils.utils import formatar_moeda as _fmt_moeda
 
 # Descoberta de DB (segura)
 try:
@@ -140,12 +141,6 @@ def _to_numeric(s) -> pd.Series:
     s1 = _to_series1d(s)
     out = pd.to_numeric(s1, errors="coerce")
     return out.astype(float).fillna(0.0)
-
-def _fmt_moeda(v) -> str:
-    try:
-        return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return str(v)
 
 # ============================ Loaders públicos (mantidos) ============================
 
