@@ -35,6 +35,8 @@ import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 
+from shared.db import get_conn
+
 try:
     from utils.utils import formatar_moeda as _fmt
 except Exception:
@@ -203,26 +205,23 @@ def _pick_cols(conn: sqlite3.Connection, table: str) -> Optional[Tuple[Optional[
 
 def _load_df_entrada_from_db(db_path: str) -> pd.DataFrame:
     try:
-        conn = sqlite3.connect(db_path)
+        with get_conn(db_path) as conn:
+            for tb in ["entradas","entrada","lancamentos_entrada","vendas","venda"]:
+                if _table_exists(conn,tb):
+                    user_col, date_col, valu_col = _pick_cols(conn,tb) or (None,None,None)
+                    if not date_col or not valu_col: continue
+                    if user_col:
+                        sql = f'SELECT "{user_col}" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
+                    else:
+                        sql = f'SELECT "LOJA" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
+                    df = pd.read_sql(sql, conn)
+                    df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
+                    df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
+                    df["Usuario"] = df["Usuario"].astype(str).fillna("LOJA")
+                    return df
+            return pd.DataFrame(columns=["Usuario","Data","Valor"])
     except Exception:
         return pd.DataFrame(columns=["Usuario","Data","Valor"])
-    try:
-        for tb in ["entradas","entrada","lancamentos_entrada","vendas","venda"]:
-            if _table_exists(conn,tb):
-                user_col, date_col, valu_col = _pick_cols(conn,tb) or (None,None,None)
-                if not date_col or not valu_col: continue
-                if user_col:
-                    sql = f'SELECT "{user_col}" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
-                else:
-                    sql = f'SELECT "LOJA" AS Usuario, "{date_col}" AS Data, "{valu_col}" AS Valor FROM "{tb}";'
-                df = pd.read_sql(sql, conn)
-                df["Data"] = pd.to_datetime(df["Data"], errors="coerce")
-                df["Valor"] = pd.to_numeric(df["Valor"], errors="coerce").fillna(0.0)
-                df["Usuario"] = df["Usuario"].astype(str).fillna("LOJA")
-                return df
-        return pd.DataFrame(columns=["Usuario","Data","Valor"])
-    finally:
-        conn.close()
 
 def _load_df_metas_from_db(db_path: str) -> pd.DataFrame:
     """
@@ -230,23 +229,20 @@ def _load_df_metas_from_db(db_path: str) -> pd.DataFrame:
     Normaliza `mes` para 'YYYY-MM' quando existir.
     """
     try:
-        conn = sqlite3.connect(db_path)
+        with get_conn(db_path) as conn:
+            if not _table_exists(conn,"metas"):
+                return pd.DataFrame()
+            df = pd.read_sql("SELECT * FROM metas;", conn)
+            if df.empty:
+                return df
+            df["vendedor"] = df.get("vendedor", "LOJA").astype(str).fillna("LOJA")
+            if "mes" in df.columns:
+                df["mes"] = df["mes"].astype(str).str[:7]  # YYYY-MM
+            else:
+                df["mes"] = None
+            return df
     except Exception:
         return pd.DataFrame()
-    try:
-        if not _table_exists(conn,"metas"):
-            return pd.DataFrame()
-        df = pd.read_sql("SELECT * FROM metas;", conn)
-        if df.empty:
-            return df
-        df["vendedor"] = df.get("vendedor", "LOJA").astype(str).fillna("LOJA")
-        if "mes" in df.columns:
-            df["mes"] = df["mes"].astype(str).str[:7]  # YYYY-MM
-        else:
-            df["mes"] = None
-        return df
-    finally:
-        conn.close()
 
 def _auto_carregar_dfs() -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame]]:
     df_e, df_m = st.session_state.get("df_entrada"), st.session_state.get("df_metas")

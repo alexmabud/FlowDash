@@ -26,6 +26,12 @@ import sqlite3
 from pathlib import Path
 import sys
 
+# Add parent directory to path for imports
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from shared.db import get_conn
+
 TRG_IN_NAME = "trg_autosnapshot_on_entrada"
 TRG_OUT_NAME = "trg_autosnapshot_on_saida"
 
@@ -68,7 +74,7 @@ DROP TRIGGER IF EXISTS {TRG_OUT_NAME};
 
 def install(db: Path) -> int:
     try:
-        with sqlite3.connect(str(db)) as conn:
+        with get_conn(str(db)) as conn:
             # entrada
             conn.executescript(SNAPSHOT_SQL_TEMPLATE.format(
                 trg_name=TRG_IN_NAME, table_name="entrada"
@@ -89,7 +95,7 @@ def install(db: Path) -> int:
 
 def remove(db: Path) -> int:
     try:
-        with sqlite3.connect(str(db)) as conn:
+        with get_conn(str(db)) as conn:
             conn.executescript(DROP_SQL)
             conn.commit()
         print(f"🧹 Gatilhos removidos de: {db}")

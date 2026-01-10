@@ -14,10 +14,16 @@ Uso (na raiz do projeto):
 from __future__ import annotations
 import sqlite3
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
+# Add parent directory to path for imports
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from shared.db import get_conn
+
 DATA_DIR = ROOT / "data"
 LIVE_DB = DATA_DIR / "flowdash_data.db"
 TEMPLATE_DB = DATA_DIR / "flowdash_template.db"
@@ -72,8 +78,7 @@ def main() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     print(f"[1/4] Lendo esquema do banco real: {LIVE_DB}")
-    with sqlite3.connect(str(LIVE_DB)) as live:
-        live.execute("PRAGMA foreign_keys = ON;")
+    with get_conn(str(LIVE_DB)) as live:
         user_version = _read_user_version(live)
         ddl_lines = list(_iter_schema_ddl(live))
 
@@ -92,8 +97,7 @@ def main() -> None:
         TEMPLATE_DB.unlink()
 
     print(f"[3/4] Criando novo template vazio: {TEMPLATE_DB}")
-    with sqlite3.connect(str(TEMPLATE_DB)) as tpl:
-        tpl.execute("PRAGMA foreign_keys = ON;")
+    with get_conn(str(TEMPLATE_DB)) as tpl:
         cur = tpl.cursor()
         for stmt in ddl_lines:
             try:
