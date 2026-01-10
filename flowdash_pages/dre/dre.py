@@ -16,6 +16,11 @@ import streamlit as st
 from datetime import date
 from utils import formatar_moeda, formatar_percentual
 from utils.utils import formatar_moeda as _fmt_brl
+from utils.column_discovery import (
+    normalize_string as _normalize_subcat,
+    find_column_in_dataframe as _cap_first_existing,
+    find_column_in_list as _find_col
+)
 import importlib
 
 logger = logging.getLogger(__name__)
@@ -127,15 +132,6 @@ def eg_status_dot(metric: str, pct_value) -> str:
 # ==============================================================================
 # BLOCO CAP (cópia da lógica de Contas a Pagar, com prefixo _cap_ para evitar conflitos)
 # ==============================================================================
-def _cap_first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    for c in candidates:
-        if c in df.columns:
-            return c
-        matches = [col for col in df.columns if col.lower() == c.lower()]
-        if matches:
-            return matches[0]
-    return None
-
 @dataclass
 class CAP_DB:
     path: str
@@ -924,13 +920,6 @@ def _table_cols(db_path: str, table: str) -> List[str]:
             return [str(r[1]).lower() for r in rows]
     except Exception:
         return []
-
-def _find_col(cols_lower: Iterable[str], candidates: Iterable[str]) -> Optional[str]:
-    lowset = {c.lower() for c in cols_lower}
-    for cand in candidates:
-        if cand.lower() in lowset:
-            return cand
-    return None
 
 # ============================== Queries (cache) ==============================
 @st.cache_resource(show_spinner=False, ttl=5)

@@ -10,6 +10,11 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 from utils.utils import formatar_moeda as _fmt_moeda
+from utils.column_discovery import (
+    normalize_string as _norm,
+    infer_reference_column as _infer_ref_col,
+    infer_value_column as _infer_valor_col
+)
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -55,32 +60,7 @@ def _load_livro_caixa(conn: sqlite3.Connection) -> Tuple[pd.DataFrame, str]:
         f"Erro original: {last_err}"
     )
 
-# -------- normalização simples (tira acentos/espacos) --------
-def _norm(s: str) -> str:
-    if not isinstance(s, str):
-        return str(s)
-    s = s.strip().lower()
-    s = (s
-         .replace("á","a").replace("à","a").replace("ã","a").replace("â","a")
-         .replace("é","e").replace("ê","e")
-         .replace("í","i")
-         .replace("ó","o").replace("ô","o").replace("õ","o")
-         .replace("ú","u")
-         .replace("ç","c"))
-    s = " ".join(s.split())
-    return s
-
-def _infer_ref_col(df: pd.DataFrame) -> Optional[str]:
-    """Detecta a coluna de referência (para cores/filtros) com tolerância a acentos/maiusc./espaços."""
-    targets = ["referencia_tabela", "tipo", "tipo_mov", "referencia", "origem"]
-    norm_map = {_norm(c): c for c in df.columns}
-    for t in targets:
-        if t in norm_map:
-            return norm_map[t]
-    for k, v in norm_map.items():
-        if "referencia" in k:
-            return v
-    return None
+# -------- normalização e descoberta de colunas (via column_discovery.py) --------
 
 def _style_row_from_value(val: str, ncols: int) -> List[str]:
     v = (val or "").strip().lower()
@@ -103,16 +83,6 @@ def _style_row_from_value(val: str, ncols: int) -> List[str]:
         style = "background-color: rgba(139,92,246,.18); color: #7c3aed; font-weight: 600;"
         return [style]*ncols
     return [""]*ncols
-
-def _infer_valor_col(df: pd.DataFrame) -> Optional[str]:
-    lower = {c.lower(): c for c in df.columns}
-    for c in ["valor", "amount", "valor_total", "valor_liquido"]:
-        if c in lower:
-            return lower[c]
-    for c in df.columns:
-        if pd.api.types.is_numeric_dtype(df[c]):
-            return c
-    return None
 
 def _legend_html() -> str:
     return """

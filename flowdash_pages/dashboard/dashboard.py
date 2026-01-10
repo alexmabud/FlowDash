@@ -27,6 +27,7 @@ from flowdash_pages.finance_logic import _somar_bancos_totais, _ultimo_caixas_at
 from flowdash_pages.dashboard.prophet_engine import criar_grafico_previsao
 from flowdash_pages.cadastros.variaveis_dre import get_estoque_atual_estimado
 from utils.utils import formatar_moeda as _fmt_currency
+from utils.column_discovery import find_column_in_dataframe as _first_existing
 
 
 # ========================= Helpers gerais =========================
@@ -121,16 +122,6 @@ def _apply_simplified_view(fig, simplified: bool):
                 axis.fixedrange = True
     fig.update_layout(dragmode=False)
     return fig
-
-
-def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    cols_lower = {c.lower(): c for c in df.columns}
-    for cand in candidates:
-        if cand in df.columns:
-            return cand
-        if cand.lower() in cols_lower:
-            return cols_lower[cand.lower()]
-    return None
 
 
 def _resolve_db_path(caminho_banco: Optional[str]) -> str:

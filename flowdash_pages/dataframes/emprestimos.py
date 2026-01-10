@@ -13,6 +13,10 @@ import streamlit as st
 
 from flowdash_pages.dataframes.filtros import selecionar_ano, resumo_por_mes
 from utils.utils import formatar_moeda as _fmt_moeda_str
+from utils.column_discovery import (
+    infer_currency_columns as _infer_currency_cols,
+    infer_percent_columns as _infer_percent_cols
+)
 
 # ================= Descoberta de DB (segura) =================
 try:
@@ -257,36 +261,6 @@ def _parcelas_calendar_from_contracts(df: pd.DataFrame, year: int) -> pd.DataFra
     return out[["Mês","Total"]]
 
 # --------- Monetárias / Percentuais (para a direita) ----------
-def _infer_currency_cols(df: pd.DataFrame) -> List[str]:
-    out: List[str] = []
-    for c in df.columns:
-        name = str(c); lc = name.lower()
-        if ("parcelas" in lc and "valor" not in lc) or ("taxa" in lc and "valor" not in lc):
-            continue
-        if any(k in lc for k in ["valor", "preco", "preço", "principal", "saldo", "multa", "desconto", "montante", "em_aberto", "pago"]):
-            try:
-                s = pd.to_numeric(df[name], errors="coerce")
-                if s.notna().any():
-                    out.append(name)
-            except Exception:
-                pass
-    seen = set()
-    return [c for c in out if not (c in seen or seen.add(c))]
-
-def _infer_percent_cols(df: pd.DataFrame) -> List[str]:
-    out: List[str] = []
-    for c in df.columns:
-        lc = str(c).lower()
-        if "juros" in lc or lc.startswith("taxa") or "percent" in lc:
-            try:
-                s = pd.to_numeric(df[c], errors="coerce")
-                if s.notna().any():
-                    out.append(str(c))
-            except Exception:
-                pass
-    seen = set()
-    return [c for c in out if not (c in seen or seen.add(c))]
-
 # --------- Colunas duplicadas: tornar únicas sem mudar visual (zero-width) ---------
 def _unique_cols_invisible(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:

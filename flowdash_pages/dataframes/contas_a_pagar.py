@@ -17,6 +17,7 @@ from pandas.api.types import is_datetime64_dtype
 import streamlit as st
 
 from utils.utils import formatar_moeda as _fmt_brl
+from utils.column_discovery import find_column_in_dataframe as _first_existing
 
 # ===================== Descoberta de DB (segura) =====================
 def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
@@ -61,15 +62,6 @@ class DB:
 
 
 # ===================== Helpers UI =====================
-def _first_existing(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
-    for c in candidates:
-        if c in df.columns:
-            return c
-        matches = [col for col in df.columns if col.lower() == c.lower()]
-        if matches:
-            return matches[0]
-    return None
-
 def _month_year_label(y: int, m: int) -> str:
     meses = ["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"]
     return f"{meses[m-1]}/{y}"

@@ -9,6 +9,10 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 
 from shared.db import get_conn
+from utils.column_discovery import (
+    normalize_string as _norm,
+    find_column_in_list as _find_col
+)
 
 # ==============================================================================
 # Whitelist de Tabelas Seguras (proteção contra SQL injection)
@@ -87,19 +91,6 @@ def _carregar_tabela(conn: sqlite3.Connection, tabela: str) -> pd.DataFrame:
 
     # Seguro usar f-string aqui pois nome_normalizado foi validado pela whitelist
     return pd.read_sql(f"SELECT * FROM {nome_normalizado}", conn)
-
-def _norm(s: str) -> str:
-    """Normaliza strings para comparação (upper, strip)."""
-    return (s or "").strip().upper()
-
-def _find_col(cols: list[str], candidates: list[str]) -> str | None:
-    """Encontra primeira coluna candidata existente na lista cols."""
-    c_lower = [c.lower() for c in cols]
-    for cand in candidates:
-        if cand.lower() in c_lower:
-            idx = c_lower.index(cand.lower())
-            return cols[idx]
-    return None
 
 def _parse_date_col(df: pd.DataFrame, col: str) -> pd.Series:
     """Converte coluna para datetime, tratando erros."""

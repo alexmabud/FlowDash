@@ -13,6 +13,7 @@ import sqlite3
 from typing import Iterable, Optional, Sequence, Tuple, Dict, Any
 
 import pandas as pd
+from utils.column_discovery import normalize_string as _normalize_str
 
 __all__ = ["TaxaMaquinetaManager"]
 
@@ -67,7 +68,7 @@ class TaxaMaquinetaManager:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _norm(s: Optional[str]) -> str:
-        return (s or "").strip().upper()
+        return _normalize_str(s or "", mode="upper")
 
     @staticmethod
     def _valida_parcelas(parcelas: int) -> int:
