@@ -318,8 +318,8 @@ def render(df_merc: pd.DataFrame) -> None:
             has_data = float(base_mes.iloc[m-1]) > 0.0
             clicked = col.button(label, key=f"btn_merc_{ano}_{m}", use_container_width=True, disabled=not has_data)
             if clicked:
-                mes_sel = m
-                st.session_state["merc_mes_sel"] = mes_sel
+                st.session_state["merc_mes_sel"] = m
+                st.rerun()
 
     # ====== LAYOUT LADO A LADO (1/4 x 3/4) ======
     col_esq, col_dir = st.columns([1, 3])
@@ -362,10 +362,6 @@ def render(df_merc: pd.DataFrame) -> None:
         except Exception as e:
             st.error("Erro ao carregar Mercadorias do mês.")
             st.exception(e)
-            try:
-                con.close()
-            except Exception:
-                pass
             return
         finally:
             try:
