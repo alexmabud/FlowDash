@@ -14,6 +14,7 @@ from typing import Iterable, Optional, Sequence, Tuple, Dict, Any
 
 import pandas as pd
 from utils.column_discovery import normalize_string as _normalize_str
+from shared.db import get_conn
 
 __all__ = ["TaxaMaquinetaManager"]
 
@@ -30,9 +31,7 @@ class TaxaMaquinetaManager:
     # Infra
     # ------------------------------------------------------------------ #
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.caminho_banco)
-        conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        return get_conn(self.caminho_banco)
 
     def _criar_tabela(self) -> None:
         with self._connect() as conn:

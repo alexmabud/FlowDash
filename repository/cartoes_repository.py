@@ -33,6 +33,7 @@ import sqlite3
 from typing import Optional, Tuple, List
 
 from utils.utils import formatar_moeda as _fmt_brl
+from shared.db import get_conn
 
 
 class CartoesRepository:
@@ -46,15 +47,8 @@ class CartoesRepository:
         self.db_path = db_path
 
     def _get_conn(self) -> sqlite3.Connection:
-        """
-        Abre conexão SQLite com PRAGMAs de confiabilidade/performance
-        adequados ao app (WAL, busy_timeout, foreign_keys).
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        return conn
+        """Abre conexão SQLite com configuração centralizada."""
+        return get_conn(self.db_path)
 
     def _validar_conf(self, vencimento_dia: int, dias_fechamento: int) -> None:
         """
@@ -132,12 +126,8 @@ def listar_destinos_fatura_em_aberto(db_path: str):
         except Exception:
             return v or "—"
 
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = get_conn(db_path)
     try:
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.row_factory = sqlite3.Row
 
         rows = conn.execute(
             """

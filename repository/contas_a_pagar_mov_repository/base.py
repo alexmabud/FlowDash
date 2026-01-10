@@ -35,6 +35,7 @@ from typing import Any, Optional
 import sqlite3
 
 from utils.utils import resolve_db_path
+from shared.db import get_conn
 from repository.contas_a_pagar_mov_repository.types import (
     ALLOWED_TIPOS,
     ALLOWED_CATEGORIAS,
@@ -53,23 +54,8 @@ class BaseRepo(object):
     # ------------------ conexão / PRAGMAs ------------------
 
     def _get_conn(self) -> sqlite3.Connection:
-        """
-        Abre conexão SQLite com PRAGMAs padronizados do projeto:
-        - WAL, busy_timeout=30000, foreign_keys=ON, synchronous=NORMAL
-        - detect_types para DATE/DATETIME
-        - row_factory para acesso por nome de coluna
-        """
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=30,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        )
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Abre conexão SQLite com configuração centralizada."""
+        return get_conn(self.db_path)
 
     # ------------------ helpers internos ------------------
 

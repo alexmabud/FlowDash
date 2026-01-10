@@ -2,6 +2,8 @@ import sqlite3
 import pandas as pd
 from typing import Optional, Dict, Any, List, Tuple
 
+from shared.db import get_conn
+
 # === Classe Usuário ========================================================================================
 class Usuario:
     def __init__(self, id: int, nome: str, email: str, perfil: str, ativo: int):
@@ -17,12 +19,12 @@ class Usuario:
 
     def alternar_status(self, caminho_banco: str) -> None:
         novo_status = 0 if self.ativo == 1 else 1
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             conn.execute("UPDATE usuarios SET ativo = ? WHERE id = ?", (novo_status, self.id))
             conn.commit()
 
     def excluir(self, caminho_banco: str) -> None:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             conn.execute("DELETE FROM usuarios WHERE id = ?", (self.id,))
             conn.commit()
 
@@ -35,13 +37,13 @@ class MetaManager:
         self.caminho_banco = caminho_banco
 
     def carregar_usuarios_ativos(self) -> List[Tuple[str, int]]:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             df = conn.execute("SELECT id, nome FROM usuarios WHERE ativo = 1").fetchall()
             return [("LOJA", 0)] + [(nome, id) for id, nome in df]
 
     def salvar_meta(self, id_usuario: int, vendedor: str, mensal: float, semanal_percentual: float,
                     dias_percentuais: List[float], perc_bronze: float, perc_prata: float, mes: str) -> bool:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cursor = conn.execute("SELECT 1 FROM metas WHERE id_usuario = ? AND mes = ?", (id_usuario, mes))
             existe = cursor.fetchone()
 
@@ -73,7 +75,7 @@ class MetaManager:
             return True
 
     def carregar_metas_cadastradas(self) -> List[dict]:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             df = conn.execute("""SELECT COALESCE(u.nome, m.vendedor, 'LOJA') AS Vendedor, m.mes,
                                         m.meta_mensal, m.perc_semanal, m.perc_prata, m.perc_bronze,
                                         m.perc_segunda, m.perc_terca, m.perc_quarta, m.perc_quinta,
@@ -92,7 +94,7 @@ class CartaoCredito:
         self.vencimento = vencimento
 
     def salvar(self, caminho_banco: str) -> None:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS cartoes_credito (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -113,7 +115,7 @@ class CaixaRepository:
         self.caminho_banco = caminho_banco
 
     def buscar_saldo_por_data(self, data: str):
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cursor = conn.execute(
                 "SELECT caixa, caixa_2 FROM saldos_caixas WHERE DATE(data)=DATE(?) LIMIT 1",
                 (data,),
@@ -121,7 +123,7 @@ class CaixaRepository:
             return cursor.fetchone()
 
     def salvar_saldo(self, data: str, caixa: float, caixa_2: float, atualizar: bool = False) -> int:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cur = conn.cursor()
 
             if atualizar:
@@ -172,7 +174,7 @@ class CaixaRepository:
             return saldo_id
 
     def listar_ultimos_saldos(self, limite=15):
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             # Monta SELECT somente com colunas existentes
             cols_df = pd.read_sql("PRAGMA table_info(saldos_caixas);", conn)
             cols = set(cols_df["name"].astype(str).tolist())
@@ -200,7 +202,7 @@ class CorrecaoCaixaRepository:
         self.caminho_banco = caminho_banco
 
     def salvar_ajuste(self, data_: str, valor: float, observacao: str) -> int:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO correcao_caixa (data, valor, observacao)
@@ -210,7 +212,7 @@ class CorrecaoCaixaRepository:
             return cur.lastrowid  # <<< retorna o ID do ajuste
 
     def listar_ajustes(self) -> pd.DataFrame:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             return pd.read_sql("SELECT * FROM correcao_caixa ORDER BY id DESC", conn)
     
 
@@ -220,7 +222,7 @@ class SaldoBancarioRepository:
         self.caminho_banco = caminho_banco
 
     def obter_saldo_por_data(self, data: str) -> Optional[Tuple[float, float, float, float]]:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cursor = conn.execute(
                 "SELECT banco_1, banco_2, banco_3, banco_4 FROM saldos_bancos WHERE data = ?",
                 (data,)
@@ -228,7 +230,7 @@ class SaldoBancarioRepository:
             return cursor.fetchone()
 
     def salvar_saldo(self, data: str, b1: float, b2: float, b3: float, b4: float):
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             conn.execute("""
                 INSERT INTO saldos_bancos (data, banco_1, banco_2, banco_3, banco_4)
                 VALUES (?, ?, ?, ?, ?)
@@ -247,7 +249,7 @@ class EmprestimoRepository:
         self.caminho_banco = caminho_banco
 
     def salvar_emprestimo(self, dados: tuple) -> int:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO emprestimos_financiamentos (
@@ -262,14 +264,14 @@ class EmprestimoRepository:
             return cur.lastrowid
 
     def listar_emprestimos(self) -> pd.DataFrame:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             return pd.read_sql(
                 "SELECT * FROM emprestimos_financiamentos ORDER BY id DESC",
                 conn
             )
 
     def obter_emprestimo(self, id_: int) -> Optional[Dict[str, Any]]:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             df = pd.read_sql(
                 "SELECT * FROM emprestimos_financiamentos WHERE id = ?",
                 conn,
@@ -297,7 +299,7 @@ class EmprestimoRepository:
         valores = [dados.get(c) for c in campos]
         valores.append(id_emp)
 
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             conn.execute(
                 f"UPDATE emprestimos_financiamentos SET {set_clause} WHERE id = ?",
                 valores
@@ -305,7 +307,7 @@ class EmprestimoRepository:
             conn.commit()
 
     def atualizar_emprestimo(self, id_: int, dados: tuple) -> None:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             conn.execute("""
                 UPDATE emprestimos_financiamentos SET
                     data_contratacao = ?, valor_total = ?, tipo = ?, banco = ?, parcelas_total = ?,
@@ -318,7 +320,7 @@ class EmprestimoRepository:
             conn.commit()
 
     def excluir_emprestimo(self, id_: int) -> None:
-        with sqlite3.connect(self.caminho_banco) as conn:
+        with get_conn(self.caminho_banco) as conn:
             conn.execute("DELETE FROM emprestimos_financiamentos WHERE id = ?", (id_,))
             conn.commit()
 
@@ -330,11 +332,7 @@ class BancoRepository:
 
     # Conexão padrão do projeto (estável com OneDrive)
     def _get_conn(self):
-        conn = sqlite3.connect(self.caminho_banco, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        return conn
+        return get_conn(self.caminho_banco)
 
     def _criar_tabela_bancos(self):
         with self._get_conn() as conn:

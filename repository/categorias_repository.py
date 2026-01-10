@@ -35,6 +35,8 @@ import sqlite3
 import pandas as pd
 from typing import Optional, List, Tuple
 
+from shared.db import get_conn
+
 
 class CategoriasRepository:
     """
@@ -49,14 +51,8 @@ class CategoriasRepository:
         self._ensure_schema()
 
     def _get_conn(self) -> sqlite3.Connection:
-        """
-        Abre conexão SQLite configurada com PRAGMAs de confiabilidade/performance.
-        """
-        conn = sqlite3.connect(self.db_path, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        return conn
+        """Abre conexão SQLite com configuração centralizada."""
+        return get_conn(self.db_path)
 
     def _ensure_schema(self) -> None:
         """

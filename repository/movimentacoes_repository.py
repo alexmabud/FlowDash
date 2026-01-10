@@ -4,6 +4,7 @@ import sqlite3
 import hashlib
 from typing import Optional, Dict, Any
 from utils.utils import resolve_db_path
+from shared.db import get_conn
 
 
 class MovimentacoesRepository:
@@ -20,22 +21,8 @@ class MovimentacoesRepository:
         self.garantir_schema()  # garante tabela/índices/colunas na inicialização
 
     def _get_conn(self) -> sqlite3.Connection:
-        """
-        Abre conexão SQLite com PRAGMAs padronizados do projeto
-        (WAL, busy timeout, foreign keys, synchronous NORMAL)
-        e parsing de tipos (DATE/DATETIME).
-        """
-        conn = sqlite3.connect(
-            self.db_path,
-            timeout=30,
-            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-        )
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA busy_timeout=30000;")
-        conn.execute("PRAGMA foreign_keys=ON;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.row_factory = sqlite3.Row
-        return conn
+        """Abre conexão SQLite com configuração centralizada."""
+        return get_conn(self.db_path)
 
     def _colunas_existentes(self, conn: sqlite3.Connection) -> set:
         rows = conn.execute("PRAGMA table_info(movimentacoes_bancarias);").fetchall()
