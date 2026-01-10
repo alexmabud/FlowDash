@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import date
 from flowdash_pages.utils_timezone import hoje_br
+from shared.db import get_conn
 
 def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
     """
@@ -26,7 +27,7 @@ def verificar_pendencia_bloqueante(caminho_banco: str) -> str | None:
     """
     
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             cursor = conn.cursor()
             
             # 1. Busca a última data movimentada antes de hoje
@@ -66,7 +67,7 @@ def verificar_se_dia_esta_fechado(caminho_banco: str, data_alvo: date) -> bool:
     Isso impede edições em dias já encerrados.
     """
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT 1 FROM fechamento_caixa WHERE DATE(data) = DATE(?) LIMIT 1", 

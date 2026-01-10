@@ -21,6 +21,7 @@ from utils.column_discovery import (
     find_column_in_dataframe as _cap_first_existing,
     find_column_in_list as _find_col
 )
+from shared.db import get_conn
 import importlib
 
 logger = logging.getLogger(__name__)
@@ -137,9 +138,7 @@ class CAP_DB:
     path: str
 
     def conn(self) -> sqlite3.Connection:
-        cx = sqlite3.connect(self.path)
-        cx.row_factory = sqlite3.Row
-        return cx
+        return get_conn(self.path)
 
     def q(self, sql: str, params: tuple = ()) -> pd.DataFrame:
         try:
@@ -204,10 +203,7 @@ def _cap_loans_totals(df_view: pd.DataFrame) -> Dict[str, float]:
 # ==============================================================================
 # ============================== Helpers ==============================
 def _conn(db_path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(db_path, detect_types=sqlite3.PARSE_DECLTYPES)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA busy_timeout = 5000;")
-    return conn
+    return get_conn(db_path)
 
 def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
     """Resolve caminho do banco de forma resiliente.

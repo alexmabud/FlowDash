@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Tuple, Optional, Dict
 
 from utils.utils import formatar_moeda as _fmt
+from shared.db import get_conn
 
 # Tenta importar Prophet
 try:
@@ -49,7 +50,7 @@ def _buscar_previsao_congelada(db_path: str, mes_ref: str) -> Optional[Dict]:
     """Busca se já existe uma meta congelada para aquele mês."""
     if not db_path: return None
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_conn(db_path) as conn:
             _init_tabela_previsoes(conn)
             cursor = conn.cursor()
             cursor.execute("SELECT realista, pessimista, otimista FROM historico_previsoes_ia WHERE mes_referencia = ?", (mes_ref,))
@@ -69,7 +70,7 @@ def _salvar_previsao_congelada(db_path: str, mes_ref: str, dados: Dict):
     """Salva a previsão para não mudar mais."""
     if not db_path: return
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_conn(db_path) as conn:
             _init_tabela_previsoes(conn)
             cursor = conn.cursor()
             cursor.execute("""

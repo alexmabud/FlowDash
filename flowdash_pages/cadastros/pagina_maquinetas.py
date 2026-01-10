@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from services.taxas import TaxaMaquinetaManager
+from shared.db import get_conn
 
 # Página de Cadastro de Taxas por Maquineta =========================================================================
 def pagina_taxas_maquinas(caminho_banco: str):
@@ -28,7 +29,7 @@ def pagina_taxas_maquinas(caminho_banco: str):
             maquineta = maquineta_selecionada
 
         # Carregar bancos cadastrados
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             df_bancos = pd.read_sql("SELECT nome FROM bancos_cadastrados ORDER BY nome", conn)
             opcoes_bancos = df_bancos["nome"].tolist()
 

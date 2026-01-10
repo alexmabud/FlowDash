@@ -129,7 +129,7 @@ def _obs_deposito_padrao(valor: float, extra: str = "") -> str:
 # =============================== I/O banco ===============================
 def carregar_bancos_cadastrados(caminho_banco: str) -> pd.DataFrame:
     """Lê tabela bancos_cadastrados (id, nome)."""
-    with sqlite3.connect(caminho_banco) as conn:
+    with get_conn(caminho_banco) as conn:
         return pd.read_sql("SELECT id, nome FROM bancos_cadastrados ORDER BY nome", conn)
 
 

@@ -18,6 +18,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 from html import escape
 
+from shared.db import get_conn
+
 # Imports internos do FlowDash
 # Preferir o pacote `utils` (que já faz alias se preciso); cair para utils.utils se necessário.
 try:
@@ -452,8 +454,7 @@ def _sanity_cap_check(ret: dict, db_path: str = "data/flowdash_data.db") -> None
     try:
         parcela_id = ret.get("parcela_id")
         obrigacao_id = ret.get("obrigacao_id")
-        with sqlite3.connect(db_path, timeout=10) as con:
-            con.row_factory = sqlite3.Row
+        with get_conn(db_path) as con:
             # Tenta descobrir obrigacao_id via parcela se necessário
             if not obrigacao_id and parcela_id:
                 r = con.execute("SELECT obrigacao_id FROM contas_a_pagar_mov WHERE id = ? LIMIT 1", (int(parcela_id),)).fetchone()

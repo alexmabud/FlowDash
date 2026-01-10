@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 from flowdash_pages.cadastros.cadastro_classes import CartaoCredito
+from shared.db import get_conn
 
 
 # Página de Cadastro de Cartões de Crédito ========================================================================
@@ -49,7 +50,7 @@ def pagina_cartoes_credito(caminho_banco: str):
 
     st.markdown("### 📋 Cartões de Crédito Cadastrados")
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             df = pd.read_sql("""
                 SELECT nome AS Cartão, 
                        fechamento AS 'Fechamento (dia)', 

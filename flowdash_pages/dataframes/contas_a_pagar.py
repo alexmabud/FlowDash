@@ -18,6 +18,7 @@ import streamlit as st
 
 from utils.utils import formatar_moeda as _fmt_brl
 from utils.column_discovery import find_column_in_dataframe as _first_existing
+from shared.db import get_conn
 
 # ===================== Descoberta de DB (segura) =====================
 def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
@@ -49,9 +50,7 @@ def _ensure_db_path_or_raise(pref: Optional[str] = None) -> str:
 class DB:
     path: str
     def conn(self) -> sqlite3.Connection:
-        cx = sqlite3.connect(self.path)
-        cx.row_factory = sqlite3.Row
-        return cx
+        return get_conn(self.path)
     def q(self, sql: str, params: tuple = ()) -> pd.DataFrame:
         try:
             with self.conn() as cx:

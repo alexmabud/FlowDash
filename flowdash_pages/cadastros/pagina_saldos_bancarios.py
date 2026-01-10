@@ -22,6 +22,7 @@ from datetime import date, datetime
 import pandas as pd
 import streamlit as st
 
+from shared.db import get_conn
 from repository.movimentacoes_repository import MovimentacoesRepository
 from flowdash_pages.cadastros.cadastro_classes import BancoRepository
 from utils.utils import formatar_moeda as _formatar_moeda_br
@@ -222,7 +223,7 @@ def pagina_saldos_bancarios(caminho_banco: str) -> None:
 
     if st.button("💾 Lançar Saldo (somar na mesma data)", use_container_width=True, disabled=(not usuario_atual)):
         try:
-            with sqlite3.connect(caminho_banco) as conn:
+            with get_conn(caminho_banco) as conn:
                 cur = conn.cursor()
 
                 # Garante as colunas para todos os bancos
@@ -292,7 +293,7 @@ def pagina_saldos_bancarios(caminho_banco: str) -> None:
     st.markdown("### 📋 Últimos Lançamentos (saldos_bancos)")
 
     try:
-        with sqlite3.connect(caminho_banco) as conn:
+        with get_conn(caminho_banco) as conn:
             # ordena por id se existir; senão por data
             cols_info = conn.execute("PRAGMA table_info(saldos_bancos)").fetchall()
             cols_existentes = {c[1] for c in cols_info}
