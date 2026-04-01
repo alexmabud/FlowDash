@@ -20,6 +20,7 @@ workalendar>=17.0
 requests>=2.32
 dropbox
 bcrypt>=4.0.0
+pytz
 
 # Single File App Dependencies
 extra-streamlit-components
