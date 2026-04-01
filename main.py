@@ -526,7 +526,8 @@ def _resolve_page_callable(module_path: str) -> Optional[Callable]:
     """
     try:
         mod = importlib.import_module(module_path)
-    except Exception:
+    except Exception as e:
+        st.error(f"Erro ao importar '{module_path}': {e}")
         return None
 
     seg = module_path.rsplit(".", 1)[-1]
