@@ -519,7 +519,6 @@ def _inject_args(fn: Callable) -> object:
     return fn(*args, **kwargs)
 
 
-@st.cache_resource
 def _resolve_page_callable(module_path: str) -> Optional[Callable]:
     """
     Importa o módulo e resolve a função de renderização mais provável.
